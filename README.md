@@ -24,15 +24,39 @@ This is not production code. This is research code to write a paper. The paper w
 ## Setup
 
 Conda owns the interpreter and the compiled dependencies; `pyproject.toml` owns
-the package. On ISAAC:
+the package. On ISAAC, run this from inside the clone:
 
 ```
-module load anaconda3
-conda env create -f environment.yml
-conda activate pmedm_vb
+PROJ=$(dirname "$PWD")                    # the project allocation holding this repo
+
+module load anaconda3/2024.06             # NOT bare `anaconda3` -- that is 2021.05
+conda --version                           # expect >= 23.10, i.e. the libmamba solver
+
+export CONDA_PKGS_DIRS=$PROJ/conda_pkgs   # keep the tarball cache out of $HOME
+conda env create -f environment.yml --prefix $PROJ/envs/pmedm_vb
+conda activate $PROJ/envs/pmedm_vb
 pip install -e . --no-deps
-export PMEDM_VB_DATA=/lustre/isaac/scratch/$USER/pmedm_vb_data
 ```
 
-`PMEDM_VB_DATA` sets the download cache root; it defaults to `./data`, which is
-wrong on a cluster.
+Three things that all have the same cause -- nothing large may live in a quota'd
+home directory:
+
+- `--prefix` puts the environment in project space. Without it conda writes to
+  `~/.conda/envs`, and a PyTorch environment runs to several GB.
+- `CONDA_PKGS_DIRS` moves the *package cache*, which `--prefix` does not. It
+  defaults to `~/.conda/pkgs` and holds the downloaded tarballs.
+- `PMEDM_VB_DATA` sets the download cache root, and defaults to `./data`:
+
+```
+export PMEDM_VB_DATA=<scratch space>/pmedm_vb_data
+```
+
+`<scratch space>` is a placeholder. Take the real path from the OIT storage
+documentation for ISAAC rather than guessing -- an earlier version of this file
+had a made-up path here.
+
+The module version matters because conda's solver changed: libmamba became the
+default in conda 23.10.0 (Nov 2023), so the 2021.05 module is on the old classic
+solver, which handles `pytorch` + `conda-forge` + a pinned Python badly. If your
+shell already shows `(base)` from the default module, `module swap` or start a
+fresh shell rather than loading a second anaconda over the first.

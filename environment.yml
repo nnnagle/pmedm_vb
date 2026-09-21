@@ -3,19 +3,26 @@
 # mixed conda/pip ABI breakage, and it is the path that gets a CUDA-linked
 # PyTorch on ISAAC.
 #
-# On ISAAC-NG:
+# On ISAAC-NG, from inside the clone:
 #
-#     module load anaconda3
-#     conda env create -f environment.yml
-#     conda activate pmedm_vb
+#     PROJ=$(dirname "$PWD")
+#     module load anaconda3/2024.06           # NOT bare `anaconda3` (= 2021.05)
+#     conda --version                         # expect >= 23.10 (libmamba solver)
+#     export CONDA_PKGS_DIRS=$PROJ/conda_pkgs
+#     conda env create -f environment.yml --prefix $PROJ/envs/pmedm_vb
+#     conda activate $PROJ/envs/pmedm_vb
 #     pip install -e . --no-deps
 #
 # --no-deps because conda has already satisfied everything below. The editable
 # install is the analogue of devtools::load_all(): edits to src/ take effect
 # without reinstalling.
 #
-# Point PMEDM_VB_DATA at Lustre scratch rather than $HOME before running
-# anything that downloads; PUMS state files are large and home is quota'd.
+# The 2024.06 module matters: libmamba became conda's default solver in 23.10.0,
+# and the 2021.05 default module predates it. Nothing large may land in a quota'd
+# home directory, which needs all three of --prefix (the environment),
+# CONDA_PKGS_DIRS (the tarball cache, which --prefix does not move) and
+# PMEDM_VB_DATA (the download cache, which otherwise defaults to ./data).
+# See README.md for the full explanation.
 name: pmedm_vb
 channels:
   - pytorch
