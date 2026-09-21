@@ -35,8 +35,16 @@ conda --version                           # expect >= 23.10, i.e. the libmamba s
 export CONDA_PKGS_DIRS=$PROJ/conda_pkgs   # keep the tarball cache out of $HOME
 conda env create -f environment.yml --prefix $PROJ/envs/pmedm_vb
 conda activate $PROJ/envs/pmedm_vb
-pip install -e . --no-deps
+
+python -m pip --version                   # must report a pip inside the prefix
+python -m pip install -e . --no-deps
 ```
+
+Use `python -m pip`, not bare `pip`. `environment.yml` installs pip into the
+environment, but `python -m pip` additionally guarantees the install binds to
+the interpreter that is actually active rather than to whatever pip `PATH`
+happens to find first -- which on a module-based cluster is often a read-only
+base installation with a pip too old for editable installs.
 
 Three things that all have the same cause -- nothing large may live in a quota'd
 home directory:

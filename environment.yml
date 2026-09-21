@@ -11,7 +11,8 @@
 #     export CONDA_PKGS_DIRS=$PROJ/conda_pkgs
 #     conda env create -f environment.yml --prefix $PROJ/envs/pmedm_vb
 #     conda activate $PROJ/envs/pmedm_vb
-#     pip install -e . --no-deps
+#     python -m pip --version                  # must be the pip inside the prefix
+#     python -m pip install -e . --no-deps
 #
 # --no-deps because conda has already satisfied everything below. The editable
 # install is the analogue of devtools::load_all(): edits to src/ take effect
@@ -36,3 +37,8 @@ dependencies:
   - pyarrow
   - requests
   - pytest
+  # Required. Conda's `python` package does not pull pip in, and without it a
+  # bare `pip` falls through PATH to the module's base Anaconda pip -- which
+  # writes to the wrong site-packages and is too old for PEP 660 editable
+  # installs of a pyproject-only project (needs pip >= 21.3).
+  - pip
