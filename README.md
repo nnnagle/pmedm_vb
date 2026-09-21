@@ -21,6 +21,41 @@ This is not production code. This is research code to write a paper. The paper w
 - [ ] write solvers (`src/pmedm_vb/solvers/`)
 - [ ] write experiments (`experiments/`)
 
+## Every session
+
+The steps under Setup below are one-time. Each new login needs only:
+
+```
+module purge                              # ISAAC auto-loads 2021.05 at login
+module load anaconda3/2024.06
+source $(conda info --base)/etc/profile.d/conda.sh
+conda activate /lustre/isaac24/proj/UTK0496/envs/pmedm_vb
+export PMEDM_VB_DATA=/lustre/isaac24/scratch/$USER/pmedm_vb_data
+
+$CONDA_PREFIX/bin/python -V               # sanity check: expect 3.11
+```
+
+Then invoke the interpreter as `$CONDA_PREFIX/bin/python`, not `python` -- see
+the note on `PATH` at the end of Setup.
+
+As a `~/.bashrc` function, so it is one word:
+
+```
+pmedm() {
+    module purge
+    module load anaconda3/2024.06
+    source "$(conda info --base)/etc/profile.d/conda.sh"
+    conda activate /lustre/isaac24/proj/UTK0496/envs/pmedm_vb
+    export PMEDM_VB_DATA=/lustre/isaac24/scratch/$USER/pmedm_vb_data
+    mkdir -p "$PMEDM_VB_DATA"
+    alias py='$CONDA_PREFIX/bin/python'
+    echo "pmedm_vb: $($CONDA_PREFIX/bin/python -V), data -> $PMEDM_VB_DATA"
+}
+```
+
+The echo is a guard: a reported version other than 3.11 means something has
+shadowed the environment again.
+
 ## Setup
 
 Conda owns the interpreter and the compiled dependencies; `pyproject.toml` owns
