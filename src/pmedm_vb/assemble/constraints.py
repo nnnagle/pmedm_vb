@@ -312,9 +312,15 @@ def tenure(geography: str = "block group") -> ConstraintTable:
 
     The table publishes only owner and renter, so ``TEN`` code 4 -- occupied
     without payment of rent -- is folded into one of them. It is grouped with
-    renters here. **That is not verified**: the published titles cannot settle
-    it, and the check is empirical, comparing each candidate mapping weighted by
-    ``WGTP`` against the published estimates.
+    renters: two independent expectations agree on that, which is worth more
+    than one and is still not a check, since the published titles cannot settle
+    it either way.
+
+    The check is empirical and costs nothing extra, because it falls out of the
+    first marginal reproduction: weight each candidate mapping by ``WGTP`` and
+    compare against the published ``B25003_002``/``_003``. Only one of them can
+    match, so this is confirmed the first time the table is built rather than
+    carried as an assumption.
     """
     published = {"owner": ("B25003_002",), "renter": ("B25003_003",)}
     return ConstraintTable(
