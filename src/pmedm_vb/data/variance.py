@@ -124,18 +124,26 @@ def available_tables(area: StudyArea) -> list[str]:
 def is_available(area: StudyArea, table: str, *, geography: str) -> bool:
     """Whether ``table`` is published at ``geography``, by asking the server.
 
-    One HEAD request per call. The published table-by-geography list is an
-    ``.xlsx``, which would pull in an Excel reader for a question a 200 or a
-    404 already answers.
+    One request for a single byte, rather than a ``HEAD``: whether the server
+    honours ``HEAD`` on this tree has not been established, and a range request
+    answers the question without relying on it. A 206 is the normal reply; a
+    200 means the range was ignored and the body began, which equally means the
+    file is there.
+
+    The published table-by-geography list is an ``.xlsx``, which would pull in
+    an Excel reader for a question a status code already answers.
     """
     import requests
 
-    response = requests.head(
+    response = requests.get(
         replicate_url(area, table, geography=geography),
+        headers={"Range": "bytes=0-0"},
         timeout=30,
+        stream=True,
         allow_redirects=True,
     )
-    return response.status_code == 200
+    response.close()
+    return response.status_code in (200, 206)
 
 
 def download_replicates(

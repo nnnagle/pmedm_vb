@@ -276,16 +276,51 @@ coding and the published geographies have to agree.
 
 ## Reproducing a probe
 
-Directory listings, with the boilerplate stripped:
+`tools/verify_vintage.sh` replays this sequence against any vintage. Run it
+before adopting a new one:
+
+```bash
+tools/verify_vintage.sh              # defaults to 2024, 5-year, TN, Knox County
+tools/verify_vintage.sh 2025 5 47 093
+PYTHON=$CONDA_PREFIX/bin/python tools/verify_vintage.sh   # on a cluster
+```
+
+It checks, in order: reachability; that the vintage is published for both
+products; that `140` and `150` exist; that the documentation files the code
+builds by name are present; table coverage at both levels; that the state's
+PUMS zips exist; that the crosswalk columns are unchanged and the PUMS
+dictionary still carries a single `PUMA` column; and finally an end-to-end
+run that recomputes MOEs and compares them against the published ones. It
+exits non-zero if anything a downloader depends on is missing.
+
+The last of those is the real accuracy check. The files publish their own
+`MOE`, so the SDR implementation can be checked against Census's own answer.
+Published MOEs are integers and recomputed ones are continuous, so agreement
+means **max |difference| ≤ 0.5 with median ≈ 0.25** — the signature of
+`published == round(ours)`, and a bound that a transposed or misread replicate
+column breaks immediately. The 2023 vintage gives max 0.500, median 0.248.
+
+Two things the script encodes that are easy to get wrong by hand:
+
+- **Match `[BC]`, not `B`.** A `B`-only pattern silently hides `C02003`,
+  `C15010`, `C17002`, `C24010` and `C24030`, all published at block group.
+  This produced a wrong coverage claim during the original probing.
+- **Never probe a PUMS zip with a plain `GET`.** They are hundreds of
+  megabytes. The script uses a one-byte range request, which also avoids
+  assuming the server honours `HEAD` — an assumption never tested against this
+  tree. `variance.is_available()` asks the same way for the same reason.
+
+For a listing by hand, with the page furniture stripped:
 
 ```bash
 L() { curl -sS --max-time 60 "$1" \
       | grep -oE 'href="[^"]+"' | sed 's/href="//;s/"$//' \
       | grep -vE '^(https?:|/|\?C=)' | sort -u; }
 
-L https://www2.census.gov/programs-surveys/acs/replicate_estimates/2023/data/5-year/150/
+L https://www2.census.gov/programs-surveys/acs/replicate_estimates/2024/data/5-year/150/
 ```
 
 census.gov is unreachable from some sandboxed environments (the egress proxy
 returns 403 to `CONNECT`), so this may need running from a host with direct
-access.
+access. The script detects that in its first check and stops rather than
+reporting misleading failures.
