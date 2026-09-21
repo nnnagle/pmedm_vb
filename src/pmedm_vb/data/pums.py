@@ -70,9 +70,11 @@ IDENTIFIER_COLUMNS = {
 #: Base weight column by record type; the replicate weights append 1-80.
 WEIGHT_PREFIXES = {"person": "PWGTP", "housing": "WGTP"}
 
-#: Read as text so that leading zeros survive. PUMS writes ``SERIALNO`` as a
-#: string in any case (``"2020GQ0000001"``), but the state code and ``PUMA``
-#: are numeric-looking and would silently lose theirs.
+#: Always read as text, whatever the dictionary says. PUMS writes ``SERIALNO``
+#: as a string in any case (``"2020GQ0000001"``), but the state code and
+#: ``PUMA`` are numeric-looking and would silently lose their leading zeros.
+#: Requested variables get the same treatment when the dictionary declares them
+#: character -- see :func:`text_columns`.
 TEXT_COLUMNS = ("RT", "SERIALNO", "PUMA", *STATE_COLUMN_ALIASES)
 
 
@@ -80,6 +82,28 @@ def weight_columns(record_type: str) -> tuple[str, ...]:
     """Base weight followed by the 80 replicate weights."""
     prefix = WEIGHT_PREFIXES[record_type]
     return (prefix, *(f"{prefix}{i}" for i in range(1, 81)))
+
+
+def text_columns(area: StudyArea, wanted: list[str]) -> set[str]:
+    """Which of ``wanted`` must be read as text rather than inferred.
+
+    :data:`TEXT_COLUMNS` always, plus every requested variable the data
+    dictionary declares character (``C``).
+
+    Inferring a character column's type is silently destructive in a way no
+    error reports. ``HISP`` is ``C`` width 2, so ``"01"`` -- not Hispanic --
+    becomes ``1.0``, and a constraint written as ``HISP != "01"`` is then true
+    for every record in the file. ``TEN`` is ``C`` width 1, and its ``"b"``
+    (N/A: group quarters or vacant) becomes ``NaN``, which a ``groupby``
+    then drops. Both produce wrong numbers rather than a failure.
+
+    The declaration is read rather than hand-listed on purpose: a list has to
+    be kept in step with both the constraint set and each vintage's renames,
+    which is the same maintenance the ``ST``/``STATE`` rename already defeated.
+    """
+    declared = variables(area).set_index("variable")["dtype"]
+    character = {column for column in wanted if declared.get(column) == "C"}
+    return set(TEXT_COLUMNS) | character
 
 
 def pums_url(area: StudyArea, *, record_type: str = "person") -> str:
@@ -131,6 +155,9 @@ def load_pums(
     always retained regardless of ``variables``, since the assembly step needs
     them to build the design weights and the PUMA-to-zone allocation.
 
+    Every requested variable the dictionary declares character is read as text;
+    see :func:`text_columns` for why that is not optional.
+
     The state column is normalised to :data:`STATE_COLUMN` whatever the file
     spells it, and a ``puma_geoid`` column is added: state and ``PUMA``
     concatenated, which is the form :mod:`pmedm_vb.data.geography` matches
@@ -145,7 +172,7 @@ def load_pums(
     # Every alias is read; exactly one is expected back, and which one is a
     # property of the file rather than something the caller should know.
     wanted = [*required, *STATE_COLUMN_ALIASES]
-    dtypes = {column: str for column in TEXT_COLUMNS}
+    dtypes = {column: str for column in text_columns(area, wanted)}
 
     frames = []
     with zipfile.ZipFile(path) as archive:
