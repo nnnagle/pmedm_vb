@@ -1,0 +1,31 @@
+# Conda owns the interpreter and every compiled dependency; pyproject owns the
+# package itself. Keeping all binary artifacts from one solver is what avoids
+# mixed conda/pip ABI breakage, and it is the path that gets a CUDA-linked
+# PyTorch on ISAAC.
+#
+# On ISAAC-NG:
+#
+#     module load anaconda3
+#     conda env create -f environment.yml
+#     conda activate pmedm_vb
+#     pip install -e . --no-deps
+#
+# --no-deps because conda has already satisfied everything below. The editable
+# install is the analogue of devtools::load_all(): edits to src/ take effect
+# without reinstalling.
+#
+# Point PMEDM_VB_DATA at Lustre scratch rather than $HOME before running
+# anything that downloads; PUMS state files are large and home is quota'd.
+name: pmedm_vb
+channels:
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pytorch
+  - numpy
+  - scipy
+  - pandas
+  - pyarrow
+  - requests
+  - pytest

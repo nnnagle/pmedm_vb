@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local data cache. config.DEFAULT_DATA_DIR puts this in the repo root when
+# PMEDM_VB_DATA is unset, and PUMS files must never end up in git.
+/data/

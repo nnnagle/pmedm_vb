@@ -16,7 +16,23 @@ This is not production code. This is research code to write a paper. The paper w
 - Simulator
 
 ## ToDo:
-Determine package folder structure
-write downloaders
-write solvers
-write experiments
+- [x] Determine package folder structure
+- [ ] write downloaders (`src/pmedm_vb/data/`)
+- [ ] write solvers (`src/pmedm_vb/solvers/`)
+- [ ] write experiments (`experiments/`)
+
+## Setup
+
+Conda owns the interpreter and the compiled dependencies; `pyproject.toml` owns
+the package. On ISAAC:
+
+```
+module load anaconda3
+conda env create -f environment.yml
+conda activate pmedm_vb
+pip install -e . --no-deps
+export PMEDM_VB_DATA=/lustre/isaac/scratch/$USER/pmedm_vb_data
+```
+
+`PMEDM_VB_DATA` sets the download cache root; it defaults to `./data`, which is
+wrong on a cluster.
