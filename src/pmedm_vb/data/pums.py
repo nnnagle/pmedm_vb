@@ -20,6 +20,8 @@ vintage before assuming it is.
 
 from __future__ import annotations
 
+import csv
+import io
 import zipfile
 from pathlib import Path
 
@@ -29,6 +31,9 @@ from pmedm_vb.config import StudyArea
 from pmedm_vb.data.cache import fetch_cached
 
 PUMS_BASE = "https://www2.census.gov/programs-surveys/acs/data/pums"
+
+#: The machine-readable data dictionary lives outside the PUMS data tree.
+PUMS_DICT_BASE = "https://www2.census.gov/programs-surveys/acs/tech_docs/pums/data_dict"
 
 RECORD_TYPES = {"person": "p", "housing": "h"}
 
@@ -142,3 +147,129 @@ def load_pums(
     frame["PUMA"] = frame["PUMA"].str.zfill(5)
     frame["puma_geoid"] = frame["ST"] + frame["PUMA"]
     return frame
+
+
+def dictionary_url(area: StudyArea) -> str:
+    """URL of the machine-readable PUMS data dictionary for this vintage."""
+    start = area.year - area.span + 1
+    return f"{PUMS_DICT_BASE}/PUMS_Data_Dictionary_{start}-{area.year}.csv"
+
+
+def data_dictionary(area: StudyArea, *, force: bool = False) -> pd.DataFrame:
+    """The PUMS data dictionary as a frame, one row per declaration.
+
+    The published file is a ragged CSV -- two row shapes sharing no width, which
+    is why it is parsed with :mod:`csv` rather than handed to pandas:
+
+    ``NAME,<var>,<type>,<width>,<description>`` declares a variable;
+    ``VAL,<var>,<type>,<width>,<lo>,<hi>,<label>`` declares one of its values.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns ``record`` (``"NAME"`` or ``"VAL"``), ``variable``, ``dtype``,
+        ``width``, ``lo``, ``hi`` and ``label``. A ``NAME`` row carries its
+        description in ``label`` and nothing in ``lo``/``hi``.
+
+    Notes
+    -----
+    ``lo`` and ``hi`` stay text. They are usually numeric ranges but not always
+    -- a PUMA bound is ``"00101"``, and reading it as a number destroys the
+    padding the same way it would in the data itself.
+
+    A variable declared for both record types appears twice, since the
+    dictionary describes each separately. :func:`variables` and
+    :func:`variable_labels` de-duplicate; this function does not, so that the
+    file is represented as published.
+
+    Raises
+    ------
+    ValueError
+        If no declaration parses at all, which means the published format
+        changed rather than that the vintage has no dictionary.
+    """
+    path = fetch_cached(
+        dictionary_url(area),
+        subdir=f"pums/{area.year}-{area.span}yr",
+        force=force,
+    )
+    # utf-8-sig for the same reason geography.py uses it: a BOM would otherwise
+    # end up inside the first field. errors="replace" because a stray byte in a
+    # value label should not cost the whole dictionary.
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+
+    rows = []
+    for fields in csv.reader(io.StringIO(text)):
+        if not fields:
+            continue
+        kind = fields[0].strip()
+        if kind == "NAME" and len(fields) >= 5:
+            rows.append(("NAME", *fields[1:4], None, None, fields[4]))
+        elif kind == "VAL" and len(fields) >= 7:
+            rows.append(("VAL", *fields[1:7]))
+
+    if not rows:
+        raise ValueError(
+            f"no NAME or VAL rows parsed from {path} -- the dictionary format "
+            f"has probably changed; inspect the file and re-run with force=True"
+        )
+
+    frame = pd.DataFrame(
+        rows,
+        columns=["record", "variable", "dtype", "width", "lo", "hi", "label"],
+    )
+    frame["width"] = pd.to_numeric(frame["width"], errors="coerce").astype("Int64")
+    return frame
+
+
+def variables(area: StudyArea) -> pd.DataFrame:
+    """One row per declared variable: ``variable``, ``dtype``, ``width``, ``label``.
+
+    The answer to "does this vintage carry the column I think it does", which is
+    worth asking before writing a constraint against it -- PUMS renames columns
+    between vintages, and a missing one otherwise surfaces as a ``KeyError``
+    from :func:`load_pums` after the download.
+    """
+    frame = data_dictionary(area)
+    names = frame[frame["record"] == "NAME"]
+    return (
+        names[["variable", "dtype", "width", "label"]]
+        .drop_duplicates(subset="variable")
+        .sort_values("variable")
+        .reset_index(drop=True)
+    )
+
+
+def variable_labels(area: StudyArea, variable: str) -> pd.DataFrame:
+    """Value ranges and their labels for one variable: ``lo``, ``hi``, ``label``.
+
+    This is what a constraint cell has to be written against. A published table
+    cell is a set of PUMS codes, and the mapping from one to the other is the
+    break-for-break correspondence that silent misfit comes from -- so read the
+    labels rather than assuming the coding.
+
+    Raises
+    ------
+    KeyError
+        If the variable declares no values. A continuous column such as
+        ``AGEP`` or ``HINCP`` legitimately has none; check :func:`variables`
+        to tell that apart from a name that does not exist in this vintage.
+    """
+    frame = data_dictionary(area)
+    values = frame[(frame["record"] == "VAL") & (frame["variable"] == variable)]
+    if values.empty:
+        declared = variable in set(frame["variable"])
+        raise KeyError(
+            f"{variable!r} declares no values in the "
+            f"{area.year - area.span + 1}-{area.year} dictionary"
+            + (
+                " -- it is declared, so it is probably continuous; see variables()"
+                if declared
+                else " -- and is not declared at all in this vintage"
+            )
+        )
+    return (
+        values[["lo", "hi", "label"]]
+        .drop_duplicates()
+        .reset_index(drop=True)
+    )

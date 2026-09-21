@@ -41,6 +41,22 @@ NAME,<var>,<type>,<width>,"description"
 VAL,<var>,<type>,<width>,<lo>,<hi>,<label>
 ```
 
+The two shapes have different widths, so this is a **ragged CSV** and pandas
+cannot read it directly; `pums.data_dictionary()` parses it with the `csv`
+module into one tidy frame. Three properties of the file that the parser
+encodes:
+
+- `lo` and `hi` are **text, not numbers**. Usually numeric ranges, but a PUMA
+  bound is `00101` and reading it as a number destroys the padding exactly as
+  it would in the data.
+- A variable declared for **both record types appears twice** -- the dictionary
+  describes person and housing separately. `variables()` and
+  `variable_labels()` de-duplicate; `data_dictionary()` does not, so the frame
+  represents the file as published.
+- A **continuous column declares no `VAL` rows** (`AGEP`, `HINCP`). That is not
+  the same as a column absent from the vintage, and `variable_labels()`
+  distinguishes the two in its error.
+
 Two columns matter more than the rest:
 
 - **`PUMA`** — in the 2020–2024 dictionary this is a single 5-character column

@@ -26,6 +26,71 @@ This is not production code. This is research code to write a paper. The paper w
 - [ ] write solvers (`src/pmedm_vb/solvers/`)
 - [ ] write experiments (`experiments/`)
 
+## Choosing constraint tables
+
+A PMEDM run is defined as much by *which* published tables constrain it as by
+the solver. Two questions decide that, and `pmedm_vb.data` answers both without
+downloading anything large.
+
+**1. What is published, and where?** Coverage thins as geography gets finer, and
+block group is the binding constraint. `coverage()` returns one row per table
+with a boolean per summary level:
+
+```python
+from pmedm_vb.config import StudyArea
+from pmedm_vb.data.variance import coverage
+
+area = StudyArea(name="knox", state="47", year=2024, counties=("093",))
+cov = coverage(area)
+
+cov[["tract", "block_group"]].sum()     # 2020-2024: 133 and 73
+cov[cov.block_group]                    # what a block-group run may use
+```
+
+It reads the directory index once per level. Built table by table from
+`is_available()` the same answer costs one request per table per geography --
+268 for this vintage -- so `is_available()` is for asking about *a* table, and
+`coverage()` for asking about all of them. `table_list()` gives the master list
+with titles; `published_tables()` gives one level's IDs alone.
+
+Two things to know when reading the result. Match `[BC]`, not `B`: `C02003`,
+`C15010`, `C17002`, `C24010` and `C24030` all reach block group, and a `B`-only
+habit hides them. And `B16001` is published at *neither* level despite appearing
+in the master list, which is why the master count exceeds the tract count.
+
+**2. Can PUMS reproduce its cells?** A table published at block group is still
+unusable if the microdata cannot rebuild its categories break for break. That is
+checked against the data dictionary, which is a small CSV -- not the
+hundred-megabyte data zips:
+
+```python
+from pmedm_vb.data.pums import variables, variable_labels
+
+variables(area)                          # every declared column, with its label
+variable_labels(area, "JWTRNS")          # the codes one cell must be written against
+```
+
+`variables()` answers "does this vintage carry the column I think it does",
+which is worth asking first because PUMS renames columns between vintages and a
+missing one otherwise surfaces as a `KeyError` after the download.
+`variable_labels()` gives the value codes and their published meanings --
+the correspondence between a table cell and a set of PUMS codes is where silent
+misfit comes from, so it is read rather than assumed. A continuous column
+(`AGEP`, `HINCP`) declares no values and raises; `data_dictionary()` returns the
+whole file if you would rather query it yourself.
+
+**Granularity is a separate choice from table choice.** Because the replicate
+files carry all 80 replicates rather than only a margin of error, collapsing
+published cells is exact: summing cells is a linear map on the estimates, and
+the same map applied to the replicate deviations gives the collapsed
+constraints' covariance including the correlations between the merged cells. So
+`B01001`'s 23 age bands per sex can become five without approximation --
+which matters at block group, where fine bands are mostly zeros and every zero
+cell falls back on the modelled `w·k` variance.
+
+Everything above is cached under `$PMEDM_VB_DATA/raw/` on first call and reused
+after, so re-running while deciding costs nothing. Pass `force=True` to refetch.
+
 ## Every session
 
 The steps under Setup below are one-time. Each new login needs only:
