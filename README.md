@@ -26,35 +26,38 @@ This is not production code. This is research code to write a paper. The paper w
 The steps under Setup below are one-time. Each new login needs only:
 
 ```
-module purge                              # ISAAC auto-loads 2021.05 at login
-module load anaconda3/2024.06
-source $(conda info --base)/etc/profile.d/conda.sh
+module purge
+source /sw/isaac/applications/anaconda3/2024.06/rhel8_cascadelake_binary/anaconda3-2024.06/etc/profile.d/conda.sh
 conda activate /lustre/isaac24/proj/UTK0496/envs/pmedm_vb
 export PMEDM_VB_DATA=/lustre/isaac24/scratch/$USER/pmedm_vb_data
 
-$CONDA_PREFIX/bin/python -V               # sanity check: expect 3.11
+python -c "import sys; print(sys.executable)"   # must be inside the env
 ```
 
-Then invoke the interpreter as `$CONDA_PREFIX/bin/python`, not `python` -- see
-the note on `PATH` at the end of Setup.
+**Do not `module load anaconda3`.** Source conda's shell hook from the module's
+installation path directly, as above. Loading the module prepends its own `bin`
+to `PATH`, and `conda activate` does not win that race -- the prompt and
+`CONDA_PREFIX` change while `python` still resolves to the module's interpreter
+(Python 3.8 or 3.12 depending on which module, rather than this environment's
+3.11). Not loading it means there is nothing to lose the race to. Sourcing the
+hook by absolute path gives you the `conda` command without that side effect.
 
 As a `~/.bashrc` function, so it is one word:
 
 ```
 pmedm() {
     module purge
-    module load anaconda3/2024.06
-    source "$(conda info --base)/etc/profile.d/conda.sh"
+    source /sw/isaac/applications/anaconda3/2024.06/rhel8_cascadelake_binary/anaconda3-2024.06/etc/profile.d/conda.sh
     conda activate /lustre/isaac24/proj/UTK0496/envs/pmedm_vb
     export PMEDM_VB_DATA=/lustre/isaac24/scratch/$USER/pmedm_vb_data
     mkdir -p "$PMEDM_VB_DATA"
-    alias py='$CONDA_PREFIX/bin/python'
-    echo "pmedm_vb: $($CONDA_PREFIX/bin/python -V), data -> $PMEDM_VB_DATA"
+    echo "pmedm_vb: $(python -V), $(python -c 'import sys; print(sys.executable)')"
 }
 ```
 
-The echo is a guard: a reported version other than 3.11 means something has
-shadowed the environment again.
+The echo is a guard: anything other than 3.11 from inside the env prefix means
+something has shadowed it again, and `$CONDA_PREFIX/bin/python` is the fallback
+that always works.
 
 ## Setup
 
@@ -64,9 +67,8 @@ the package. On ISAAC, run this from inside the clone:
 ```
 PROJ=$(dirname "$PWD")                    # the project allocation holding this repo
 
-module purge                              # drop the 2021.05 loaded at login
-module load anaconda3/2024.06             # NOT bare `anaconda3` -- that is 2021.05
-source $(conda info --base)/etc/profile.d/conda.sh
+module purge                              # drop the anaconda auto-loaded at login
+source /sw/isaac/applications/anaconda3/2024.06/rhel8_cascadelake_binary/anaconda3-2024.06/etc/profile.d/conda.sh
 conda --version                           # expect >= 23.10, i.e. the libmamba solver
 
 export CONDA_PKGS_DIRS=$PROJ/conda_pkgs   # keep the tarball cache out of $HOME
@@ -77,26 +79,19 @@ python -c "import sys; print(sys.executable)"   # MUST be inside $CONDA_PREFIX
 $CONDA_PREFIX/bin/python -m pip install -e . --no-deps
 ```
 
-**On the `python` you get -- address the interpreter by path, not by name.**
-On ISAAC a loaded anaconda module keeps its own `bin` ahead of the environment
-on `PATH`, and `conda activate` does not win that race. Observed directly:
-after `module purge`, `module load anaconda3/2024.06`, sourcing conda's shell
-hook and activating the prefix, `CONDA_PREFIX` and the shell prompt were both
-correct while `sys.executable` still pointed at the module's base interpreter.
-The `source .../conda.sh` line above is kept because it is harmless and correct
-practice, but it is *not* sufficient here.
+**Why the install goes through `$CONDA_PREFIX/bin/python`.** It is immune to
+`PATH` ordering, which is worth having in the one step that is hard to redo.
+If a loaded anaconda module ever gets ahead of the environment on `PATH`, the
+symptom is obscure rather than obvious: the module's python carries an old pip
+(the 2021.05 module ships pip 21.0.1), which is below the pip 21.3 that PEP 660
+editable installs of a pyproject-only project require, so `pip install -e .`
+demands a `setup.py` that this project correctly does not have. The
+`sys.executable` check on the preceding line catches that before it happens.
 
-The consequence is a confusing failure rather than an obvious one: the module's
-python carries an old pip (2021.05 ships pip 21.0.1), which is below the pip
-21.3 that PEP 660 editable installs of a pyproject-only project require, so
-`pip install -e .` demands a `setup.py` that this project correctly does not
-have.
-
-So: run the `sys.executable` check after activating, and if it reports anything
-outside `$CONDA_PREFIX`, do not try to repair `PATH` -- just invoke
-`$CONDA_PREFIX/bin/python` directly, as the block above does. The same applies
-in Slurm scripts, where `PATH` is even less predictable than in a login shell.
-Prefer `$CONDA_PREFIX/bin/python script.py` over `python script.py` throughout.
+Not loading the anaconda module at all -- see **Every session** above -- is what
+keeps `PATH` clean in the first place. In Slurm scripts, where `PATH` is less
+predictable than in a login shell, prefer `$CONDA_PREFIX/bin/python script.py`
+regardless.
 
 Three things that all have the same cause -- nothing large may live in a quota'd
 home directory:

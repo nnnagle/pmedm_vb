@@ -7,8 +7,10 @@
 #
 #     PROJ=$(dirname "$PWD")
 #     module purge
-#     module load anaconda3/2024.06           # NOT bare `anaconda3` (= 2021.05)
-#     source $(conda info --base)/etc/profile.d/conda.sh
+#     source /sw/isaac/applications/anaconda3/2024.06/\
+#            rhel8_cascadelake_binary/anaconda3-2024.06/etc/profile.d/conda.sh
+#     # NB: source the hook directly; do NOT `module load anaconda3`, which
+#     # prepends its own bin to PATH and shadows the environment's python.
 #     conda --version                         # expect >= 23.10 (libmamba solver)
 #     export CONDA_PKGS_DIRS=$PROJ/conda_pkgs
 #     conda env create -f environment.yml --prefix $PROJ/envs/pmedm_vb
