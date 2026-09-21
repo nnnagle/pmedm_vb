@@ -97,7 +97,8 @@ done
 master=$(curl -sS --max-time 60 "$VRE/$YEAR/documentation/$SPAN-year/VRE_TABLE_LIST_$YEAR.csv" \
          | tail -n +2 | wc -l)
 printf '  master list: %s tables\n' "$master"
-echo "  (2019-2023 for reference: 132 master, 131 at tract, 73 at block group)"
+echo "  (for reference: 2019-2023 gave 132 master, 131 tract, 73 block group;"
+echo "                  2020-2024 gives 134 master, 133 tract, 73 block group)"
 echo "  NB: match [BC], not B alone -- a B-only pattern hides C02003, C15010,"
 echo "      C17002, C24010 and C24030, all published at block group."
 
@@ -121,14 +122,19 @@ else
 fi
 
 note "6. PUMA crosswalk and PUMS PUMA coding"
-header=$(curl -sS --max-time 60 "$REL/2020_Census_Tract_to_2020_PUMA.txt" | head -1)
+# Range-limited so head does not SIGPIPE a full download, and CR-stripped:
+# the file is CRLF, so a naive comparison fails on an invisible trailing \r.
+# pandas handles CRLF natively, so this only ever affected this check.
+header=$(curl -sS --max-time 60 -r 0-128 "$REL/2020_Census_Tract_to_2020_PUMA.txt" 2>/dev/null \
+         | head -1 | tr -d '\r')
 printf '  %s\n' "$header"
 [ "$header" = "STATEFP,COUNTYFP,TRACTCE,PUMA5CE" ] \
     && pass "crosswalk columns unchanged" \
     || fail "crosswalk columns changed -- geography.py assumes these four"
+# The dictionary describes PUMA once per record type, so the line repeats.
 puma=$(curl -sS --max-time 90 \
        "https://www2.census.gov/programs-surveys/acs/tech_docs/pums/data_dict/PUMS_Data_Dictionary_${START}-${YEAR}.csv" \
-       | grep -i '^NAME,PUMA' | head -2)
+       | tr -d '\r' | grep -i '^NAME,PUMA' | sort -u)
 printf '  %s\n' "$puma"
 if [ "$(printf '%s' "$puma" | grep -c .)" -eq 0 ]; then
     fail "no PUMA entry found in the ${START}-${YEAR} data dictionary"

@@ -98,11 +98,14 @@ TBLID, GEOID, NAME, ORDER, TITLE, ESTIMATE, MOE, CME, SE, Var_Rep1 … Var_Rep80
 
 ### Coverage
 
-| scope | tables |
-|---|---|
-| master list (`VRE_TABLE_LIST_{year}.csv`, columns `TBLID,TITLE`) | 132 |
-| tract (`140`) | 131 |
-| block group (`150`) | **73** |
+| scope | 2019–2023 | 2020–2024 |
+|---|---|---|
+| master list (`VRE_TABLE_LIST_{year}.csv`, columns `TBLID,TITLE`) | 132 | 134 |
+| tract (`140`) | 131 | 133 |
+| block group (`150`) | **73** | **73** |
+
+Two tables were added at tract between the vintages. Block group is unchanged,
+which is the count that actually constrains a PMEDM run.
 
 Coverage is strictly nested — the 73 at block group are a subset of the master
 list. Block group is the binding constraint for PMEDM.
@@ -305,6 +308,10 @@ Two things the script encodes that are easy to get wrong by hand:
 - **Match `[BC]`, not `B`.** A `B`-only pattern silently hides `C02003`,
   `C15010`, `C17002`, `C24010` and `C24030`, all published at block group.
   This produced a wrong coverage claim during the original probing.
+- **The crosswalk file is CRLF.** `head -1` on it yields a trailing `\r`, so a
+  naive string comparison against the expected header fails on something
+  invisible. pandas handles CRLF natively, so this only ever bites shell
+  checks, never `geography.py`.
 - **Never probe a PUMS zip with a plain `GET`.** They are hundreds of
   megabytes. The script uses a one-byte range request, which also avoids
   assuming the server honours `HEAD` — an assumption never tested against this
