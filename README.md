@@ -42,19 +42,26 @@ python -c "import sys; print(sys.executable)"   # MUST be inside $CONDA_PREFIX
 $CONDA_PREFIX/bin/python -m pip install -e . --no-deps
 ```
 
-**On the `python` you get.** A loaded anaconda module puts its own `bin` on
-`PATH`, and `conda activate` does not reliably win that race unless conda's
-shell hook has been sourced -- which is what the `source .../conda.sh` line
-does. Without it `conda activate` sets `CONDA_PREFIX` and changes your prompt
-while `python` still resolves to the module's interpreter. On ISAAC that
-interpreter is Python 3.8 with pip 21.0.1, which is below the pip 21.3 needed
-for editable installs of a pyproject-only project, so the install fails with a
-confusing demand for `setup.py`.
+**On the `python` you get -- address the interpreter by path, not by name.**
+On ISAAC a loaded anaconda module keeps its own `bin` ahead of the environment
+on `PATH`, and `conda activate` does not win that race. Observed directly:
+after `module purge`, `module load anaconda3/2024.06`, sourcing conda's shell
+hook and activating the prefix, `CONDA_PREFIX` and the shell prompt were both
+correct while `sys.executable` still pointed at the module's base interpreter.
+The `source .../conda.sh` line above is kept because it is harmless and correct
+practice, but it is *not* sufficient here.
 
-The `sys.executable` check catches this in one line. Invoking
-`$CONDA_PREFIX/bin/python` explicitly sidesteps it entirely, and is worth
-preferring in Slurm scripts too, where `PATH` is even less predictable than in
-a login shell.
+The consequence is a confusing failure rather than an obvious one: the module's
+python carries an old pip (2021.05 ships pip 21.0.1), which is below the pip
+21.3 that PEP 660 editable installs of a pyproject-only project require, so
+`pip install -e .` demands a `setup.py` that this project correctly does not
+have.
+
+So: run the `sys.executable` check after activating, and if it reports anything
+outside `$CONDA_PREFIX`, do not try to repair `PATH` -- just invoke
+`$CONDA_PREFIX/bin/python` directly, as the block above does. The same applies
+in Slurm scripts, where `PATH` is even less predictable than in a login shell.
+Prefer `$CONDA_PREFIX/bin/python script.py` over `python script.py` throughout.
 
 Three things that all have the same cause -- nothing large may live in a quota'd
 home directory:
