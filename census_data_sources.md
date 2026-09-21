@@ -8,9 +8,10 @@ exists because the endpoints are not self-describing: directory layouts differ
 between products, casing is inconsistent, coverage varies by geography, and the
 variance formulas live in a PDF.
 
-The vintage probed was **2019–2023 (2023 ACS 5-year)**. A 2020–2024 vintage is
-published; its layouts were not re-checked, though its PUMS data dictionary
-was. See [Open questions](#open-questions) for what is known to vary.
+The vintage probed in detail was **2019–2023 (2023 ACS 5-year)**. The
+**2020–2024** vintage was then confirmed to have the same shape and is the one
+to use — see [Vintage](#vintage) below. Replicate tables are published for 2014
+through 2024. See [Open questions](#open-questions) for what remains unchecked.
 
 This document is **descriptive**. `src/pmedm_vb/data/` holds the authoritative
 constants and is what runs; if the two disagree, this file is stale.
@@ -237,12 +238,38 @@ geometry source is only needed if the simulator wants to map its output.
 
 ---
 
+## Vintage: use 2020–2024
+
+Verified 2026-09-21 that the 2024 tree matches the 2023 one in every respect
+the code depends on:
+
+| check | result |
+|---|---|
+| summary-level directories | identical set; `140` and `150` present |
+| documentation filenames | `VRE_TABLE_LIST_2024.csv`, `VRE_AVERAGE_WEIGHT_2024.csv`, `2020-2024_Appendix_A_Average_Weights_and_k-Values.{pdf,xlsx}`, `2020-2024_Variance_Replicate_Table_Documentation.pdf` |
+| block-group coverage | 73 tables, same as 2023 |
+| PUMS | `pums/2024/` holds both `1-Year/` and `5-Year/` |
+
+Every one of those paths is what `pmedm_vb.data` constructs from `area.year`
+and `area.span`, so selecting the vintage is `StudyArea(..., year=2024)` and
+nothing else.
+
+**Why this vintage rather than 2023.** The 2020–2024 PUMS dictionary codes a
+single `PUMA` column on the 2020 Census definition (§1), so the period does not
+span the PUMA redraw and the `rel2020` crosswalk applies to all five years
+without reconciliation. The 2019–2023 period does span it, and its dictionary
+was never checked.
+
+PUMS and the replicate tables must come from the *same* vintage — the PUMA
+coding and the published geographies have to agree.
+
+---
+
 ## Open questions
 
 | question | why it matters |
 |---|---|
-| **Vintage choice, 2023 vs 2024** | Undecided. Replicate tables were listed for 2023 only; whether 2024 publishes them was not checked. PUMS and the replicate tables must come from the same vintage. |
-| **PUMA vintage for 2019–2023** | That dictionary was not checked. The period spans the PUMA redraw, so it may not carry the single clean `PUMA` column 2020–2024 does. Confirm before using 2023. |
+| **2019–2023 PUMA coding** | Its PUMS dictionary was never checked, and that period spans the redraw. Only matters if a run needs that vintage; 2020–2024 avoids the question. |
 | **Table-by-geography list** | `VRE_Table_and_Geo_List_{year}.xlsx` holds per-geography coverage but was not parsed, to avoid an Excel reader dependency. `is_available()` asks the server with a HEAD request instead. |
 | **Suppressed values** | Whether `ESTIMATE` or the replicates ever carry non-numeric suppression markers was not observed. The parser coerces, so such a value becomes `NaN` rather than failing loudly. |
 | **PUMS zip members** | The PUMS zips were never opened — too large to probe casually. `load_pums` reads every `.csv` member and concatenates, which is correct whether a state ships one file or several. |
