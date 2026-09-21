@@ -128,9 +128,17 @@ note "6. PUMA crosswalk and PUMS PUMA coding"
 header=$(curl -sS --max-time 60 -r 0-128 "$REL/2020_Census_Tract_to_2020_PUMA.txt" 2>/dev/null \
          | head -1 | tr -d '\r')
 printf '  %s\n' "$header"
-[ "$header" = "STATEFP,COUNTYFP,TRACTCE,PUMA5CE" ] \
-    && pass "crosswalk columns unchanged" \
-    || fail "crosswalk columns changed -- geography.py assumes these four"
+# Compare on the alphanumerics and commas alone. A CR, a UTF-8 BOM or stray
+# whitespace all render invisibly and would otherwise report the columns as
+# changed when they have not; none of them affects pandas, which is what
+# actually reads this file. On failure, dump the bytes rather than leaving
+# the next person to guess which invisible character it was.
+if [ "$(printf '%s' "$header" | tr -cd 'A-Za-z0-9,')" = "STATEFP,COUNTYFP,TRACTCE,PUMA5CE" ]; then
+    pass "crosswalk columns unchanged"
+else
+    fail "crosswalk columns changed -- geography.py assumes these four"
+    printf '%s' "$header" | od -c | head -3 | sed 's/^/        /'
+fi
 # The dictionary describes PUMA once per record type, so the line repeats.
 puma=$(curl -sS --max-time 90 \
        "https://www2.census.gov/programs-surveys/acs/tech_docs/pums/data_dict/PUMS_Data_Dictionary_${START}-${YEAR}.csv" \

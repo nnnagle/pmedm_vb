@@ -182,7 +182,10 @@ geography.
 File: `VRE_AVERAGE_WEIGHT_{year}.csv` (documentation directory)
 
 Columns `GEOGRAPHY,STATE,AVERAGE_WEIGHT`; 53 rows — US, 50 states, DC, PR.
-`STATE` is FIPS, with `US` for the national row. Tennessee (47) = 17.
+`STATE` is FIPS, with `US` for the national row. The values are
+vintage-specific: Tennessee (47) is 17 for 2019–2023 and 18 for 2020–2024,
+so the file must be read for the vintage in use rather than cached across
+vintages.
 
 Block groups and tracts nest within states, so the national row is never the
 right one for our purposes.
@@ -208,7 +211,7 @@ pop 25,000 → k = 14; pop 75,659 → k = 22.
 **Consequence:** `B01003` is fetched on any run using the zero-count model,
 whether or not it is a constraint. And since block groups run roughly
 600–3,000 people, nearly all land in the k = 4 bracket — a Tennessee block
-group's zero cells get `Var = 17 × 4 = 68`, `MOE ≈ 13.6`.
+group's zero cells get `Var = w × 4` — 68 for 2019–2023, 72 for 2020–2024.
 
 ---
 
