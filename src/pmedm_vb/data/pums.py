@@ -11,11 +11,22 @@ the capitalised ``5-Year`` here, against the lowercase ``5-year`` used in the
 variance replicate tree.
 
 The 2020-2024 data dictionary codes PUMA in a single five-character ``PUMA``
-column on the 2020 Census definition, to be combined with ``ST`` for a unique
-code. There is no ``PUMA10``/``PUMA20`` split to reconcile, which is what lets
-:mod:`pmedm_vb.data.geography` work from the 2020 crosswalk alone. A vintage
-spanning the PUMA redraw may not be so simple; check the dictionary for that
-vintage before assuming it is.
+column on the 2020 Census definition, to be combined with the state code for a
+unique code. There is no ``PUMA10``/``PUMA20`` split to reconcile, which is what
+lets :mod:`pmedm_vb.data.geography` work from the 2020 crosswalk alone. A
+vintage spanning the PUMA redraw may not be so simple; check the dictionary for
+that vintage before assuming it is.
+
+That state code is spelled ``STATE`` in the 2020-2024 files, not ``ST``. This
+module read ``ST`` until the first run that opened a zip, having taken the name
+from documentation rather than from a header -- hence
+:data:`STATE_COLUMN_ALIASES`, which resolves it against the file and raises
+naming both candidates if neither is there.
+
+A state's archive holds one CSV (``psam_{p,h}{st}.csv``, 241 columns for
+housing) beside a README PDF. ``load_pums`` reads every ``.csv`` member and
+concatenates, which is correct for one member and would stay correct for
+several.
 """
 
 from __future__ import annotations
@@ -37,21 +48,32 @@ PUMS_DICT_BASE = "https://www2.census.gov/programs-surveys/acs/tech_docs/pums/da
 
 RECORD_TYPES = {"person": "p", "housing": "h"}
 
+#: Name the state column is normalised to, whatever the file calls it.
+STATE_COLUMN = "STATE"
+
+#: How the state column has been spelled, in preference order. The 2020-2024
+#: files publish ``STATE``; ``ST`` is kept because older vintages used it and
+#: this module is parameterised by year. Resolved against the file rather than
+#: assumed -- it *was* assumed, and the assumption went unchallenged until the
+#: first run that opened a zip, because nothing else reads the header.
+STATE_COLUMN_ALIASES = ("STATE", "ST")
+
 #: Columns kept regardless of what the caller asks for. ``SERIALNO`` joins
-#: person records to their housing record, ``SPORDER`` identifies the person
-#: within it, and ``ST`` plus ``PUMA`` place the record geographically.
+#: person records to their housing record and ``SPORDER`` identifies the person
+#: within it. The state column is handled separately, through
+#: :data:`STATE_COLUMN_ALIASES`, since its name varies.
 IDENTIFIER_COLUMNS = {
-    "person": ("SERIALNO", "SPORDER", "ST", "PUMA"),
-    "housing": ("SERIALNO", "ST", "PUMA"),
+    "person": ("SERIALNO", "SPORDER", "PUMA"),
+    "housing": ("SERIALNO", "PUMA"),
 }
 
 #: Base weight column by record type; the replicate weights append 1-80.
 WEIGHT_PREFIXES = {"person": "PWGTP", "housing": "WGTP"}
 
 #: Read as text so that leading zeros survive. PUMS writes ``SERIALNO`` as a
-#: string in any case (``"2020GQ0000001"``), but ``ST`` and ``PUMA`` are
-#: numeric-looking and would silently lose theirs.
-TEXT_COLUMNS = ("RT", "SERIALNO", "ST", "PUMA")
+#: string in any case (``"2020GQ0000001"``), but the state code and ``PUMA``
+#: are numeric-looking and would silently lose theirs.
+TEXT_COLUMNS = ("RT", "SERIALNO", "PUMA", *STATE_COLUMN_ALIASES)
 
 
 def weight_columns(record_type: str) -> tuple[str, ...]:
@@ -109,15 +131,20 @@ def load_pums(
     always retained regardless of ``variables``, since the assembly step needs
     them to build the design weights and the PUMA-to-zone allocation.
 
-    A ``puma_geoid`` column is added: ``ST`` and ``PUMA`` concatenated, which
-    is the form :mod:`pmedm_vb.data.geography` matches zones on.
+    The state column is normalised to :data:`STATE_COLUMN` whatever the file
+    spells it, and a ``puma_geoid`` column is added: state and ``PUMA``
+    concatenated, which is the form :mod:`pmedm_vb.data.geography` matches
+    zones on.
     """
     path = download_pums(area, record_type=record_type)
-    wanted = list(
+    required = list(
         dict.fromkeys(
             [*IDENTIFIER_COLUMNS[record_type], *weight_columns(record_type), *variables]
         )
     )
+    # Every alias is read; exactly one is expected back, and which one is a
+    # property of the file rather than something the caller should know.
+    wanted = [*required, *STATE_COLUMN_ALIASES]
     dtypes = {column: str for column in TEXT_COLUMNS}
 
     frames = []
@@ -137,15 +164,25 @@ def load_pums(
                 )
     frame = pd.concat(frames, ignore_index=True)
 
-    missing = [column for column in wanted if column not in frame.columns]
+    missing = [column for column in required if column not in frame.columns]
     if missing:
         raise KeyError(f"columns absent from {path.name}: {missing}")
 
+    found = [column for column in STATE_COLUMN_ALIASES if column in frame.columns]
+    if not found:
+        raise KeyError(
+            f"no state column in {path.name}: looked for {list(STATE_COLUMN_ALIASES)}. "
+            f"Check the {area.year - area.span + 1}-{area.year} data dictionary via "
+            f"variables() -- a vintage may have renamed it again"
+        )
+    frame = frame.rename(columns={found[0]: STATE_COLUMN})
+    frame = frame.drop(columns=[c for c in found[1:] if c in frame.columns])
+
     # Widths are fixed by the data dictionary; pad defensively in case a
     # vintage publishes them unquoted and a reader drops the leading zero.
-    frame["ST"] = frame["ST"].str.zfill(2)
+    frame[STATE_COLUMN] = frame[STATE_COLUMN].str.zfill(2)
     frame["PUMA"] = frame["PUMA"].str.zfill(5)
-    frame["puma_geoid"] = frame["ST"] + frame["PUMA"]
+    frame["puma_geoid"] = frame[STATE_COLUMN] + frame["PUMA"]
     return frame
 
 

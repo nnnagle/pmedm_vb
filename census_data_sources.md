@@ -60,13 +60,26 @@ encodes:
 Two columns matter more than the rest:
 
 - **`PUMA`** — in the 2020–2024 dictionary this is a single 5-character column
-  on the **2020 Census definition**, combined with `ST` for a unique code.
+  on the **2020 Census definition**, combined with `STATE` for a unique code.
   There is no `PUMA10`/`PUMA20` split to reconcile. This is what allows the
   crosswalk in §4 to work from the 2020 file alone.
 - **`SERIALNO`** — character, e.g. `2020GQ0000001`. Never read it as numeric.
 
-`ST` and `PUMA` are numeric-looking and lose leading zeros if a reader infers
+- **`STATE`** — the state code is spelled `STATE` in the 2020–2024 files,
+  **not `ST`**. Confirmed two ways: the `psam_h47.csv` header, and the
+  dictionary's own `STATE,C,2,State code` row, with `PUMA`'s label reading "use
+  with STATE for unique code". This document asserted `ST` until 2026-09-21,
+  taken from documentation rather than from a header, and nothing caught it
+  because nothing else reads one. `pums.STATE_COLUMN_ALIASES` now resolves the
+  name against the file and raises naming both candidates if neither is there.
+
+`STATE` and `PUMA` are numeric-looking and lose leading zeros if a reader infers
 their type. Read as text, then zero-pad defensively.
+
+**Archive layout.** A state's zip holds one CSV — `psam_h{st}.csv`, 241 columns
+for housing — beside `ACS2020_2024_PUMS_README.pdf`. `load_pums` reads every
+`.csv` member and concatenates, which is correct for one and stays correct for
+several.
 
 ---
 
@@ -243,7 +256,7 @@ BOM** (`EF BB BF`) and LF line endings; read it with `utf-8-sig`.
 | derived | construction | width |
 |---|---|---|
 | tract GEOID | `STATEFP + COUNTYFP + TRACTCE` | 2+3+6 = 11 |
-| PUMA GEOID | `STATEFP + PUMA5CE` | 2+5 = 7, matching PUMS `ST + PUMA` |
+| PUMA GEOID | `STATEFP + PUMA5CE` | 2+5 = 7, matching PUMS `STATE + PUMA` |
 
 **Block group nesting is string slicing.** A 12-character block group GEOID
 contains its parent tract GEOID as its first 11 characters. No spatial join.
@@ -309,7 +322,6 @@ with no tables.
 |---|---|
 | **2019–2023 PUMA coding** | Its PUMS dictionary was never checked, and that period spans the redraw. Only matters if a run needs that vintage; 2020–2024 avoids the question. |
 | **Suppressed values** | Whether `ESTIMATE` or the replicates ever carry non-numeric suppression markers was not observed. The parser coerces, so such a value becomes `NaN` rather than failing loudly. |
-| **PUMS zip members** | The PUMS zips were never opened — too large to probe casually. `load_pums` reads every `.csv` member and concatenates, which is correct whether a state ships one file or several. |
 
 ## Reproducing a probe
 

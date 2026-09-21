@@ -140,10 +140,25 @@ else
     fail "crosswalk columns changed -- geography.py assumes these four"
     printf '%s' "$header" | od -c | head -3 | sed 's/^/        /'
 fi
-# The dictionary describes PUMA once per record type, so the line repeats.
-puma=$(curl -sS --max-time 90 \
+# Fetched once: two questions are asked of it, and it is not a small file.
+dict=$(curl -sS --max-time 90 \
        "https://www2.census.gov/programs-surveys/acs/tech_docs/pums/data_dict/PUMS_Data_Dictionary_${START}-${YEAR}.csv" \
-       | tr -d '\r' | grep -i '^NAME,PUMA' | sort -u)
+       | tr -d '\r')
+
+# The state column is STATE in 2020-2024 and was ST in earlier vintages. That
+# rename went unnoticed until a run opened a zip, because the name was taken
+# from documentation and nothing read a header -- so it is checked here now.
+state_col=$(printf '%s\n' "$dict" | grep -iE '^NAME,(STATE|ST),' | cut -d, -f2 | sort -u)
+printf '  state column: %s\n' "${state_col:-<none>}"
+if [ -z "$state_col" ]; then
+    fail "no STATE or ST column in the ${START}-${YEAR} dictionary -- the state
+        code has been renamed again; pums.STATE_COLUMN_ALIASES needs the new name"
+else
+    pass "state column present as $state_col"
+fi
+
+# The dictionary describes PUMA once per record type, so the line repeats.
+puma=$(printf '%s\n' "$dict" | grep -i '^NAME,PUMA' | sort -u)
 printf '  %s\n' "$puma"
 if [ "$(printf '%s' "$puma" | grep -c .)" -eq 0 ]; then
     fail "no PUMA entry found in the ${START}-${YEAR} data dictionary"
