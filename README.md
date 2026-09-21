@@ -29,22 +29,32 @@ the package. On ISAAC, run this from inside the clone:
 ```
 PROJ=$(dirname "$PWD")                    # the project allocation holding this repo
 
+module purge                              # drop the 2021.05 loaded at login
 module load anaconda3/2024.06             # NOT bare `anaconda3` -- that is 2021.05
+source $(conda info --base)/etc/profile.d/conda.sh
 conda --version                           # expect >= 23.10, i.e. the libmamba solver
 
 export CONDA_PKGS_DIRS=$PROJ/conda_pkgs   # keep the tarball cache out of $HOME
 conda env create -f environment.yml --prefix $PROJ/envs/pmedm_vb
 conda activate $PROJ/envs/pmedm_vb
 
-python -m pip --version                   # must report a pip inside the prefix
-python -m pip install -e . --no-deps
+python -c "import sys; print(sys.executable)"   # MUST be inside $CONDA_PREFIX
+$CONDA_PREFIX/bin/python -m pip install -e . --no-deps
 ```
 
-Use `python -m pip`, not bare `pip`. `environment.yml` installs pip into the
-environment, but `python -m pip` additionally guarantees the install binds to
-the interpreter that is actually active rather than to whatever pip `PATH`
-happens to find first -- which on a module-based cluster is often a read-only
-base installation with a pip too old for editable installs.
+**On the `python` you get.** A loaded anaconda module puts its own `bin` on
+`PATH`, and `conda activate` does not reliably win that race unless conda's
+shell hook has been sourced -- which is what the `source .../conda.sh` line
+does. Without it `conda activate` sets `CONDA_PREFIX` and changes your prompt
+while `python` still resolves to the module's interpreter. On ISAAC that
+interpreter is Python 3.8 with pip 21.0.1, which is below the pip 21.3 needed
+for editable installs of a pyproject-only project, so the install fails with a
+confusing demand for `setup.py`.
+
+The `sys.executable` check catches this in one line. Invoking
+`$CONDA_PREFIX/bin/python` explicitly sidesteps it entirely, and is worth
+preferring in Slurm scripts too, where `PATH` is even less predictable than in
+a login shell.
 
 Three things that all have the same cause -- nothing large may live in a quota'd
 home directory:
