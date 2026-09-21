@@ -47,7 +47,12 @@ def _tract_to_puma() -> pd.DataFrame:
     codes, and inferring them as integers destroys the padding.
     """
     path = fetch_cached(TRACT_TO_PUMA_URL, subdir="geo")
-    frame = pd.read_csv(path, dtype=str)
+    # The published file begins with a UTF-8 BOM (confirmed by inspecting the
+    # bytes). pandas strips it anyway, but utf-8-sig says so rather than
+    # relying on that, and is equally correct when the BOM is absent -- if it
+    # ever leaked through, the first column would be named "\ufeffSTATEFP"
+    # and every lookup here would fail on a name that looks right.
+    frame = pd.read_csv(path, dtype=str, encoding="utf-8-sig")
     frame["tract_geoid"] = frame["STATEFP"] + frame["COUNTYFP"] + frame["TRACTCE"]
     frame["puma_geoid"] = frame["STATEFP"] + frame["PUMA5CE"]
     return frame

@@ -122,9 +122,10 @@ else
 fi
 
 note "6. PUMA crosswalk and PUMS PUMA coding"
-# Range-limited so head does not SIGPIPE a full download, and CR-stripped:
-# the file is CRLF, so a naive comparison fails on an invisible trailing \r.
-# pandas handles CRLF natively, so this only ever affected this check.
+# Range-limited so head does not SIGPIPE a full download. The file begins with
+# a UTF-8 BOM (EF BB BF), which renders invisibly and defeats a naive string
+# comparison; line endings are plain LF. pandas strips the BOM, so this only
+# ever affected this check -- see the normalisation below.
 header=$(curl -sS --max-time 60 -r 0-128 "$REL/2020_Census_Tract_to_2020_PUMA.txt" 2>/dev/null \
          | head -1 | tr -d '\r')
 printf '  %s\n' "$header"

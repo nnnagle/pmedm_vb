@@ -221,7 +221,8 @@ File:
 `https://www2.census.gov/geo/docs/maps-data/data/rel2020/2020_Census_Tract_to_2020_PUMA.txt`
 
 Columns `STATEFP,COUNTYFP,TRACTCE,PUMA5CE`; 85,452 national rows. All four are
-zero-padded fixed-width codes — read as text.
+zero-padded fixed-width codes — read as text. The file is UTF-8 **with a
+BOM** (`EF BB BF`) and LF line endings; read it with `utf-8-sig`.
 
 | derived | construction | width |
 |---|---|---|
@@ -311,10 +312,12 @@ Two things the script encodes that are easy to get wrong by hand:
 - **Match `[BC]`, not `B`.** A `B`-only pattern silently hides `C02003`,
   `C15010`, `C17002`, `C24010` and `C24030`, all published at block group.
   This produced a wrong coverage claim during the original probing.
-- **The crosswalk file is CRLF.** `head -1` on it yields a trailing `\r`, so a
-  naive string comparison against the expected header fails on something
-  invisible. pandas handles CRLF natively, so this only ever bites shell
-  checks, never `geography.py`.
+- **The crosswalk file begins with a UTF-8 BOM** (`EF BB BF`), confirmed by
+  inspecting the bytes. Line endings are plain LF. The BOM renders invisibly,
+  so a shell comparison against the expected header fails against something
+  you cannot see — `head -1 | od -c` is how to find out. pandas strips it, so
+  `geography.py` was never affected; it passes `encoding="utf-8-sig"` anyway
+  to state the fact rather than depend on it.
 - **Never probe a PUMS zip with a plain `GET`.** They are hundreds of
   megabytes. The script uses a one-byte range request, which also avoids
   assuming the server honours `HEAD` — an assumption never tested against this
