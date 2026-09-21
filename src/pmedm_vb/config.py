@@ -20,6 +20,23 @@ ENV_DATA_DIR = "PMEDM_VB_DATA"
 #: cluster.
 DEFAULT_DATA_DIR = "data"
 
+#: Two-letter postal abbreviation by state FIPS code. Needed because the PUMS
+#: bulk files are named by abbreviation while every other Census product used
+#: here is keyed by FIPS. Verified against the state list in Appendix A of the
+#: 2019-2023 Variance Replicate Tables documentation.
+STATE_ABBREV = {
+    "01": "AL", "02": "AK", "04": "AZ", "05": "AR", "06": "CA", "08": "CO",
+    "09": "CT", "10": "DE", "11": "DC", "12": "FL", "13": "GA", "15": "HI",
+    "16": "ID", "17": "IL", "18": "IN", "19": "IA", "20": "KS", "21": "KY",
+    "22": "LA", "23": "ME", "24": "MD", "25": "MA", "26": "MI", "27": "MN",
+    "28": "MS", "29": "MO", "30": "MT", "31": "NE", "32": "NV", "33": "NH",
+    "34": "NJ", "35": "NM", "36": "NY", "37": "NC", "38": "ND", "39": "OH",
+    "40": "OK", "41": "OR", "42": "PA", "44": "RI", "45": "SC", "46": "SD",
+    "47": "TN", "48": "TX", "49": "UT", "50": "VT", "51": "VA", "53": "WA",
+    "54": "WV", "55": "WI", "56": "WY", "72": "PR",
+}
+
+
 
 def data_dir() -> Path:
     """Return the cache root, from ``$PMEDM_VB_DATA`` or the local default.
@@ -78,6 +95,11 @@ class StudyArea:
     year: int
     counties: tuple[str, ...] = ()
     span: int = 5
+
+    @property
+    def state_abbrev(self) -> str:
+        """Two-letter postal abbreviation, as the PUMS filenames spell it."""
+        return STATE_ABBREV[self.state]
 
     @property
     def slug(self) -> str:
