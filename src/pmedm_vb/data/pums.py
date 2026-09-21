@@ -93,9 +93,14 @@ def text_columns(area: StudyArea, wanted: list[str]) -> set[str]:
     Inferring a character column's type is silently destructive in a way no
     error reports. ``HISP`` is ``C`` width 2, so ``"01"`` -- not Hispanic --
     becomes ``1.0``, and a constraint written as ``HISP != "01"`` is then true
-    for every record in the file. ``TEN`` is ``C`` width 1, and its ``"b"``
-    (N/A: group quarters or vacant) becomes ``NaN``, which a ``groupby``
-    then drops. Both produce wrong numbers rather than a failure.
+    for every record in the file: wrong numbers, no failure.
+
+    This does *not* address the dictionary's ``b`` codes, which are a separate
+    thing and are not fixed by any dtype. ``b`` repeated to the column width
+    (``TEN`` ``"b"``, ``JWTRNS`` ``"bb"``, ``OCCP`` ``"bbbb"``) denotes a
+    *blank*, and the published field really is empty, so it arrives as ``NaN``
+    whatever dtype is asked for. Test those with ``.isna()``; ``TEN == "b"``
+    matches nothing.
 
     The declaration is read rather than hand-listed on purpose: a list has to
     be kept in step with both the constraint set and each vintage's renames,

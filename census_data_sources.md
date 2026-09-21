@@ -76,6 +76,28 @@ Two columns matter more than the rest:
 `STATE` and `PUMA` are numeric-looking and lose leading zeros if a reader infers
 their type. Read as text, then zero-pad defensively.
 
+**Two distinct traps in reading PUMS columns**, which look alike and are not:
+
+- **Inferred types destroy character codes.** `HISP` is `C` width 2, so `"01"`
+  (not Hispanic) becomes `1.0` and `HISP != "01"` is true for every record.
+  `load_pums` reads the dictionary and forces text for every `C` column, so
+  this is handled — but only for columns requested through it.
+- **A `b` code means the field is blank.** The dictionary writes `b` repeated to
+  the column width — `TEN` `b`, `JWTRNS` `bb`, `OCCP` `bbbb` — and the published
+  CSV field is genuinely empty, so it reads as `NaN` under any dtype. Match it
+  with `.isna()`; `TEN == "b"` matches nothing. Confirmed on the Tennessee
+  housing file, where `TEN` is null for exactly 26,484 records = 10,204 vacant
+  + 16,280 group quarters.
+
+**Group quarters carry no housing weight.** `WGTP` is exactly 0 for every record
+with `TYPEHUGQ` in `{2, 3}` (8,077 institutional + 8,203 noninstitutional in
+Tennessee); the weight is on the person record's `PWGTP` instead. Each GQ
+housing record corresponds to exactly one person record — 16,280 of each,
+148,450 people weighted — so a GQ unit is a one-person household, and a model
+weighting households by `WGTP` alone can never place a group-quarters resident.
+That matters wherever GQ is concentrated: `B01001` and the other
+total-population tables include those people in their published counts.
+
 **Archive layout.** A state's zip holds one CSV — `psam_h{st}.csv`, 241 columns
 for housing — beside `ACS2020_2024_PUMS_README.pdf`. `load_pums` reads every
 `.csv` member and concatenates, which is correct for one and stays correct for
