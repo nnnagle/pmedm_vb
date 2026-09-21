@@ -56,12 +56,14 @@ home directory:
 - `PMEDM_VB_DATA` sets the download cache root, and defaults to `./data`:
 
 ```
-export PMEDM_VB_DATA=<scratch space>/pmedm_vb_data
+export PMEDM_VB_DATA=/lustre/isaac24/scratch/$USER/pmedm_vb_data
+mkdir -p "$PMEDM_VB_DATA"
 ```
 
-`<scratch space>` is a placeholder. Take the real path from the OIT storage
-documentation for ISAAC rather than guessing -- an earlier version of this file
-had a made-up path here.
+`config.py` resolves this path but deliberately does not create it, so the
+`mkdir` is needed the first time. Note this is *scratch*: check ISAAC's purge
+policy before treating anything cached here as durable. Re-downloading is only
+an inconvenience, but a silently emptied cache is a confusing one.
 
 The module version matters because conda's solver changed: libmamba became the
 default in conda 23.10.0 (Nov 2023), so the 2021.05 module is on the old classic
