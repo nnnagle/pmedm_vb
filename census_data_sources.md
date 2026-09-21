@@ -272,12 +272,26 @@ coding and the published geographies have to agree.
 
 ---
 
+## Table coverage by geography
+
+`variance.coverage(area)` returns one row per table with a boolean per summary
+level, read from the directory index at each level -- one request per geography,
+against one per table for `is_available()`. The published
+`VRE_Table_and_Geo_List_{year}.xlsx` answers the same question but would pull in
+an Excel reader to do it.
+
+The index is parsed with a regex over `href="{TBLID}_{stfips}.csv.zip"`, the same
+format `tools/verify_vintage.sh` depends on, so a change to census.gov's listing
+format breaks both together. An empty result raises rather than reporting a level
+with no tables.
+
+---
+
 ## Open questions
 
 | question | why it matters |
 |---|---|
 | **2019–2023 PUMA coding** | Its PUMS dictionary was never checked, and that period spans the redraw. Only matters if a run needs that vintage; 2020–2024 avoids the question. |
-| **Table-by-geography list** | `VRE_Table_and_Geo_List_{year}.xlsx` holds per-geography coverage but was not parsed, to avoid an Excel reader dependency. `is_available()` asks the server with a HEAD request instead. |
 | **Suppressed values** | Whether `ESTIMATE` or the replicates ever carry non-numeric suppression markers was not observed. The parser coerces, so such a value becomes `NaN` rather than failing loudly. |
 | **PUMS zip members** | The PUMS zips were never opened — too large to probe casually. `load_pums` reads every `.csv` member and concatenates, which is correct whether a state ships one file or several. |
 

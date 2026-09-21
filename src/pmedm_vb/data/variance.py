@@ -36,14 +36,15 @@ the published one exactly. That is expected, not a defect here.
 
 from __future__ import annotations
 
+import re
 import zipfile
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from pmedm_vb.config import StudyArea
-from pmedm_vb.data.cache import fetch_cached
+from pmedm_vb.config import StudyArea, raw_dir
+from pmedm_vb.data.cache import fetch, fetch_cached
 
 VRE_BASE = "https://www2.census.gov/programs-surveys/acs/replicate_estimates"
 
@@ -78,6 +79,11 @@ ZERO_POLICIES = ("model", "drop", "floor")
 
 REPLICATE_COLUMNS = tuple(f"rep_{i}" for i in range(1, N_REPLICATES + 1))
 
+#: One published file in a replicate directory index, e.g. ``B01001_47.csv.zip``.
+#: The directory is flat and holds every state, so a level's index runs to
+#: thousands of entries and the distinct table IDs are what is wanted.
+_REPLICATE_FILE = re.compile(r'href="([BC]\d{5}[A-Z]*)_\d{2}\.csv\.zip"')
+
 
 def _span_label(area: StudyArea) -> str:
     """``"5-year"`` -- the lowercase spelling the replicate tree uses."""
@@ -107,18 +113,103 @@ def replicate_url(area: StudyArea, table: str, *, geography: str) -> str:
     )
 
 
-def available_tables(area: StudyArea) -> list[str]:
-    """Return the table IDs published with variance replicates for this vintage.
+def table_list(area: StudyArea, *, force: bool = False) -> pd.DataFrame:
+    """The published master table list for this vintage: ``TBLID`` and ``TITLE``.
 
-    Read from the published ``VRE_TABLE_LIST`` rather than by scraping a
-    directory index. This is the *master* list; coverage at tract and block
-    group is narrower, and :func:`is_available` checks a specific geography.
+    The *master* list, covering every geography the program publishes. Coverage
+    at tract and block group is narrower; :func:`coverage` says which tables
+    reach which level.
     """
     path = fetch_cached(
         documentation_url(area, f"VRE_TABLE_LIST_{area.year}.csv"),
         subdir=f"vre/{area.year}/documentation",
+        force=force,
     )
-    return pd.read_csv(path, dtype=str)["TBLID"].tolist()
+    return pd.read_csv(path, dtype=str)
+
+
+def available_tables(area: StudyArea) -> list[str]:
+    """Table IDs published with variance replicates for this vintage.
+
+    The master list, as :func:`table_list` reads it.
+    """
+    return table_list(area)["TBLID"].tolist()
+
+
+def published_tables(
+    area: StudyArea,
+    *,
+    geography: str,
+    force: bool = False,
+) -> list[str]:
+    """Table IDs actually published at ``geography``, from the directory index.
+
+    One request per geography, against 268 for the same answer built table by
+    table from :func:`is_available` -- which remains the right call for a single
+    table, and the wrong one for a census of them.
+
+    The published table-by-geography list is an ``.xlsx``; reading the directory
+    answers the same question without an Excel reader.
+
+    Raises
+    ------
+    ValueError
+        If the index yields no table at all. That means the page format changed
+        rather than that the level is empty, and it must not be mistaken for a
+        vintage publishing nothing -- the same regex shape ``verify_vintage.sh``
+        relies on, so the two fail together and are fixed together.
+    """
+    level = _summary_level(geography)
+    url = f"{VRE_BASE}/{area.year}/data/{_span_label(area)}/{level}/"
+    dest = raw_dir() / f"vre/{area.year}/listings" / f"{level}.html"
+    html = fetch(url, dest, force=force).read_text(encoding="utf-8", errors="replace")
+
+    tables = sorted({match.group(1) for match in _REPLICATE_FILE.finditer(html)})
+    if not tables:
+        raise ValueError(
+            f"no replicate files matched in the index at {url} -- the directory "
+            f"listing format has probably changed; check {dest} and re-run with "
+            f"force=True"
+        )
+    return tables
+
+
+def coverage(area: StudyArea, *, force: bool = False) -> pd.DataFrame:
+    """Which tables are published at which summary level, one row per table.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns ``tblid``, ``title``, then one boolean per geography in
+        :data:`SUMMARY_LEVELS` (``tract``, ``block_group``). Sorted by
+        ``tblid``.
+
+    Notes
+    -----
+    Rows are the *union* of the master list and what each level actually
+    publishes, not the master list filtered. Coverage has been strictly nested
+    in the vintages checked so far, but a table appearing in a directory and not
+    in ``VRE_TABLE_LIST`` would otherwise vanish silently; here it surfaces as a
+    row with a null ``title``.
+
+    Watch the prefix when reading the result: ``C`` tables are published
+    alongside ``B`` tables, and ``C02003``, ``C15010``, ``C17002``, ``C24010``
+    and ``C24030`` all reach block group.
+    """
+    master = table_list(area, force=force)
+    titles = master.set_index("TBLID")["TITLE"]
+
+    published = {
+        geography: set(published_tables(area, geography=geography, force=force))
+        for geography in SUMMARY_LEVELS
+    }
+
+    tblids = sorted(set(titles.index).union(*published.values()))
+    frame = pd.DataFrame({"tblid": tblids})
+    frame["title"] = frame["tblid"].map(titles)
+    for geography, tables in published.items():
+        frame[geography.replace(" ", "_")] = frame["tblid"].isin(tables)
+    return frame
 
 
 def is_available(area: StudyArea, table: str, *, geography: str) -> bool:
@@ -132,6 +223,9 @@ def is_available(area: StudyArea, table: str, *, geography: str) -> bool:
 
     The published table-by-geography list is an ``.xlsx``, which would pull in
     an Excel reader for a question a status code already answers.
+
+    For more than a table or two, :func:`coverage` reads the directory index
+    instead: one request per geography rather than one per table.
     """
     import requests
 
