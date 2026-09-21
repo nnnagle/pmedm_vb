@@ -229,37 +229,107 @@ def adjusted_household_income(households: pd.DataFrame) -> pd.Series:
     )
 
 
+#: ``B19001``'s published brackets as ``(cell, lower, upper)`` in constant
+#: dollars, read from the cell titles. ``None`` is an open end: the first
+#: bracket is "Less than $10,000", which includes the negative incomes ``HINCP``
+#: reports for business losses. Written down once so that a collapse can be
+#: derived rather than declared -- a hand-written grouping of cells into bands
+#: can disagree with its own boundary, and nothing would catch it.
+B19001_BRACKETS = (
+    ("B19001_002", None, 10_000),
+    ("B19001_003", 10_000, 15_000),
+    ("B19001_004", 15_000, 20_000),
+    ("B19001_005", 20_000, 25_000),
+    ("B19001_006", 25_000, 30_000),
+    ("B19001_007", 30_000, 35_000),
+    ("B19001_008", 35_000, 40_000),
+    ("B19001_009", 40_000, 45_000),
+    ("B19001_010", 45_000, 50_000),
+    ("B19001_011", 50_000, 60_000),
+    ("B19001_012", 60_000, 75_000),
+    ("B19001_013", 75_000, 100_000),
+    ("B19001_014", 100_000, 125_000),
+    ("B19001_015", 125_000, 150_000),
+    ("B19001_016", 150_000, 200_000),
+    ("B19001_017", 200_000, None),
+)
+
+
 def race_ethnicity(geography: str = "block group") -> ConstraintTable:
-    """``B03002``: Hispanic origin crossed with race, over persons."""
+    """``B03002``: Hispanic origin crossed with race, over persons.
+
+    The eight categories are mutually exclusive and exhaust the table, summing
+    to ``_001``. Everything else is waived because the table is nested: ``_002``
+    subtotals the non-Hispanic races, ``_009`` subtotals ``_010``/``_011``, and
+    ``_012`` subtotals the whole Hispanic side. Constraining a subtotal
+    alongside its parts makes ``X`` rank-deficient.
+    """
+    published = {
+        "nh_white": ("B03002_003",),
+        "nh_black": ("B03002_004",),
+        "nh_aian": ("B03002_005",),
+        "nh_asian": ("B03002_006",),
+        "nh_nhpi": ("B03002_007",),
+        "nh_other_race": ("B03002_008",),
+        "nh_two_or_more": ("B03002_009",),
+    }
 
     def not_hispanic(codes: tuple[str, ...]):
         return lambda p: (p["HISP"] == NOT_HISPANIC) & p["RAC1P"].isin(codes)
 
     categories = [
-        Category(name=f"nh_{label}", select=not_hispanic(codes))
+        Category(
+            name=f"nh_{label}",
+            select=not_hispanic(codes),
+            published=published[f"nh_{label}"],
+        )
         for label, codes in RAC1P_TO_RACE.items()
     ]
     categories.append(
-        Category(name="hispanic", select=lambda p: p["HISP"] != NOT_HISPANIC)
+        Category(
+            name="hispanic",
+            select=lambda p: p["HISP"] != NOT_HISPANIC,
+            published=("B03002_012",),
+        )
     )
     return ConstraintTable(
         table="B03002",
         universe="person",
         geography=geography,
         categories=tuple(categories),
+        waived=(
+            "B03002_001",
+            "B03002_002",
+            "B03002_010",
+            "B03002_011",
+            *(f"B03002_{order:03d}" for order in range(13, 22)),
+        ),
     )
 
 
 def tenure(geography: str = "block group") -> ConstraintTable:
-    """``B25003``: owner- and renter-occupied units, over households."""
+    """``B25003``: owner- and renter-occupied units, over households.
+
+    The table publishes only owner and renter, so ``TEN`` code 4 -- occupied
+    without payment of rent -- is folded into one of them. It is grouped with
+    renters here. **That is not verified**: the published titles cannot settle
+    it, and the check is empirical, comparing each candidate mapping weighted by
+    ``WGTP`` against the published estimates.
+    """
+    published = {"owner": ("B25003_002",), "renter": ("B25003_003",)}
     return ConstraintTable(
         table="B25003",
         universe="household",
         geography=geography,
         categories=tuple(
-            Category(name=label, select=(lambda c: lambda h: h["TEN"].isin(c))(codes))
+            Category(
+                name=label,
+                select=(lambda c: lambda h: h["TEN"].isin(c))(codes),
+                published=published[label],
+            )
             for label, codes in TEN_TO_TENURE.items()
         ),
+        waived=("B25003_001",),
     )
 
 
@@ -334,28 +404,67 @@ def age_sex(boundaries: Sequence[int], geography: str = "block group") -> Constr
 
 
 def household_income(
-    brackets: Sequence[float],
+    boundaries: Sequence[float] = (25_000, 50_000, 75_000, 100_000, 150_000),
     geography: str = "block group",
 ) -> ConstraintTable:
     """``B19001``: household income bands, over households.
 
-    ``brackets`` are the published bracket edges in constant dollars. Income is
-    put through :func:`adjusted_household_income` first -- the brackets are
-    stated in reference-year dollars and ``HINCP`` is not.
+    ``boundaries`` are the band edges in constant dollars, and each **must** be
+    a break ``B19001`` actually publishes -- a collapse is exact only where it
+    merges published cells, and no split inside one can be recovered. The
+    mapping from band to published cells is then *derived* from
+    :data:`B19001_BRACKETS` rather than written out, so a band and its cells
+    cannot disagree; every bracket is asserted to land in exactly one band.
+
+    Income goes through :func:`adjusted_household_income` first: the published
+    brackets are in reference-year dollars and ``HINCP`` is not.
     """
+    published_edges = {hi for _, _, hi in B19001_BRACKETS if hi is not None}
+    unknown = sorted(set(boundaries) - published_edges)
+    if unknown:
+        raise ValueError(
+            f"{unknown} are not published breaks of B19001, so collapsing there "
+            f"would not be exact. Available: {sorted(published_edges)}"
+        )
 
-    def band(mask_index: int):
-        def select(households: pd.DataFrame) -> pd.Series:
-            _, mask = _bands(adjusted_household_income(households), brackets)[mask_index]
-            return mask
-        return select
+    low = float("-inf")
+    high = float("inf")
+    edges = [low, *sorted(boundaries), high]
 
-    names = [n for n, _ in _bands(pd.Series([0.0]), brackets)]
+    categories = []
+    claimed: list[str] = []
+    for lower, upper in zip(edges, edges[1:]):
+        cells = tuple(
+            cell
+            for cell, bracket_low, bracket_high in B19001_BRACKETS
+            if (low if bracket_low is None else bracket_low) >= lower
+            and (high if bracket_high is None else bracket_high) <= upper
+        )
+        claimed.extend(cells)
+        name = (
+            f"lt_{upper:.0f}" if lower == low
+            else f"ge_{lower:.0f}" if upper == high
+            else f"{lower:.0f}_to_{upper:.0f}"
+        )
+
+        def select(households, lower=lower, upper=upper):
+            income = adjusted_household_income(households)
+            return (income >= lower) & (income < upper)
+
+        categories.append(Category(name=name, select=select, published=cells))
+
+    every = [cell for cell, _, _ in B19001_BRACKETS]
+    if sorted(claimed) != sorted(every):
+        raise AssertionError(
+            f"income collapse does not partition B19001: "
+            f"{sorted(set(every) - set(claimed))} unassigned, "
+            f"{[c for c in claimed if claimed.count(c) > 1]} assigned twice"
+        )
+
     return ConstraintTable(
         table="B19001",
         universe="household",
         geography=geography,
-        categories=tuple(
-            Category(name=name, select=band(i)) for i, name in enumerate(names)
-        ),
+        categories=tuple(categories),
+        waived=("B19001_001",),
     )
