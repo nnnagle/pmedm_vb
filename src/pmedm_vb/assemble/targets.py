@@ -26,7 +26,7 @@ one against the other is undetectable downstream.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pandas as pd
@@ -104,6 +104,7 @@ def build_targets(
     tables: Sequence[ConstraintTable],
     *,
     geography: str,
+    geoids: Sequence[str] | None = None,
     policy: str = "model",
     floor: float | None = None,
 ) -> TargetBlock:
@@ -115,6 +116,13 @@ def build_targets(
         Constraint specifications, all for ``geography``. Their categories are
         concatenated; names are qualified by table, so two tables may use the
         same category name.
+    geoids:
+        Exact zones to build for, in place of the study area's own. This is how
+        a per-PUMA problem is assembled: a PUMA is built from whole tracts but
+        may cross a county line, so its zones are not in general a subset of
+        the area's counties. When given, the fetch is statewide and then
+        restricted to precisely these geographies -- PUMAs never cross a state
+        boundary, so statewide always suffices.
     policy:
         Zero-cell handling, as :func:`pmedm_vb.data.variance.variances`.
         Applied to the *collapsed* variances.
@@ -129,7 +137,22 @@ def build_targets(
     if wrong:
         raise ValueError(f"tables not specified for {geography!r}: {wrong}")
 
-    frame = fetch_replicates(area, [t.table for t in tables], geography=geography)
+    # The area the *data* is drawn from. Widened to the whole state whenever an
+    # explicit zone set is given, since those zones may lie outside the study
+    # area's counties; the restriction below then decides membership, rather
+    # than the county filter deciding it by accident.
+    source = area if geoids is None else replace(area, counties=())
+    frame = fetch_replicates(source, [t.table for t in tables], geography=geography)
+
+    if geoids is not None:
+        wanted = set(geoids)
+        frame = frame[frame.index.get_level_values("geoid").isin(wanted)]
+        missing = wanted - set(frame.index.get_level_values("geoid"))
+        if missing:
+            raise ValueError(
+                f"{len(missing)} requested geograph(ies) are not published for "
+                f"these tables at {geography}, e.g. {sorted(missing)[:5]}"
+            )
 
     # cell -> column index, built from the specs. Waived cells are absent and
     # drop out of the aggregation, which is what waiving means.
@@ -181,7 +204,7 @@ def build_targets(
     v = _apply_zero_policy(
         SDR_FACTOR * np.square(L).sum(axis=1),
         geoids=agg.index.get_level_values("geoid"),
-        area=area,
+        area=source,
         geography=geography,
         policy=policy,
         floor=floor,

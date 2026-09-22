@@ -19,6 +19,7 @@ import numpy as np
 from pmedm_vb.assemble.constraints import ConstraintTable
 from pmedm_vb.assemble.targets import TargetBlock, build_targets
 from pmedm_vb.config import StudyArea
+from pmedm_vb.data.geography import puma_crosswalk_whole
 from pmedm_vb.data.variance import N_REPLICATES, table_list
 
 #: Order geographies are reported in: coarse to fine, as the constraints nest.
@@ -105,18 +106,19 @@ def _wrap(labels: list[str], width: int = 88, indent: int = 10) -> list[str]:
     return lines
 
 
-def format_constraints(
-    area: StudyArea,
-    blocks: Mapping[str, TargetBlock],
-) -> str:
+def format_constraints(area: StudyArea, blocks: Mapping[str, TargetBlock]) -> str:
     """One section per geography: each table, its size, and its column labels.
 
+    The definitions are identical across PUMAs -- same specifications, same
+    collapse -- so they are printed once rather than repeated per problem.
+    Per-PUMA sizes and ranks go in :func:`format_pumas`.
+
     Column names arrive as ``"{table}.{category}"``, so the table each belongs
-    to is recovered from the name rather than passed in separately -- the report
+    to is recovered from the name rather than passed in separately: the report
     then describes what was actually built, not what was intended.
     """
     titles = table_list(area).set_index("TBLID")["TITLE"]
-    out = [f"Constraints for {area.slug}", ""]
+    out = []
 
     ordered = [g for g in GEOGRAPHY_ORDER if g in blocks]
     ordered += [g for g in blocks if g not in GEOGRAPHY_ORDER]
@@ -128,78 +130,139 @@ def format_constraints(
             table, _, category = name.partition(".")
             grouped.setdefault(table, []).append(category)
 
-        rows = block.n_areas * block.n_categories
-        out.append(f"{geography.title()}  --  {block.n_areas:,} areas")
+        out.append(f"{geography.title()}")
         for table, categories in grouped.items():
-            title = titles.get(table, "(title not in the published list)")
-            out.append(f"  {table}  {title}")
+            out.append(f"  {table}  {titles.get(table, '(title not published)')}")
             out.append(f"  {'':8}{len(categories)} constraints")
             out.extend(f"  {'':8}{line}" for line in _wrap(categories))
-        out.append(
-            f"  {'':8}"
-            f"[{len(grouped)} tables, {block.n_categories} constraints, "
-            f"{rows:,} rows]"
-        )
+        out.append(f"  {'':8}[{len(grouped)} tables, {block.n_categories} constraints]")
         out.append("")
     return "\n".join(out)
 
 
-def format_rank(blocks: Mapping[str, TargetBlock]) -> str:
-    """Rank of each block's design covariance, with the evidence for it.
+def format_pumas(by_puma: Mapping[str, Mapping[str, TargetBlock]]) -> str:
+    """Per-PUMA sizes and covariance rank, one row per PUMA and geography.
 
-    Reports the rank of ``L``, not of ``Sigma``. ``Sigma(alpha) = D +
-    (1-alpha)(4/80) L L'`` is **full rank** for any ``alpha > 0``, because
-    ``D`` is strictly positive -- the rank-80 ceiling belongs to the replicate
-    part alone. Collapsing the two into one number would hide the distinction
-    that matters: how much structure the replicates carry, versus whether the
-    matrix can be inverted.
+    The rank reported is that of ``L``, not of ``Sigma``.
+    ``Sigma(alpha) = D + (1-alpha)(4/80) L L'`` is full rank for any
+    ``alpha > 0`` because ``D`` is strictly positive; the rank-80 ceiling
+    belongs to the replicate part alone.
 
-    The tolerance and the margin above it are printed because a rank that
-    equals its own ceiling is indistinguishable, from the number alone, from a
-    rank that was never computed. The margin says which it is.
+    ``coverage`` is rank over rows -- the share of constraint directions the
+    replicates say anything about, with the rest carried by ``D``. It is the
+    more useful reading of the same number, and it is why solving per PUMA
+    helps: the rank ceiling is 80 either way, but it describes a far smaller
+    space.
+
+    ``margin`` is the smallest retained singular value as a multiple of the
+    rank tolerance. It is the evidence that the rank was measured rather than
+    assumed -- a rank equal to its own ceiling reads identically either way
+    from the number alone.
     """
-    out = ["Covariance rank", ""]
-    for geography, block in blocks.items():
-        report = covariance_rank(block.L)
-        values = report.singular_values
-        out.append(f"  {geography.title()}")
-        out.append(f"    constraint rows        {report.n_rows:>10,}")
-        out.append(f"    replicates             {N_REPLICATES:>10}")
-        out.append(
-            f"    rank of L              {report.rank:>10}"
-            f"   of a possible {report.ceiling}"
-            + (f", short by {report.deficiency}" if report.deficiency else "")
-        )
-        out.append(
-            f"    below tolerance        {len(values) - report.rank:>10}"
-            f"   (tolerance {report.tolerance:.2e})"
-        )
-        if report.rank:
+    out = [
+        f"  {'PUMA':<10}{'geography':<14}{'areas':>7}{'rows':>9}"
+        f"{'rank':>6}{'ceiling':>9}{'coverage':>10}{'margin':>10}"
+    ]
+    for puma in sorted(by_puma):
+        for geography, block in by_puma[puma].items():
+            report = covariance_rank(block.L)
             out.append(
-                f"    smallest retained      {values[report.rank - 1]:>10.3e}"
-                f"   {report.margin:.1e}x the tolerance"
+                f"  {puma:<10}{geography:<14}{block.n_areas:>7,}"
+                f"{report.n_rows:>9,}{report.rank:>6}{report.ceiling:>9}"
+                f"{report.coverage:>9.2%}{report.margin:>10.1e}"
             )
-            out.append(
-                f"    spectrum               {values[0]:>10.3e}"
-                f" .. {values[report.rank - 1]:.3e}"
-                f"   (ratio {values[0] / values[report.rank - 1]:.1f})"
-            )
-        out.append(
-            f"    replicate coverage     {report.coverage:>10.2%}"
-            f"   {report.rank} of {report.n_rows:,} directions;"
-            f" the rest carry D only"
-        )
-        out.append(
-            f"    Sigma(alpha) rank      {report.n_rows:>10,}"
-            f"   full for alpha > 0, since D > 0"
-        )
-        out.append("")
+    out.append("")
+    out.append("  rank is of L; Sigma(alpha) is full rank for any alpha > 0, since D > 0.")
+    out.append("  coverage = rank / rows: the share of directions the replicates inform.")
+    out.append("  margin = smallest retained singular value / rank tolerance.")
     return "\n".join(out)
 
 
-def summarise(area: StudyArea, blocks: Mapping[str, TargetBlock]) -> str:
-    """The whole report: what is constrained, then how much structure it has."""
-    return format_constraints(area, blocks) + "\n" + format_rank(blocks)
+def summarise(
+    area: StudyArea,
+    by_puma: Mapping[str, Mapping[str, TargetBlock]],
+) -> str:
+    """The whole report: what is constrained, then the problems it produced."""
+    first = by_puma[sorted(by_puma)[0]]
+
+    inconsistent = [
+        puma
+        for puma, blocks in by_puma.items()
+        for geography, block in blocks.items()
+        if list(block.names) != list(first[geography].names)
+    ]
+    if inconsistent:
+        raise ValueError(
+            f"PUMAs {inconsistent} have different constraint columns from "
+            f"{sorted(by_puma)[0]}; the specifications should not vary by PUMA"
+        )
+
+    zones = {g: sum(b[g].n_areas for b in by_puma.values()) for g in first}
+    counts = ", ".join(f"{n:,} {g}s" for g, n in zones.items())
+    return (
+        f"Constraints for {area.slug}\n"
+        f"  {len(by_puma)} PUMAs, {counts}\n\n"
+        + format_constraints(area, first)
+        + "\nPer PUMA\n"
+        + format_pumas(by_puma)
+        + "\n"
+    )
+
+
+def build_by_puma(
+    area: StudyArea,
+    tables: Sequence[ConstraintTable],
+    *,
+    policy: str = "model",
+) -> dict[str, dict[str, TargetBlock]]:
+    """Assemble one target block per PUMA per geography.
+
+    The PUMA is the unit of a problem. Design weights are zero outside a
+    record's own PUMA, so the joint problem is block diagonal by PUMA and
+    solving it whole computes a great many structural zeros. Splitting also
+    keeps every matrix small enough that ``q`` can stay dense, and makes the
+    problems independent.
+
+    Zones come from :func:`~pmedm_vb.data.geography.puma_crosswalk_whole`:
+    *whole* PUMAs, which may reach past the study area's counties. A partial
+    PUMA would be ill-posed -- its PUMS records represent all of it, so
+    constraining only the part inside leaves the rest of its population with
+    nowhere to go.
+
+    What this gives up is the cross-PUMA blocks of ``Sigma``. Block groups in
+    different PUMAs do have correlated ACS error, since every cell derives from
+    the same 80 replicate weight sets, and solving separately discards that
+    correlation.
+    """
+    zones = puma_crosswalk_whole(area)
+    by_geography: dict[str, list[ConstraintTable]] = {}
+    for table in tables:
+        by_geography.setdefault(table.geography, []).append(table)
+    for specs in by_geography.values():
+        for spec in specs:
+            spec.validate(area)
+
+    ordered_geographies = [g for g in GEOGRAPHY_ORDER if g in by_geography]
+    ordered_geographies += [g for g in by_geography if g not in GEOGRAPHY_ORDER]
+
+    out: dict[str, dict[str, TargetBlock]] = {}
+    for puma, group in zones.groupby("puma_geoid"):
+        blocks: dict[str, TargetBlock] = {}
+        for geography in ordered_geographies:
+            column = (
+                "block_group_geoid"
+                if geography == "block group"
+                else "tract_geoid"
+            )
+            blocks[geography] = build_targets(
+                area,
+                by_geography[geography],
+                geography=geography,
+                geoids=sorted(group[column].unique()),
+                policy=policy,
+            )
+        out[str(puma)] = blocks
+    return out
 
 
 def build_and_summarise(
@@ -207,32 +270,7 @@ def build_and_summarise(
     tables: Sequence[ConstraintTable],
     *,
     policy: str = "model",
-) -> tuple[dict[str, TargetBlock], str]:
-    """Build a target block per geography and summarise the result.
-
-    Groups the specifications by their own ``geography`` rather than taking it
-    as an argument, so a table can only be built at the level it was written
-    for. Each spec is validated against the published cell list first: a
-    misdescribed table should fail before any arithmetic, not produce a report
-    that looks reasonable.
-
-    Returns
-    -------
-    tuple
-        The blocks by geography, and the report text.
-    """
-    by_geography: dict[str, list[ConstraintTable]] = {}
-    for table in tables:
-        by_geography.setdefault(table.geography, []).append(table)
-
-    blocks: dict[str, TargetBlock] = {}
-    for geography in [g for g in GEOGRAPHY_ORDER if g in by_geography] + [
-        g for g in by_geography if g not in GEOGRAPHY_ORDER
-    ]:
-        specs = by_geography[geography]
-        for spec in specs:
-            spec.validate(area)
-        blocks[geography] = build_targets(
-            area, specs, geography=geography, policy=policy
-        )
-    return blocks, summarise(area, blocks)
+) -> tuple[dict[str, dict[str, TargetBlock]], str]:
+    """Assemble every PUMA's targets and summarise the result."""
+    by_puma = build_by_puma(area, tables, policy=policy)
+    return by_puma, summarise(area, by_puma)

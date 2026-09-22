@@ -10,6 +10,20 @@ PMEDM needs two distinct geographic relationships:
   weights ``q``. PUMA boundaries do not nest within tracts, so this needs a
   published relationship file.
 
+**PUMA membership is also what decomposes the problem.** A 2020 PUMA is built
+from whole tracts -- which is why the relationship file is a plain 1:1 map
+rather than an allocation table -- so block group nests in tract nests in PUMA
+with no overlap, and both constraint levels partition by PUMA. Since ``q`` is
+zero outside a record's own PUMA, so is every weight, and the joint problem is
+block diagonal by PUMA. Assembly therefore builds one problem per PUMA rather
+than one per study area.
+
+That makes the *whole* PUMA the unit that matters, not the part inside the
+study area: PUMS records represent all of a PUMA, so constraining only part of
+one leaves the rest of its population with nowhere to go.
+:func:`puma_crosswalk_whole` returns whole PUMAs and :func:`puma_coverage`
+reports which of them reach beyond the area.
+
 Both are satisfied without geometry, and therefore without a GIS dependency.
 The published tract-to-PUMA file supplies the second relationship directly, and
 block groups reach it through their parent tract.
@@ -22,6 +36,8 @@ vintage rather than assuming this module covers it.
 """
 
 from __future__ import annotations
+
+from dataclasses import replace
 
 import pandas as pd
 
@@ -122,3 +138,90 @@ def puma_crosswalk(area: StudyArea) -> pd.DataFrame:
             f"the {area.year} {area.span}-year geographies"
         )
     return zones
+
+
+def puma_geoids(area: StudyArea) -> tuple[str, ...]:
+    """PUMA GEOIDs that any tract in the study area belongs to.
+
+    A PUMA is built from whole tracts, so "touches the area" and "contains a
+    tract of the area" are the same question.
+    """
+    inside = _restrict(_tract_to_puma(), area, "tract_geoid")
+    return tuple(sorted(inside["puma_geoid"].unique()))
+
+
+def puma_coverage(area: StudyArea) -> pd.DataFrame:
+    """How much of each touched PUMA lies inside the study area.
+
+    A PUMA reaching beyond the area is the case that makes a per-PUMA run
+    ill-posed: its PUMS records represent the whole PUMA, so constraining only
+    the part inside leaves the rest of its population with nowhere to go.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per PUMA, indexed by ``puma_geoid``, with the tract counts
+        inside and in total, whether it is wholly contained, and the counties
+        it spans.
+    """
+    national = _tract_to_puma()
+    inside = _restrict(national, area, "tract_geoid")
+    counted = inside.groupby("puma_geoid")["tract_geoid"].nunique()
+
+    rows = []
+    for puma in counted.index:
+        tracts = national[national["puma_geoid"] == puma]
+        rows.append(
+            {
+                "puma_geoid": puma,
+                "tracts_in_area": int(counted[puma]),
+                "tracts_total": int(tracts["tract_geoid"].nunique()),
+                "counties": tuple(sorted(tracts["tract_geoid"].str[:5].unique())),
+            }
+        )
+    frame = pd.DataFrame(rows).set_index("puma_geoid")
+    frame["whole"] = frame["tracts_in_area"] == frame["tracts_total"]
+    return frame
+
+
+def puma_crosswalk_whole(area: StudyArea) -> pd.DataFrame:
+    """Every block group of every PUMA the study area touches.
+
+    The difference from :func:`puma_crosswalk` is what happens at the edge.
+    That function returns the area's own block groups; this one returns whole
+    PUMAs, which may reach into neighbouring counties. Per-PUMA assembly needs
+    the latter: the PUMS records for a PUMA represent all of it, so all of its
+    zones have to be available to receive weight or the population does not
+    allocate.
+
+    The block group universe still comes from the published total-population
+    file, so it remains exactly the set constraints exist for -- but fetched
+    statewide rather than for the area's counties, since a PUMA may cross a
+    county line and PUMAs never cross a state one.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns ``block_group_geoid``, ``tract_geoid``, ``puma_geoid``.
+    """
+    targets = set(puma_geoids(area))
+    statewide = replace(area, counties=())
+
+    frame = fetch_replicates(statewide, [POPULATION_TABLE], geography="block group")
+    geoids = frame.index.get_level_values("geoid").unique()
+    zones = pd.DataFrame({"block_group_geoid": geoids})
+    zones["tract_geoid"] = zones["block_group_geoid"].str[:TRACT_GEOID_WIDTH]
+
+    lookup = _tract_to_puma().set_index("tract_geoid")["puma_geoid"]
+    zones["puma_geoid"] = zones["tract_geoid"].map(lookup)
+
+    unmatched = zones.loc[zones["puma_geoid"].isna(), "tract_geoid"].unique()
+    if len(unmatched):
+        raise KeyError(
+            f"{len(unmatched)} tract(s) absent from the PUMA relationship file, "
+            f"e.g. {sorted(unmatched)[:5]} -- check that the file vintage matches "
+            f"the {area.year} {area.span}-year geographies"
+        )
+
+    zones = zones[zones["puma_geoid"].isin(targets)]
+    return zones.sort_values("block_group_geoid").reset_index(drop=True)
