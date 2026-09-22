@@ -1,63 +1,143 @@
-"""Build the individual attribute matrices and the aggregation operators.
+"""The individual-side factors: attribute matrices, aggregation, design weights.
 
-``X_T`` and ``X_B`` translate each PUMS record into the constraint cells it
-contributes to; ``A_T`` and ``A_B`` translate zones into the areas the
-constraints are published for. Together they are the four factors that
-:class:`~pmedm_vb.assemble.inputs.PMEDMInputs` stores in place of the Kronecker
-product.
+``X`` translates each unit into the constraint cells it contributes to, ``A``
+translates zones into the areas constraints are published for, and ``q`` is the
+prior on where a unit's weight can go.
+
+All three stay small because a problem is one PUMA. Zones are that PUMA's block
+groups, units are its households and group-quarters residents, and neither set
+reaches beyond it.
 """
 
 from __future__ import annotations
+
+from collections.abc import Sequence
 
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 
-from pmedm_vb.config import StudyArea
+from pmedm_vb.data.geography import TRACT_GEOID_WIDTH
 
 
-def build_attribute_matrix(
-    pums: pd.DataFrame,
-    constraints: list[str],
-) -> tuple[sp.csr_matrix, list[str]]:
-    """Expand PUMS records into indicator columns, one per constraint cell.
+def build_attribute_matrix(counts: pd.DataFrame) -> tuple[sp.csr_matrix, list[str]]:
+    """Sparse ``(n_units, n_constraints)`` from per-unit counts.
 
-    The column definitions have to agree cell-for-cell with the summary tables
-    they will be matched against -- same age breaks, same categories, same
-    universe. That correspondence is the fiddliest part of setting up a PMEDM
-    run and the usual source of silent misfit.
+    Entries are **counts, not indicators**: a household contributes the number
+    of its members matching a person-level cell. Sparse because most units
+    match few cells -- a household is in one income band, one tenure, and has
+    members in a handful of age-sex categories out of a hundred-odd columns.
 
-    Returns
-    -------
-    tuple
-        The sparse matrix ``(n_individuals, n_cells)`` and its column labels.
+    Column order is the frame's, which
+    :func:`~pmedm_vb.assemble.households.person_counts` takes from the
+    specifications, so it matches
+    :attr:`~pmedm_vb.assemble.targets.TargetBlock.names` by construction. The
+    labels are returned so a caller can assert that rather than trust it.
     """
-    raise NotImplementedError
+    matrix = sp.csr_matrix(counts.to_numpy(dtype=float))
+    return matrix, list(counts.columns)
+
+
+def nesting(zones: Sequence[str], width: int = TRACT_GEOID_WIDTH) -> pd.Series:
+    """Map each zone GEOID to its parent area GEOID, by prefix.
+
+    Census GEOIDs nest by construction -- a block group's first 11 characters
+    are its tract -- so this is string slicing rather than a spatial join.
+    """
+    index = pd.Index(zones, name="zone")
+    return pd.Series([geoid[:width] for geoid in index], index=index, name="area")
 
 
 def build_aggregation(
-    zones: pd.DataFrame,
-    areas: pd.DataFrame,
+    zones: Sequence[str],
+    areas: Sequence[str],
+    membership: pd.Series | None = None,
 ) -> sp.csr_matrix:
-    """Build the ``(n_areas, n_zones)`` operator summing zones into areas.
+    """``(n_areas, n_zones)`` operator summing zones into the areas holding them.
 
-    Census GEOIDs nest by construction, so membership is a string prefix rather
-    than a spatial join. Degenerate when zones are the areas, in which case the
-    result is the identity.
+    ``membership`` maps each zone to its area; omitted, it is derived by
+    :func:`nesting`. Pass ``areas == zones`` to get the identity, which is what
+    ``A_B`` is when the zones *are* the block groups being constrained.
+
+    Raises
+    ------
+    ValueError
+        If a zone belongs to no listed area, or an area contains no zone.
+        Either means the zone and area sets were built from different places,
+        which would otherwise show up as a quietly wrong row of ``Y``.
     """
-    raise NotImplementedError
+    zones = list(zones)
+    areas = list(areas)
+    if membership is None:
+        membership = nesting(zones)
+
+    area_position = {area: i for i, area in enumerate(areas)}
+    rows, columns = [], []
+    for column, zone in enumerate(zones):
+        area = membership.get(zone)
+        if area not in area_position:
+            raise ValueError(
+                f"zone {zone!r} maps to area {area!r}, which is not among the "
+                f"{len(areas)} areas given"
+            )
+        rows.append(area_position[area])
+        columns.append(column)
+
+    empty = set(range(len(areas))) - set(rows)
+    if empty:
+        missing = [areas[i] for i in sorted(empty)][:5]
+        raise ValueError(
+            f"{len(empty)} area(s) contain no zone, e.g. {missing}. The zone "
+            f"and area sets disagree"
+        )
+
+    return sp.csr_matrix(
+        (np.ones(len(rows)), (rows, columns)), shape=(len(areas), len(zones))
+    )
 
 
 def design_weights(
-    pums: pd.DataFrame,
-    zones: pd.DataFrame,
-    crosswalk: pd.DataFrame,
+    weights: pd.Series,
+    n_zones: int,
+    *,
+    zone_shares: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Build ``q``, the ``(n_zones, n_individuals)`` design probabilities.
+    """``q``, the ``(n_zones, n_units)`` prior, summing to one over all pairs.
 
-    Entries are zero where a record's PUMA does not contain the zone, which is
-    what confines each record's weight to its own PUMA. The result is
-    normalised to sum to one over all (zone, individual) pairs, matching the
-    constraint ``sum_ij p_ij = 1`` in the derivation.
+    Every unit may receive weight in every zone of its own PUMA, so ``q`` has
+    no structural zeros here -- confining a unit to its PUMA is what selecting
+    the PUMA already did. The prior is the unit's own sample weight, spread
+    across zones and normalised so that ``sum_ij q_ij = 1``, as the derivation
+    requires.
+
+    ``zone_shares`` spreads a unit unevenly across zones -- a zone's share of
+    the PUMA's population, say. Omitted, the spread is uniform, which is the
+    classic PMEDM prior: it says the sample tells us what kinds of unit exist
+    and how many, and nothing about where they are. That is the honest starting
+    point when the constraints are what carry the spatial information.
+
+    Notes
+    -----
+    Dense, and comfortably so at one PUMA: roughly 3,500 units by 95 zones is
+    about 2.7 MB. The joint problem over four PUMAs would be an order of
+    magnitude larger and mostly structural zeros, which is the arithmetic
+    behind solving per PUMA.
     """
-    raise NotImplementedError
+    unit = pd.to_numeric(weights, errors="coerce").to_numpy(dtype=float)
+    if not np.all(np.isfinite(unit)) or np.any(unit < 0):
+        raise ValueError("unit weights must be finite and non-negative")
+    total = unit.sum()
+    if total <= 0:
+        raise ValueError("unit weights sum to zero; no unit could receive weight")
+
+    if zone_shares is None:
+        shares = np.full(n_zones, 1.0 / n_zones)
+    else:
+        shares = np.asarray(zone_shares, dtype=float)
+        if shares.shape != (n_zones,):
+            raise ValueError(f"zone_shares must be ({n_zones},), got {shares.shape}")
+        if np.any(shares < 0) or shares.sum() <= 0:
+            raise ValueError("zone_shares must be non-negative and sum above zero")
+        shares = shares / shares.sum()
+
+    return np.outer(shares, unit / total)
