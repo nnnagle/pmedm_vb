@@ -27,6 +27,25 @@ This is not production code. This is research code to write a paper. The paper w
       VB pending, as a Gaussian over lambda
 - [ ] write experiments (`experiments/`)
 
+## Open research questions
+
+- **Choosing `alpha`.** The saddlepoint evidence (`MAPResult.log_evidence`)
+  rises without bound as `alpha -> 0`, because tract totals are exactly the sums
+  of their block groups in the model and so the tract-versus-block-group
+  contrasts carry no sampling variance; the solver module docstring has the
+  argument and the numbers. Candidates, none tried: an analytic shrinkage
+  intensity estimated from the replicates alone (Schafer & Strimmer 2005,
+  whose derivation assumes independent samples, which SDR replicates are
+  not); the evidence restricted to the directions the sample informs; and
+  held-out-table prediction.
+- **Which Laplace approximation is the baseline.** Over `p` on the simplex, or
+  over `lambda` (the MaxEnt family). They agree on the constrained totals and
+  differ everywhere else, and the VB family -- a Gaussian over `lambda` --
+  corresponds to the second. `map_dual.laplace_precision` returns the dual
+  Hessian, from which either follows.
+- **Group quarters.** A PUMS shortfall the fit cannot place; see the open
+  questions in `census_data_sources.md`.
+
 ## Choosing constraint tables
 
 A PMEDM run is defined as much by *which* published tables constrain it as by

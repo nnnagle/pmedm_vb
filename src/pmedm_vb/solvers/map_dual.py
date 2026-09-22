@@ -85,6 +85,19 @@ real problems have ``m`` larger than ``n`` (5,000-8,600 constraints against
 one PUMA are the intended use, where approximation error should largely cancel
 -- an expectation, not something shown here. Absolute values should not be
 quoted, and values from different PUMAs are not comparable.
+
+**It cannot choose alpha.** In the Knox sweep the evidence rises without bound
+as ``alpha`` falls, at a near-constant ``(k/2) log(1/alpha)``. The model makes
+every tract total exactly the sum of its block groups', so for each category
+constrained at both levels the tract-minus-block-groups contrast has no
+sampling variance; its only variance is ``Sigma``'s, which is proportional to
+``alpha`` outside the replicate span, and the density concentrates there as
+``alpha -> 0``. For PUMA 4701501 that predicts ``k = 39 tracts x 48 categories =
+1,872``, a slope of 936; the observed slope is 975-1,020. The exact marginal
+likelihood diverges the same way, so this is the model, not the approximation.
+Comparing tapers at a fixed ``alpha`` is not obviously affected, since both
+share these directions, but has not been shown to be safe either. Choosing
+``alpha`` is an open research question; see the README.
 """
 
 from __future__ import annotations
@@ -139,7 +152,8 @@ class MAPResult:
         Saddlepoint approximation to ``log p(Y | alpha, taper)``, the marginal
         likelihood of the published totals; see *Evidence* in the module
         docstring for what it approximates and where it has been checked.
-        Compare it across ``alpha`` and ``taper`` within one PUMA only.
+        Not a basis for choosing ``alpha``: it grows without bound as
+        ``alpha -> 0`` (see *It cannot choose alpha* in the module docstring).
     trace:
         Per iteration: ``objective``, ``decrement``, ``step`` (the line-search
         length taken, 0 on the final row) and ``max_abs_z`` (the largest
