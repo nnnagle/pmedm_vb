@@ -56,9 +56,31 @@ to be in. ``diag(v)`` here is the marginal variance and is order-independent.
 
 **Polarity.** ``alpha = 1`` is classic diagonal PMEDM -- the low-rank term is
 identically zero, not merely small -- and ``alpha`` toward 0 approaches the full
-design covariance. ``alpha`` must stay strictly positive: at exactly 0,
+design covariance:
+
+===========  ==========  ==========  =========================
+``alpha``    rank        diagonal    off-diagonal vs. the full
+===========  ==========  ==========  =========================
+1.00         full        exact       0 percent
+0.50         full        exact       50 percent
+0.10         full        exact       90 percent
+0.01         full        exact       99 percent
+0.00         <= 80       exact       100 percent
+===========  ==========  ==========  =========================
+
+The diagonal is exact throughout; that is the point of the residual
+construction. What ``alpha`` trades is *correlation structure against
+conditioning*, not against rank -- rank only collapses at exactly 0, where
 ``D_i = v_i - s_i = 0`` on every non-degenerate cell and the Woodbury identity
 divides by it.
+
+It is worth being clear about which object here is rank-deficient. The raw
+design covariance ``(4/80) L L'`` has rank at most 80 however many cells there
+are, so a ``Sigma`` carrying the full replicate structure and nothing else
+cannot be inverted. ``D`` is what makes ``Sigma(alpha)`` full rank, and it is
+strictly positive only for ``alpha > 0``. So 99 percent of the correlation
+structure *and* full rank *and* the published diagonal are simultaneously
+available; 100 percent of it is not.
 
 **Why this shape, for the solvers.** The point of a diagonal-plus-low-rank
 ``Sigma`` is not that it is cheap on its own, but that it composes with the
