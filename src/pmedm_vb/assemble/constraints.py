@@ -365,47 +365,108 @@ def describe(area: StudyArea, tables: list[str], *, geography: str) -> pd.DataFr
     return cell_labels(area, tables, geography=geography).to_frame("title")
 
 
-def _bands(values: pd.Series, boundaries: Sequence[float]) -> list[tuple[str, pd.Series]]:
-    """Half-open bands ``[-inf, b0), [b0, b1), ... [bn, inf)`` over ``values``."""
-    edges = list(boundaries)
-    masks = [("lt_%g" % edges[0], values < edges[0])]
-    for low, high in zip(edges, edges[1:]):
-        masks.append(("%g_to_%g" % (low, high), (values >= low) & (values < high)))
-    masks.append(("ge_%g" % edges[-1], values >= edges[-1]))
-    return masks
+#: ``B01001``'s 23 published age bands as ``(lower, upper)``, upper exclusive.
+#: ``None`` is the open top. Read from the published titles: "Under 5 years",
+#: "5 to 9 years", "18 and 19 years", "20 years", "85 years and over". Recorded
+#: once so a collapse is derived from them rather than written out.
+B01001_BANDS = (
+    (0, 5), (5, 10), (10, 15), (15, 18), (18, 20), (20, 21), (21, 22), (22, 25),
+    (25, 30), (30, 35), (35, 40), (40, 45), (45, 50), (50, 55), (55, 60),
+    (60, 62), (62, 65), (65, 67), (67, 70), (70, 75), (75, 80), (80, 85),
+    (85, None),
+)
+
+#: Cell ``ORDER`` of each sex's first age band. The table runs total, male
+#: total, 23 male bands, female total, 23 female bands -- so band ``i`` is at
+#: ``offset + i`` and the two blocks are identical in structure.
+B01001_SEX_OFFSET = {"male": 3, "female": 27}
+
+#: ``SEX`` codes. Character width 1, so these are strings.
+SEX_CODES = {"male": "1", "female": "2"}
 
 
-def age_sex(boundaries: Sequence[int], geography: str = "block group") -> ConstraintTable:
-    """``B01001``: sex crossed with age bands, over persons.
+def age_sex(
+    boundaries: Sequence[int] = (5, 18, 25, 35, 65),
+    geography: str = "block group",
+) -> ConstraintTable:
+    """``B01001``: sex crossed with collapsed age bands, over persons.
 
-    ``boundaries`` are the collapsed age breaks, e.g. ``(18, 25, 35, 65)``.
-    Each **must** be a break the table actually publishes -- a collapse is exact
-    only when it merges published cells, and no boundary inside one can be
-    recovered. :func:`describe` prints the published breaks to check against.
+    ``boundaries`` are the collapsed breaks, each of which **must** be one
+    ``B01001`` publishes -- a collapse is exact only where it merges whole
+    published cells, and no break inside one can be recovered. The default
+    ``(5, 18, 25, 35, 65)`` gives 0-4, 5-17, 18-24, 25-34, 35-64, 65+.
 
-    Universe is the total population, so this table counts group-quarters
-    residents. It is usable only because a GQ record enters as a one-person unit
-    weighted by ``PWGTP``; weighting by ``WGTP`` alone would leave those people
+    An age-6 split was wanted, to separate preschool from school-age children.
+    ``B01001`` does not publish one: its first two bands are "Under 5 years"
+    and "5 to 9 years", so 6 falls inside a cell. 0-4 is the closest exact
+    alternative and is what the default uses.
+
+    Which cells make up each band is *derived* from :data:`B01001_BANDS` rather
+    than written out, for the reason given on :func:`household_income`: a
+    hand-written grouping can contradict its own declared boundary while every
+    cell key it names exists and is claimed exactly once, so ``validate`` could
+    not catch it.
+
+    Universe is the total population, so this counts group-quarters residents.
+    It is usable only because a GQ record enters as a one-person unit weighted
+    by ``PWGTP``; weighting by ``WGTP`` alone would leave those people
     unplaceable while the published counts still included them.
     """
+    published_edges = {upper for _, upper in B01001_BANDS if upper is not None}
+    unknown = sorted(set(boundaries) - published_edges)
+    if unknown:
+        raise ValueError(
+            f"{unknown} are not published breaks of B01001, so collapsing there "
+            f"would not be exact. Available: {sorted(published_edges)}"
+        )
 
-    def band(sex_code: str, mask_index: int):
-        def select(persons: pd.DataFrame) -> pd.Series:
-            _, mask = _bands(pd.to_numeric(persons["AGEP"]), boundaries)[mask_index]
-            return (persons["SEX"] == sex_code) & mask
-        return select
+    high = float("inf")
+    edges = [0, *sorted(boundaries), high]
 
-    n_bands = len(boundaries) + 1
-    names = [n for n, _ in _bands(pd.Series([0.0]), boundaries)]
+    categories = []
+    claimed: list[str] = []
+    for sex, offset in B01001_SEX_OFFSET.items():
+        for lower, upper in zip(edges, edges[1:]):
+            cells = tuple(
+                f"B01001_{offset + index:03d}"
+                for index, (band_low, band_high) in enumerate(B01001_BANDS)
+                if band_low >= lower and (high if band_high is None else band_high) <= upper
+            )
+            claimed.extend(cells)
+            span = (
+                f"lt_{upper:.0f}" if lower == 0
+                else f"ge_{lower:.0f}" if upper == high
+                else f"{lower:.0f}_to_{upper:.0f}"
+            )
+
+            def select(persons, code=SEX_CODES[sex], lower=lower, upper=upper):
+                age = pd.to_numeric(persons["AGEP"], errors="coerce")
+                return (persons["SEX"] == code) & (age >= lower) & (age < upper)
+
+            categories.append(
+                Category(name=f"{sex}_{span}", select=select, published=cells)
+            )
+
+    every = [
+        f"B01001_{offset + index:03d}"
+        for offset in B01001_SEX_OFFSET.values()
+        for index in range(len(B01001_BANDS))
+    ]
+    if sorted(claimed) != sorted(every):
+        raise AssertionError(
+            f"age collapse does not partition B01001: "
+            f"{sorted(set(every) - set(claimed))} unassigned, "
+            f"{[c for c in claimed if claimed.count(c) > 1]} assigned twice"
+        )
+
     return ConstraintTable(
         table="B01001",
         universe="person",
         geography=geography,
-        categories=tuple(
-            Category(name=f"{label}_{names[i]}", select=band(code, i))
-            for label, code in (("male", "1"), ("female", "2"))
-            for i in range(n_bands)
-        ),
+        categories=tuple(categories),
+        # The table total and each sex's subtotal: constraining a subtotal
+        # alongside its parts adds an X column that is their exact sum.
+        waived=("B01001_001", "B01001_002", "B01001_026"),
     )
 
 
