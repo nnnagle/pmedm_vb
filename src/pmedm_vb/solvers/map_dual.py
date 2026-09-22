@@ -108,7 +108,17 @@ class MAPResult:
         length taken, 0 on the final row) and ``max_abs_z`` (the largest
         ``|N X'p - Y| / sqrt(v)``, residuals in published standard errors).
         ``max_abs_z`` is a diagnostic, not a target: the penalised fit leaves
-        residuals by design.
+        residuals by design. ``mahalanobis`` is ``e' Sigma^{-1} e / m`` for
+        ``e = N X'p - Y`` and ``m`` constraints: the fit measured against this
+        run's own ``Sigma``, correlations included. At ``alpha = 1`` it is the
+        mean of ``z^2``. Where ``max_abs_z`` reads each cell against its own
+        standard error, this lets a residual be explained by correlated
+        neighbours, which is what the penalty itself does -- so it is the one to
+        compare across ``alpha`` and ``taper``. It is not a chi-squared
+        statistic: the fitted residuals are shrunk by the penalty. Linearising
+        the fit about the optimum, its expectation when the model holds is
+        ``tr(c Sigma H^{-1}) / m``, which is below 1 because
+        ``H = Cov_p(X) + c Sigma``.
     """
 
     lam: np.ndarray
@@ -237,7 +247,9 @@ def solve_map(
     scale = np.sqrt(inputs.sigma_v)
     targets = inputs.targets()
 
-    trace: dict[str, list[float]] = {"objective": [], "decrement": [], "step": [], "max_abs_z": []}
+    trace: dict[str, list[float]] = {
+        "objective": [], "decrement": [], "step": [], "max_abs_z": [], "mahalanobis": [],
+    }
     converged = False
     decrement = np.inf
     n_iter = 0
@@ -259,9 +271,9 @@ def solve_map(
         decrement = -0.5 * slope
         trace["objective"].append(state.objective)
         trace["decrement"].append(decrement)
-        trace["max_abs_z"].append(
-            float(np.abs((inputs.N * state.u - targets) / scale).max())
-        )
+        residual = inputs.N * state.u - targets
+        trace["max_abs_z"].append(float(np.abs(residual / scale).max()))
+        trace["mahalanobis"].append(float(residual @ sigma.solve(residual)) / residual.size)
         if decrement <= tol:
             converged = True
             trace["step"].append(0.0)
@@ -284,16 +296,19 @@ def solve_map(
             )
         trace["step"].append(step)
         logger.info(
-            "  iter %3d  objective %.12g  decrement %.2e  step %.3g  max|z| %.2f  %.1fs",
+            "  iter %3d  objective %.12g  decrement %.2e  step %.3g  max|z| %.2f  "
+            "e'S^-1e/m %.4f  %.1fs",
             n_iter, state.objective, decrement, step, trace["max_abs_z"][-1],
+            trace["mahalanobis"][-1],
             time.perf_counter() - tick,
         )
         state = candidate
 
     logger.info(
-        "solve_map PUMA %s: %s after %d iterations, decrement %.2e, %.1fs",
+        "solve_map PUMA %s: %s after %d iterations, decrement %.2e, "
+        "e'S^-1e/m %.4f, %.1fs",
         inputs.puma, "converged" if converged else "NOT converged",
-        n_iter, decrement, time.perf_counter() - started,
+        n_iter, decrement, trace["mahalanobis"][-1], time.perf_counter() - started,
     )
     return MAPResult(
         lam=state.lam,
