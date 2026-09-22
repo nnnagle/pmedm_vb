@@ -35,6 +35,25 @@ zero-cell variance silently scaled down, making the cells we know least about
 look the most certain. Here ``s_i`` is exactly zero for those cells, so
 ``D_i = v_i = w * k`` at any ``alpha``.
 
+**The same thing written as variance and correlation.** With ``D = diag(v)``
+and ``R`` the replicate correlation matrix, this is exactly
+
+.. math::
+
+    \Sigma(\alpha) = D^{1/2}\,[\,(1-\alpha) R + \alpha I\,]\,D^{1/2}
+
+-- algebraically identical, verified to 3e-17. So ``alpha`` shrinks the
+*correlation* matrix toward the identity while the variances stay exactly as
+published, which is the interpretation the residual definition was chosen for.
+The factored form is stored instead only because it is ``O(n * 80)`` where the
+correlation form is ``O(n^2)``.
+
+This is *not* an ``LDL'`` decomposition and cannot be made into one with ``D``
+holding the variances. ``LDL'`` pivots are conditional variances,
+``Var(cell j | cells 1..j-1)``, which fall strictly below the marginal variance
+wherever cells are correlated, and which depend on the order the cells happen
+to be in. ``diag(v)`` here is the marginal variance and is order-independent.
+
 **Polarity.** ``alpha = 1`` is classic diagonal PMEDM -- the low-rank term is
 identically zero, not merely small -- and ``alpha`` toward 0 approaches the full
 design covariance. ``alpha`` must stay strictly positive: at exactly 0,
@@ -194,6 +213,28 @@ class Sigma:
         if b is None:
             return self.d
         return self.d + np.square(b).sum(axis=1)
+
+    def draw(self, rng: np.random.Generator, size: int = 1) -> np.ndarray:
+        """Draw ``size`` vectors from ``N(0, Sigma)``, without factorising.
+
+        ``D + BB'`` samples exactly as ``sqrt(D) * z1 + B @ z2`` for independent
+        standard normals ``z1`` of length ``n`` and ``z2`` of length 80, since
+        the covariance of that sum is ``D + BB'`` by construction. No square
+        root of ``Sigma`` is needed, which is the point: a Cholesky factor of
+        an ``(n, n)`` matrix is exactly what this representation exists to
+        avoid, and the VB objective needs draws rather than a factor.
+
+        Returns
+        -------
+        numpy.ndarray
+            ``(n, size)``, one draw per column.
+        """
+        n = self.v.size
+        out = np.sqrt(self.d)[:, None] * rng.standard_normal((n, size))
+        b = self.b
+        if b is None:
+            return out
+        return out + b @ rng.standard_normal((b.shape[1], size))
 
     def to_dense(self) -> np.ndarray:
         """Materialise ``Sigma``. For checking against a direct solve only.
