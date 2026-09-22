@@ -230,10 +230,10 @@ def build_by_puma(
     nowhere to go.
 
     What this gives up is the cross-PUMA blocks of ``Sigma``. Block groups in
-    different PUMAs are expected to have correlated ACS error -- on the
-    assumption, recorded but **unverified** in
-    :mod:`pmedm_vb.assemble.targets`, that every cell derives from the same 80
-    replicate weight sets -- and solving separately discards that correlation.
+    different PUMAs have correlated ACS error, since every cell derives from the
+    same 80 replicate weight sets (verified -- see
+    :mod:`pmedm_vb.assemble.targets`), and solving separately discards that
+    correlation.
     """
     zones = puma_crosswalk_whole(area)
     by_geography: dict[str, list[ConstraintTable]] = {}

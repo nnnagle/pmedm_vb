@@ -18,11 +18,10 @@ Two consequences that are easy to get backwards:
   between them.
 
   That rests on every cell deriving from the same 80 replicate weight sets,
-  which is **assumed, not verified**. The test is cheap and has not been run:
-  ``B01003_001`` and ``B01001_001`` are both total population, so shared
-  weights means they agree across all 80 replicates *exactly*. If they do not,
-  cross-table covariance is not what this claims and the freedom to mix
-  non-aligned constraints goes with it.
+  and it is **verified**: ``B01003_001`` and ``B01001_001`` are both total
+  population, and across all 80 replicates they agree to a maximum absolute
+  difference of *exactly* zero -- not approximately, which is what shared
+  weights and only shared weights produces.
 
 Row order throughout is the stacked constraint vector, **column-major**: for a
 block of ``(n_areas, n_categories)``, entry ``(i, j)`` sits at

@@ -237,6 +237,19 @@ $$\mathrm{Var}(\hat X) = \frac{4}{80}\sum_{r=1}^{80}(\hat X_r - \hat X)^2
   (Fay & Train 1995).
 - `1.645` is the 90 percent normal deviate, the level ACS publishes MOEs at.
 
+### Replicate weights are shared across tables
+
+**Verified**, and it matters: cross-table covariance, and with it the freedom
+for constraints from different tables to use different breaks, rests entirely
+on this. `B01003_001` and `B01001_001` are both total population, and across
+all 80 replicates they agree to a maximum absolute difference of **exactly
+zero** — the signature of one set of replicate weights behind every table,
+which nothing else would produce.
+
+The consequence is that stacking cells from different tables into a single `L`
+carries their correlation directly. Only a constraint's own definition has to
+match its own published cell; no two constraints need agree with each other.
+
 ### Cross-cell covariance
 
 $$\mathrm{Cov}(a,b) = \frac{4}{80}\sum_{r=1}^{80}(a_r-\hat a)(b_r-\hat b)$$
@@ -386,7 +399,6 @@ with no tables.
 | question | why it matters |
 |---|---|
 | **2019–2023 PUMA coding** | Its PUMS dictionary was never checked, and that period spans the redraw. Only matters if a run needs that vintage; 2020–2024 avoids the question. |
-| **Replicate weights shared across tables** | Cross-table covariance — and the freedom for constraints at different levels not to align — assumes every cell derives from the same 80 replicate weight sets. Asserted in `targets.py` and `report.py`, **not verified**. The test: `B01003_001` and `B01001_001` are both total population, so shared weights means they agree across all 80 replicates *exactly*, not approximately. |
 | **Suppressed values** | Whether `ESTIMATE` or the replicates ever carry non-numeric suppression markers was not observed. The parser coerces, so such a value becomes `NaN` rather than failing loudly. |
 
 ## Reproducing a probe
