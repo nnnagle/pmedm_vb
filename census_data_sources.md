@@ -2,11 +2,19 @@
 
 What the Census endpoints actually look like, and how we know.
 
-Every fact here was confirmed on **2026-09-21** against a live directory
-listing, file header, or published document — not recalled or inferred. It
-exists because the endpoints are not self-describing: directory layouts differ
-between products, casing is inconsistent, coverage varies by geography, and the
-variance formulas live in a PDF.
+Facts here are confirmed against a live directory listing, file header, or
+published document, and each says which. The document exists because the
+endpoints are not self-describing: directory layouts differ between products,
+casing is inconsistent, coverage varies by geography, and the variance formulas
+live in a PDF.
+
+**An earlier version of this line claimed every fact had been so confirmed.
+That was not true, and the exception was expensive.** `ST` was recorded as the
+PUMS state column, taken from documentation rather than from a header, and
+nothing in the package read a header either — so it survived until the first
+run that opened a zip, where it broke every housing-file load. The column is
+`STATE`. Treat an unattributed claim here as unverified, and prefer opening the
+file.
 
 The vintage probed in detail was **2019–2023 (2023 ACS 5-year)**. The
 **2020–2024** vintage was then confirmed to have the same shape and is the one
@@ -41,16 +49,89 @@ NAME,<var>,<type>,<width>,"description"
 VAL,<var>,<type>,<width>,<lo>,<hi>,<label>
 ```
 
+The two shapes have different widths, so this is a **ragged CSV** and pandas
+cannot read it directly; `pums.data_dictionary()` parses it with the `csv`
+module into one tidy frame. Three properties of the file that the parser
+encodes:
+
+- `lo` and `hi` are **text, not numbers**. Usually numeric ranges, but a PUMA
+  bound is `00101` and reading it as a number destroys the padding exactly as
+  it would in the data.
+- A variable declared for **both record types appears twice** -- the dictionary
+  describes person and housing separately. `variables()` and
+  `variable_labels()` de-duplicate; `data_dictionary()` does not, so the frame
+  represents the file as published.
+- A **continuous column declares no `VAL` rows** (`AGEP`, `HINCP`). That is not
+  the same as a column absent from the vintage, and `variable_labels()`
+  distinguishes the two in its error.
+
 Two columns matter more than the rest:
 
 - **`PUMA`** — in the 2020–2024 dictionary this is a single 5-character column
-  on the **2020 Census definition**, combined with `ST` for a unique code.
+  on the **2020 Census definition**, combined with `STATE` for a unique code.
   There is no `PUMA10`/`PUMA20` split to reconcile. This is what allows the
   crosswalk in §4 to work from the 2020 file alone.
 - **`SERIALNO`** — character, e.g. `2020GQ0000001`. Never read it as numeric.
 
-`ST` and `PUMA` are numeric-looking and lose leading zeros if a reader infers
+- **`STATE`** — the state code is spelled `STATE` in the 2020–2024 files,
+  **not `ST`**. Confirmed two ways: the `psam_h47.csv` header, and the
+  dictionary's own `STATE,C,2,State code` row, with `PUMA`'s label reading "use
+  with STATE for unique code". This document asserted `ST` until 2026-09-21,
+  taken from documentation rather than from a header, and nothing caught it
+  because nothing else reads one. `pums.STATE_COLUMN_ALIASES` now resolves the
+  name against the file and raises naming both candidates if neither is there.
+
+`STATE` and `PUMA` are numeric-looking and lose leading zeros if a reader infers
 their type. Read as text, then zero-pad defensively.
+
+**Two distinct traps in reading PUMS columns**, which look alike and are not:
+
+- **Inferred types destroy character codes.** `HISP` is `C` width 2, so `"01"`
+  (not Hispanic) becomes `1.0` and `HISP != "01"` is true for every record.
+  `load_pums` reads the dictionary and forces text for every `C` column, so
+  this is handled — but only for columns requested through it.
+- **A `b` code means the field is blank.** The dictionary writes `b` repeated to
+  the column width — `TEN` `b`, `JWTRNS` `bb`, `OCCP` `bbbb` — and the published
+  CSV field is genuinely empty, so it reads as `NaN` under any dtype. Match it
+  with `.isna()`; `TEN == "b"` matches nothing. Confirmed on the Tennessee
+  housing file, where `TEN` is null for exactly 26,484 records = 10,204 vacant
+  + 16,280 group quarters.
+
+**PUMS weights pin household population exactly, and group quarters not at
+all.** For PUMA 4701501 (2020–2024, Knox County):
+
+| | PUMS | published | gap |
+|---|---|---|---|
+| total population | 137,125 | 138,155 | 1,030 |
+| group quarters (`B26001`) | 8,634 | 9,664 | 1,030 |
+| household population | **128,491** | **128,491** | **0** |
+
+The whole total-population shortfall is the group-quarters shortfall, and the
+household side agrees to the person. So `PWGTP` is controlled to household
+population and group quarters is left to drift — about 11 percent here. This is
+a property of the published weights, not of any join: the person and housing
+files are internally consistent (763 GQ records each way, no orphans in either
+direction).
+
+Consequence for PMEDM: design weights start ~11 percent low on group quarters
+and exact on households. That is what `B26001` as a constraint is for — the
+solver scales the GQ units up. It also means a person-level check against
+published totals should expect a small deficit concentrated entirely in GQ,
+rather than treating it as a mapping error.
+
+**Group quarters carry no housing weight.** `WGTP` is exactly 0 for every record
+with `TYPEHUGQ` in `{2, 3}` (8,077 institutional + 8,203 noninstitutional in
+Tennessee); the weight is on the person record's `PWGTP` instead. Each GQ
+housing record corresponds to exactly one person record — 16,280 of each,
+148,450 people weighted — so a GQ unit is a one-person household, and a model
+weighting households by `WGTP` alone can never place a group-quarters resident.
+That matters wherever GQ is concentrated: `B01001` and the other
+total-population tables include those people in their published counts.
+
+**Archive layout.** A state's zip holds one CSV — `psam_h{st}.csv`, 241 columns
+for housing — beside `ACS2020_2024_PUMS_README.pdf`. `load_pums` reads every
+`.csv` member and concatenates, which is correct for one and stays correct for
+several.
 
 ---
 
@@ -79,6 +160,19 @@ state, `050` county, `060` county subdivision, `160` place, `250` AIANNH,
 Two-digit **state FIPS**. Codes `03`, `07` and `14` are absent, which is what
 identifies the suffix as FIPS rather than a sequence — those three are
 unassigned.
+
+### Encoding
+
+**Not UTF-8.** A replicate file carrying an accented place name holds a raw
+`0xFA` (`ú` in Windows-1252), and pandas' default decoding fails on the entire
+table for it — first hit on `B08301` at block group. `cache.decode()` tries
+UTF-8 then cp1252, which keeps a genuinely UTF-8 file correct and reads the
+legacy ones without loss. It is a fallback order, not detection: cp1252 leaves
+only five byte values undefined, so it decodes nearly anything.
+
+The PUMS CSVs come from the same publisher and take the same treatment, by
+retrying the read rather than decoding in memory — those files are hundreds of
+megabytes.
 
 ### Column layout
 
@@ -142,6 +236,19 @@ $$\mathrm{Var}(\hat X) = \frac{4}{80}\sum_{r=1}^{80}(\hat X_r - \hat X)^2
 - The `4/80` is an artifact of using SDR with 80 replicates
   (Fay & Train 1995).
 - `1.645` is the 90 percent normal deviate, the level ACS publishes MOEs at.
+
+### Replicate weights are shared across tables
+
+**Verified**, and it matters: cross-table covariance, and with it the freedom
+for constraints from different tables to use different breaks, rests entirely
+on this. `B01003_001` and `B01001_001` are both total population, and across
+all 80 replicates they agree to a maximum absolute difference of **exactly
+zero** — the signature of one set of replicate weights behind every table,
+which nothing else would produce.
+
+The consequence is that stacking cells from different tables into a single `L`
+carries their correlation directly. Only a constraint's own definition has to
+match its own published cell; no two constraints need agree with each other.
 
 ### Cross-cell covariance
 
@@ -227,7 +334,7 @@ BOM** (`EF BB BF`) and LF line endings; read it with `utf-8-sig`.
 | derived | construction | width |
 |---|---|---|
 | tract GEOID | `STATEFP + COUNTYFP + TRACTCE` | 2+3+6 = 11 |
-| PUMA GEOID | `STATEFP + PUMA5CE` | 2+5 = 7, matching PUMS `ST + PUMA` |
+| PUMA GEOID | `STATEFP + PUMA5CE` | 2+5 = 7, matching PUMS `STATE + PUMA` |
 
 **Block group nesting is string slicing.** A 12-character block group GEOID
 contains its parent tract GEOID as its first 11 characters. No spatial join.
@@ -272,14 +379,27 @@ coding and the published geographies have to agree.
 
 ---
 
+## Table coverage by geography
+
+`variance.coverage(area)` returns one row per table with a boolean per summary
+level, read from the directory index at each level -- one request per geography,
+against one per table for `is_available()`. The published
+`VRE_Table_and_Geo_List_{year}.xlsx` answers the same question but would pull in
+an Excel reader to do it.
+
+The index is parsed with a regex over `href="{TBLID}_{stfips}.csv.zip"`, the same
+format `tools/verify_vintage.sh` depends on, so a change to census.gov's listing
+format breaks both together. An empty result raises rather than reporting a level
+with no tables.
+
+---
+
 ## Open questions
 
 | question | why it matters |
 |---|---|
 | **2019–2023 PUMA coding** | Its PUMS dictionary was never checked, and that period spans the redraw. Only matters if a run needs that vintage; 2020–2024 avoids the question. |
-| **Table-by-geography list** | `VRE_Table_and_Geo_List_{year}.xlsx` holds per-geography coverage but was not parsed, to avoid an Excel reader dependency. `is_available()` asks the server with a HEAD request instead. |
 | **Suppressed values** | Whether `ESTIMATE` or the replicates ever carry non-numeric suppression markers was not observed. The parser coerces, so such a value becomes `NaN` rather than failing loudly. |
-| **PUMS zip members** | The PUMS zips were never opened — too large to probe casually. `load_pums` reads every `.csv` member and concatenates, which is correct whether a state ships one file or several. |
 
 ## Reproducing a probe
 

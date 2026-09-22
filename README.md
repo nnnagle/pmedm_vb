@@ -20,11 +20,111 @@ This is not production code. This is research code to write a paper. The paper w
 ## ToDo:
 - [x] Determine package folder structure
 - [x] write downloaders (`src/pmedm_vb/data/`)
-- [ ] write assembly (`src/pmedm_vb/assemble/`) -- attribute matrices,
+- [x] write assembly (`src/pmedm_vb/assemble/`) -- attribute matrices,
       aggregation operators, targets, and the `Sigma` representation the
-      solvers consume
+      solvers consume. One problem per PUMA: `assemble.build.build_all()`
 - [ ] write solvers (`src/pmedm_vb/solvers/`)
 - [ ] write experiments (`experiments/`)
+
+## Choosing constraint tables
+
+A PMEDM run is defined as much by *which* published tables constrain it as by
+the solver. Two questions decide that, and `pmedm_vb.data` answers both without
+downloading anything large.
+
+**1. What is published, and where?** Coverage thins as geography gets finer, and
+block group is the binding constraint. `coverage()` returns one row per table
+with a boolean per summary level:
+
+```python
+from pmedm_vb.config import StudyArea
+from pmedm_vb.data.variance import coverage
+
+area = StudyArea(name="knox", state="47", year=2024, counties=("093",))
+cov = coverage(area)
+
+cov[["tract", "block_group"]].sum()     # 2020-2024: 133 and 73
+cov[cov.block_group]                    # what a block-group run may use
+```
+
+It reads the directory index once per level. Built table by table from
+`is_available()` the same answer costs one request per table per geography --
+268 for this vintage -- so `is_available()` is for asking about *a* table, and
+`coverage()` for asking about all of them. `table_list()` gives the master list
+with titles; `published_tables()` gives one level's IDs alone.
+
+Two things to know when reading the result. Match `[BC]`, not `B`: `C02003`,
+`C15010`, `C17002`, `C24010` and `C24030` all reach block group, and a `B`-only
+habit hides them. And `B16001` is published at *neither* level despite appearing
+in the master list, which is why the master count exceeds the tract count.
+
+**2. Can PUMS reproduce its cells?** A table published at block group is still
+unusable if the microdata cannot rebuild its categories break for break. That is
+checked against the data dictionary, which is a small CSV -- not the
+hundred-megabyte data zips:
+
+```python
+from pmedm_vb.data.pums import variables, variable_labels
+
+variables(area)                          # every declared column, with its label
+variable_labels(area, "JWTRNS")          # the codes one cell must be written against
+```
+
+`variables()` answers "does this vintage carry the column I think it does",
+which is worth asking first because PUMS renames columns between vintages and a
+missing one otherwise surfaces as a `KeyError` after the download.
+`variable_labels()` gives the value codes and their published meanings --
+the correspondence between a table cell and a set of PUMS codes is where silent
+misfit comes from, so it is read rather than assumed. A continuous column
+(`AGEP`, `HINCP`) declares no values and raises; `data_dictionary()` returns the
+whole file if you would rather query it yourself.
+
+**Granularity is a separate choice from table choice.** Because the replicate
+files carry all 80 replicates rather than only a margin of error, collapsing
+published cells is exact: summing cells is a linear map on the estimates, and
+the same map applied to the replicate deviations gives the collapsed
+constraints' covariance including the correlations between the merged cells. So
+`B01001`'s 23 age bands per sex can become five without approximation --
+which matters at block group, where fine bands are mostly zeros and every zero
+cell falls back on the modelled `w·k` variance.
+
+Everything above is cached under `$PMEDM_VB_DATA/raw/` on first call and reused
+after, so re-running while deciding costs nothing. Pass `force=True` to refetch.
+
+## Verification
+
+Two scripts, plus a check that runs implicitly. All need census.gov, which is
+unreachable from sandboxed environments.
+
+```
+tools/verify_vintage.sh                 # the data layer, against a vintage
+tools/check_mapping.py [PUMA]           # every constraint definition at once
+```
+
+`verify_vintage.sh` confirms the endpoints are shaped as the downloaders expect
+and that recomputed MOEs match Census's published ones to rounding -- the
+strongest check available, since the files publish their own answer.
+
+`check_mapping.py` compares weighted PUMS totals against published estimates
+for every constraint, standardised by the published standard error. Its
+docstring says how to read the result; briefly, a whole table off-centre is a
+definition error and scattered large `|z|` is sampling.
+
+Assembling a problem runs the third check implicitly -- `PMEDMInputs.validate()`
+per PUMA, after `ConstraintTable.validate()` has checked every declared cell
+against the published cell list:
+
+```python
+from pmedm_vb.assemble.build import build_all
+problems = build_all(area, default_tables(area))
+```
+
+**Knox County is exactly four whole PUMAs** -- 4701501 to 4701504, 121 tracts,
+301 block groups, none reaching into a neighbouring county -- so the whole-PUMA
+expansion is a no-op here. `geography.puma_coverage(area)` reports this for any
+study area and should be run before adopting a new one: a PUMA crossing the
+boundary makes a per-PUMA run ill-posed, since its PUMS records represent all
+of it.
 
 ## Every session
 
@@ -56,13 +156,23 @@ pmedm() {
     conda activate /lustre/isaac24/proj/UTK0496/envs/pmedm_vb
     export PMEDM_VB_DATA=/lustre/isaac24/scratch/$USER/pmedm_vb_data
     mkdir -p "$PMEDM_VB_DATA"
-    echo "pmedm_vb: $(python -V), $(python -c 'import sys; print(sys.executable)')"
+    case "$(python -c 'import sys; print(sys.executable)')" in
+        "$CONDA_PREFIX"/*) echo "pmedm_vb: $(python -V) OK  data=$PMEDM_VB_DATA" ;;
+        *) echo "SHADOWED: python is $(command -v python), not $CONDA_PREFIX/bin/python" ;;
+    esac
 }
 ```
 
-The echo is a guard: anything other than 3.11 from inside the env prefix means
-something has shadowed it again, and `$CONDA_PREFIX/bin/python` is the fallback
-that always works.
+The guard compares the interpreter's **path** against `$CONDA_PREFIX`, not its
+version. An earlier version checked the version, and could not catch the case
+it existed for: the anaconda3 2024.06 module ships Python 3.11.11, the same
+minor version as this environment, so `python -V` reads correct while `python`
+is the module's binary. `CONDA_PREFIX` and the prompt both look right too. The
+symptom is `ModuleNotFoundError: No module named 'pmedm_vb'` from a shell that
+appears fully activated.
+
+`$CONDA_PREFIX/bin/python` always works and is worth using for real runs
+regardless.
 
 ## Setup
 

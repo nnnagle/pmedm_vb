@@ -1,5 +1,11 @@
 """Turn downloaded data into the arrays the solvers consume.
 
+:mod:`~pmedm_vb.assemble.constraints` says which published cells constrain a run
+and which PUMS records feed each one,
+:mod:`~pmedm_vb.assemble.targets` collapses those cells into ``Y`` and the
+factors of its covariance, :mod:`~pmedm_vb.assemble.sigma` is the covariance
+itself, :mod:`~pmedm_vb.assemble.report` prints what is being constrained and
+how much covariance structure it carries,
 :mod:`~pmedm_vb.assemble.design` builds the individual attribute matrices and
 the zone-to-constraint aggregation operators, :mod:`~pmedm_vb.assemble.targets`
 builds the constraint targets and their covariance, and

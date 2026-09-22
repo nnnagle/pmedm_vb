@@ -23,6 +23,44 @@ CHUNK_BYTES = 1 << 20
 #: not killed by it.
 TIMEOUT_SECONDS = 120
 
+#: Encodings tried, in order, when decoding a published Census file. These are
+#: not UTF-8: a replicate table carrying an accented place name has a raw
+#: ``0xFA`` in it, which is ``u`` with an acute accent in the Windows codepage
+#: and not valid UTF-8 at all. Trying UTF-8 first keeps a genuinely UTF-8 file
+#: correct; cp1252 then decodes the legacy ones without loss. Decoding straight
+#: to cp1252, or passing ``errors="replace"``, would quietly corrupt characters
+#: instead of reading them.
+#:
+#: This is a fallback order, not encoding detection: cp1252 leaves only five
+#: byte values undefined, so it decodes almost anything and the raise below is
+#: close to unreachable. What is guaranteed is "UTF-8 where the file really is
+#: UTF-8, cp1252 otherwise" -- a file in some third encoding would be decoded
+#: wrongly rather than rejected.
+PUBLISHED_ENCODINGS = ("utf-8-sig", "cp1252")
+
+
+def decode(raw: bytes, *, source: str = "") -> str:
+    """Decode bytes from a published file, trying :data:`PUBLISHED_ENCODINGS`.
+
+    Raises
+    ------
+    UnicodeDecodeError
+        If no candidate encoding decodes the bytes, which means the publisher
+        changed encoding again rather than that this particular file is odd.
+    """
+    for encoding in PUBLISHED_ENCODINGS:
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError as error:
+            last = error
+    raise UnicodeDecodeError(
+        last.encoding,
+        last.object,
+        last.start,
+        last.end,
+        f"none of {list(PUBLISHED_ENCODINGS)} decodes {source or 'this file'}",
+    )
+
 
 def fetch(url: str, dest: Path, *, force: bool = False) -> Path:
     """Download ``url`` to ``dest`` unless it is already there.
