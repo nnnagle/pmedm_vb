@@ -400,6 +400,7 @@ with no tables.
 |---|---|
 | **2019–2023 PUMA coding** | Its PUMS dictionary was never checked, and that period spans the redraw. Only matters if a run needs that vintage; 2020–2024 avoids the question. |
 | **Suppressed values** | Whether `ESTIMATE` or the replicates ever carry non-numeric suppression markers was not observed. The parser coerces, so such a value becomes `NaN` rather than failing loudly. |
+| **Group quarters: the fit cannot place the PUMS shortfall** | The 1,030-person GQ gap in §1 does not scale away in the fit. In the MAP sweep for PUMA 4701501 (tract taper, α = 1) the two largest residuals are `B26001` in tract 47093000902 (published 4,109, fitted 3,498, z = −8.3) and 47093000901 (2,032 vs 1,689, z = −4.4), which together hold 954 of the 1,030. `N` is fixed at the PUMS unit total, so raising GQ weight means taking it from households, which the household constraints resist. GQ also leaks into tracts publishing zero (47093002400: 0 published, 25 fitted, z = 2.1); 6 of the 39 tracts publish zero, and their modelled SE of 12 makes a leak cheap. Corrections to study: **(a)** a GQ count at tract, block group or block from another source; which tables exist, at what geography and vintage, has not been checked. **(b)** Treating a published zero as structural (`q = 0` for GQ units in such zones); not to be adopted before reading the Census documentation on how a zero GQ count is estimated and what its MOE means. |
 
 ## Reproducing a probe
 
