@@ -27,9 +27,14 @@ requires.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import numpy as np
+import scipy.sparse as sp
+from scipy.special import logsumexp
 
 from pmedm_vb.assemble.inputs import PMEDMInputs
+from pmedm_vb.assemble.sigma import Sigma
 
 
 class ConstraintOperator:
@@ -42,7 +47,13 @@ class ConstraintOperator:
     """
 
     def __init__(self, inputs: PMEDMInputs) -> None:
-        raise NotImplementedError
+        self.A_T = sp.csr_matrix(inputs.A_T)
+        self.A_B = sp.csr_matrix(inputs.A_B)
+        self.X_T = sp.csr_matrix(inputs.X_T)
+        self.X_B = sp.csr_matrix(inputs.X_B)
+        self.shape_T = inputs.Y_T.shape
+        self.shape_B = inputs.Y_B.shape
+        self.split = inputs.Y_T.size
 
     def forward(self, W: np.ndarray) -> np.ndarray:
         """Map weights to the stacked constraint vector.
@@ -51,29 +62,93 @@ class ConstraintOperator:
         of ``vec(A_T W X_T)`` and ``vec(A_B W X_B)``, of length
         :attr:`~pmedm_vb.assemble.inputs.PMEDMInputs.n_constraints`.
         """
-        raise NotImplementedError
+        tract = self.A_T @ (self.X_T.T @ W.T).T
+        block_group = self.A_B @ (self.X_B.T @ W.T).T
+        return np.concatenate([tract.ravel(order="F"), block_group.ravel(order="F")])
 
     def adjoint(self, v: np.ndarray) -> np.ndarray:
         """Map a stacked constraint vector back to ``(n_zones, n_individuals)``.
 
         Splits ``v`` into its tract and block group blocks, reshapes each
-        column-major, and accumulates ``A' V X'`` over the two.
+        column-major, and accumulates ``A' V X'`` over the two. Applied to
+        ``lambda`` this is ``X lambda`` in the derivation's notation, laid out
+        as a weight matrix.
         """
-        raise NotImplementedError
+        v_t = v[: self.split].reshape(self.shape_T, order="F")
+        v_b = v[self.split :].reshape(self.shape_B, order="F")
+        return (self.A_T.T @ (self.X_T @ v_t.T).T) + (self.A_B.T @ (self.X_B @ v_b.T).T)
 
 
-def weights_from_lambda(inputs: PMEDMInputs, lam: np.ndarray) -> np.ndarray:
+def penalty_scale(inputs: PMEDMInputs) -> float:
+    """``c = n / N^2``, the factor on ``Sigma`` throughout the dual."""
+    return inputs.n / inputs.N**2
+
+
+def _log_weights(
+    inputs: PMEDMInputs, lam: np.ndarray, op: ConstraintOperator
+) -> tuple[np.ndarray, float]:
+    """``log q - X lam`` and its log-sum-exp, the two pieces ``p`` and the
+    objective share. ``q = 0`` gives ``-inf``, which exponentiates to 0."""
+    with np.errstate(divide="ignore"):
+        logits = np.log(inputs.q) - op.adjoint(lam)
+    return logits, float(logsumexp(logits))
+
+
+def weights_from_lambda(
+    inputs: PMEDMInputs, lam: np.ndarray, op: ConstraintOperator | None = None
+) -> np.ndarray:
     """Recover ``p`` from the multipliers.
 
     From the derivation, ``p = q * exp(-X lam) / (q' exp(-X lam))`` -- the
     softmax-like form that makes the primal solution a closed function of the
-    dual variable. Must be computed in log space; the exponent is unbounded and
-    overflows readily at realistic constraint counts.
+    dual variable. Computed in log space, as a softmax over every
+    (zone, unit) pair; the exponent is unbounded and overflows readily at
+    realistic constraint counts.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(n_zones, n_units)``, summing to one. Multiply by ``N`` for
+        population weights.
     """
-    raise NotImplementedError
+    op = op or ConstraintOperator(inputs)
+    logits, total = _log_weights(inputs, lam, op)
+    return np.exp(logits - total)
 
 
-def dual_objective(inputs: PMEDMInputs, lam: np.ndarray) -> float:
+class DualState(NamedTuple):
+    """Everything one evaluation of the dual produces, so nothing is recomputed.
+
+    ``u`` is ``X'p``, which the gradient needs and the Hessian reuses.
+    """
+
+    lam: np.ndarray
+    p: np.ndarray
+    u: np.ndarray
+    objective: float
+    gradient: np.ndarray
+
+
+def dual_state(
+    inputs: PMEDMInputs,
+    lam: np.ndarray,
+    sigma: Sigma,
+    op: ConstraintOperator | None = None,
+) -> DualState:
+    """Evaluate ``p``, ``X'p``, the objective and the gradient at ``lam``."""
+    op = op or ConstraintOperator(inputs)
+    c = penalty_scale(inputs)
+    logits, total = _log_weights(inputs, lam, op)
+    p = np.exp(logits - total)
+    u = op.forward(p)
+    y = inputs.targets() / inputs.N
+    sigma_lam = sigma.matvec(lam)
+    objective = float(y @ lam + total + 0.5 * c * (lam @ sigma_lam))
+    gradient = y + c * sigma_lam - u
+    return DualState(lam=lam, p=p, u=u, objective=objective, gradient=gradient)
+
+
+def dual_objective(inputs: PMEDMInputs, lam: np.ndarray, sigma: Sigma) -> float:
     """Evaluate the dual objective being minimised.
 
     From the derivation,
@@ -83,13 +158,13 @@ def dual_objective(inputs: PMEDMInputs, lam: np.ndarray) -> float:
         n^{-1} M(\\lambda) = Y'\\lambda/N + \\log(q' \\exp(-X\\lambda))
                              + 0.5 (n/N^2) \\lambda' \\Sigma \\lambda
     """
-    raise NotImplementedError
+    return dual_state(inputs, lam, sigma).objective
 
 
-def dual_gradient(inputs: PMEDMInputs, lam: np.ndarray) -> np.ndarray:
+def dual_gradient(inputs: PMEDMInputs, lam: np.ndarray, sigma: Sigma) -> np.ndarray:
     """Gradient of :func:`dual_objective`.
 
     ``(Y/N + (n/N^2) Sigma lam) - X'p``, which is the cheap part of MaxEnt: it
     costs one :meth:`ConstraintOperator.forward` and nothing else.
     """
-    raise NotImplementedError
+    return dual_state(inputs, lam, sigma).gradient

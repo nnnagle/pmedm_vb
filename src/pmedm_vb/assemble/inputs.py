@@ -140,14 +140,57 @@ class PMEDMInputs:
         """
         return self.sigma_l is None
 
-    def sigma(self, alpha: float) -> Sigma:
+    def sigma(self, alpha: float, taper: str | None = "tract") -> Sigma:
         """The covariance at this shrinkage, as a :class:`Sigma` view.
 
         ``alpha`` is a parameter of the *run*, not of the assembled problem, so
         it is supplied here rather than stored: ``v`` and ``L`` are kept raw and
-        one assembled problem serves an entire sweep.
+        one assembled problem serves an entire sweep. ``taper`` is too:
+        ``"tract"`` keeps replicate covariance only between cells in the same
+        tract, ``None`` keeps all of it. Why tract is the default is under
+        *Tapering* in :mod:`pmedm_vb.assemble.sigma`.
         """
-        return Sigma(v=self.sigma_v, l=self.sigma_l, alpha=alpha)
+        if taper not in ("tract", None):
+            raise ValueError(f"taper must be 'tract' or None, got {taper!r}")
+        groups = self.constraint_tracts() if taper == "tract" else None
+        return Sigma(v=self.sigma_v, l=self.sigma_l, alpha=alpha, groups=groups)
+
+    def targets(self) -> np.ndarray:
+        """The stacked constraint vector ``[vec(Y_T); vec(Y_B)]``, column-major."""
+        return np.concatenate([self.Y_T.ravel(order="F"), self.Y_B.ravel(order="F")])
+
+    def zone_tracts(self) -> np.ndarray:
+        """``(n_zones,)`` index into :attr:`tracts` of the tract holding each zone.
+
+        Read off ``A_T``, which must have exactly one nonzero per column: a
+        zone in no tract, or in two, means the aggregation is not a nesting.
+        """
+        a_t = sp.csc_matrix(self.A_T)
+        counts = np.diff(a_t.indptr)
+        if not np.all(counts == 1):
+            raise ValueError(
+                f"A_T must place each zone in exactly one tract; "
+                f"{int((counts != 1).sum())} zone(s) do not"
+            )
+        return a_t.indices.copy()
+
+    def constraint_tracts(self) -> np.ndarray:
+        """``(n_constraints,)`` tract index of each row of the stacked vector.
+
+        Tract row ``k * n_tracts + t`` belongs to tract ``t``; block-group row
+        ``k * n_block_groups + b`` to the tract holding block group ``b``. Both
+        follow from the column-major stacking. Assumes ``A_B`` is the identity,
+        i.e. that the zones *are* the block groups, which is how
+        :func:`~pmedm_vb.assemble.build.build_puma` builds it.
+        """
+        if self.A_B.shape[0] != self.n_zones or (
+            sp.csr_matrix(self.A_B) != sp.identity(self.n_zones)
+        ).nnz:
+            raise ValueError("constraint_tracts assumes A_B is the identity")
+        n_tracts = self.A_T.shape[0]
+        tract_rows = np.tile(np.arange(n_tracts), self.Y_T.shape[1])
+        bg_rows = np.tile(self.zone_tracts(), self.Y_B.shape[1])
+        return np.concatenate([tract_rows, bg_rows])
 
     # -- consistency -----------------------------------------------------
 

@@ -132,6 +132,38 @@ For the VB path, the pieces the ELBO needs are here already --
 diagonal-plus-low-rank is open; matching this structure would keep the KL term
 in the same identities.
 
+**Tapering to within-tract blocks.** ``groups`` optionally labels each row,
+and the low-rank term is then kept only inside a group:
+``Sigma = D + sum_g B_g B_g'``, with ``B_g`` the rows of ``B`` in group ``g``.
+:meth:`~pmedm_vb.assemble.inputs.PMEDMInputs.sigma` labels rows by tract, and
+this is the default there. ``groups=None`` is the untapered form above --
+equivalently, one group holding every row -- and stays available so the two
+can be compared.
+
+The reason is ``experiments/covariance_structure.py``, run on B01001 at block
+group for Knox County (2020-2024). Across block groups the RMS replicate
+correlation was 0.1154 against 0.1118 expected from 80 replicates of pure noise
+(ratio 1.03), and the signed mean was -0.0012 against a null standard error of
+0.0064. The global ``L L'`` therefore spends its between-zone entries on noise,
+which ``alpha`` shrinks but does not remove. The same run found within-zone
+correlations differing between zones by 1.68 times the split-half null, which
+is what ruled out a single pooled correlation matrix instead.
+
+Three properties survive the mask. It is still a covariance: the block mask is
+positive semi-definite, so its elementwise product with ``L L'`` is too (Schur
+product theorem), and ``D > 0`` keeps the sum definite. The diagonal is
+untouched, so ``v`` stays exact and ``alpha = 1`` is still classic PMEDM. And
+since every operation here is already per-group, the untapered form is literally
+the one-group case of the same code.
+
+The mask is by tract rather than by block group because that is what was *not*
+tested: one table at one level says nothing about correlation between tables,
+or between a tract cell and the block-group cells inside it. Both come from the
+same sample and are the likeliest to be real, and a tract block keeps them. It
+also matches the Hessian: ``S`` is block diagonal by tract, so a tract-tapered
+``S + cSigma`` is too, and the rank-81 correction above collapses to the rank-1
+downdate alone.
+
 ``alpha`` is deliberately *not* stored on the assembled inputs. It is a
 parameter of the run, and holding ``v`` and ``L`` raw lets one assembled problem
 serve an entire sweep.
@@ -140,6 +172,7 @@ serve an entire sweep.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 
 import numpy as np
 from scipy.linalg import cho_factor, cho_solve
@@ -163,6 +196,10 @@ class Sigma:
         diagonal ``Sigma``, which is what ``alpha = 1`` also produces.
     alpha:
         Shrinkage toward the diagonal, in ``(0, 1]``.
+    groups:
+        ``(n,)`` integer labels. The low-rank term is kept only between rows
+        sharing a label -- see *Tapering* in the module docstring. ``None``
+        keeps it everywhere, the untapered form.
 
     Notes
     -----
@@ -175,6 +212,7 @@ class Sigma:
     v: np.ndarray
     l: np.ndarray | None
     alpha: float
+    groups: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         if not 0.0 < self.alpha <= 1.0:
@@ -189,6 +227,13 @@ class Sigma:
             raise ValueError(
                 f"l must be {(self.v.size, N_REPLICATES)}, got {self.l.shape}"
             )
+        if self.groups is not None:
+            if self.groups.shape != self.v.shape:
+                raise ValueError(
+                    f"groups must be {self.v.shape}, got {self.groups.shape}"
+                )
+            if not np.issubdtype(self.groups.dtype, np.integer):
+                raise ValueError(f"groups must be integer, got {self.groups.dtype}")
         if not np.all(self.v > 0):
             bad = int((self.v <= 0).sum())
             raise ValueError(
@@ -212,16 +257,20 @@ class Sigma:
         """``(1 - alpha) * 4/80``, the multiplier on the low-rank term."""
         return (1.0 - self.alpha) * SDR_FACTOR
 
-    @property
+    @cached_property
     def d(self) -> np.ndarray:
-        """Residual diagonal ``v - (1 - alpha) * s``, strictly positive."""
+        """Residual diagonal ``v - (1 - alpha) * s``, strictly positive.
+
+        Tapering removes off-diagonal entries only, so this is the same with
+        or without ``groups``.
+        """
         if self.l is None or self.scale == 0.0:
             return self.v
         return self.v - self.scale * np.square(self.l).sum(axis=1)
 
-    @property
+    @cached_property
     def b(self) -> np.ndarray | None:
-        """``sqrt(scale) * L``, so that ``Sigma = D + B B'``."""
+        """``sqrt(scale) * L``, so that ``Sigma = D + B B'`` before tapering."""
         if self.l is None or self.scale == 0.0:
             return None
         return np.sqrt(self.scale) * self.l
@@ -229,6 +278,29 @@ class Sigma:
     @property
     def is_diagonal(self) -> bool:
         return self.b is None
+
+    @property
+    def is_tapered(self) -> bool:
+        return self.groups is not None
+
+    @property
+    def global_factor(self) -> np.ndarray | None:
+        """``B`` when it couples every row, else ``None``.
+
+        What a solver has to carry as a dense low-rank correction. Tapered, the
+        low-rank term lives inside the groups instead -- see
+        :meth:`block_dense`.
+        """
+        return None if self.is_tapered else self.b
+
+    @cached_property
+    def members(self) -> list[np.ndarray]:
+        """Row indices of each group, in label order; one group if untapered."""
+        if self.groups is None:
+            return [np.arange(self.v.size)]
+        order = np.argsort(self.groups, kind="stable")
+        _, starts = np.unique(self.groups[order], return_index=True)
+        return np.split(order, starts[1:])
 
     # -- operations ------------------------------------------------------
 
@@ -239,41 +311,44 @@ class Sigma:
         ``0.5 * (n/N^2) * lambda' Sigma lambda``, the gradient
         ``(n/N^2) Sigma lambda``, and ``Sigma`` enters the Hessian additively.
         """
+        out = _scale_rows(x, self.d)
         b = self.b
-        out = self.d[:, None] * x if x.ndim == 2 else self.d * x
-        return out if b is None else out + b @ (b.T @ x)
+        if b is None:
+            return out
+        for rows in self.members:
+            out[rows] += b[rows] @ (b[rows].T @ x[rows])
+        return out
 
     def solve(self, x: np.ndarray) -> np.ndarray:
-        """``Sigma^-1 @ x`` by Woodbury, in ``O(n * 80^2 + 80^3)``.
+        """``Sigma^-1 @ x`` by Woodbury, in ``O(n * 80^2 + groups * 80^3)``.
 
-        ``(D + BB')^-1 = D^-1 - D^-1 B (I + B' D^-1 B)^-1 B' D^-1``. The
-        capacitance matrix is 80x80 and symmetric positive definite, so it goes
-        through a Cholesky factorisation rather than a general solve.
+        ``(D + BB')^-1 = D^-1 - D^-1 B (I + B' D^-1 B)^-1 B' D^-1``, one group
+        at a time. Each capacitance matrix is 80x80 and symmetric positive
+        definite, so it goes through a Cholesky factorisation rather than a
+        general solve.
         """
-        d = self.d
-        y = x / d[:, None] if x.ndim == 2 else x / d
+        y = _scale_rows(x, 1.0 / self.d)
         b = self.b
         if b is None:
             return y
-        correction = b @ cho_solve(cho_factor(self._capacitance()), b.T @ y)
-        return y - (correction / d[:, None] if x.ndim == 2 else correction / d)
+        out = y.copy()
+        for rows, factor in zip(self.members, self._capacitance_factors):
+            correction = b[rows] @ cho_solve(factor, b[rows].T @ y[rows])
+            out[rows] -= _scale_rows(correction, 1.0 / self.d[rows])
+        return out
 
     def logdet(self) -> float:
         """``log det Sigma`` by the matrix determinant lemma.
 
-        ``det(D + BB') = det(I + B' D^-1 B) * det(D)``, so this costs a
-        Cholesky of the 80x80 capacitance matrix and never forms ``Sigma``.
+        ``det(D + BB') = det(I + B' D^-1 B) * det(D)`` per group, so this costs
+        a Cholesky of each 80x80 capacitance matrix and never forms ``Sigma``.
         """
         total = float(np.log(self.d).sum())
         if self.b is None:
             return total
-        sign, value = np.linalg.slogdet(self._capacitance())
-        if sign <= 0:
-            raise ValueError(
-                "capacitance matrix is not positive definite; Sigma is not a "
-                "valid covariance for these inputs"
-            )
-        return total + float(value)
+        for c, _ in self._capacitance_factors:
+            total += 2.0 * float(np.log(np.diag(c)).sum())
+        return total
 
     def diagonal(self) -> np.ndarray:
         """``diag(Sigma)``, which equals ``v`` exactly at every ``alpha``.
@@ -294,7 +369,9 @@ class Sigma:
         the covariance of that sum is ``D + BB'`` by construction. No square
         root of ``Sigma`` is needed, which is the point: a Cholesky factor of
         an ``(n, n)`` matrix is exactly what this representation exists to
-        avoid, and the VB objective needs draws rather than a factor.
+        avoid, and the VB objective needs draws rather than a factor. Tapered,
+        each group gets its own independent ``z2``, which is what zeroes the
+        covariance between groups.
 
         Returns
         -------
@@ -306,7 +383,24 @@ class Sigma:
         b = self.b
         if b is None:
             return out
-        return out + b @ rng.standard_normal((b.shape[1], size))
+        for rows in self.members:
+            out[rows] += b[rows] @ rng.standard_normal((b.shape[1], size))
+        return out
+
+    def block_dense(self, rows: np.ndarray) -> np.ndarray:
+        """The dense ``(len(rows), len(rows))`` part of ``Sigma`` a solver adds
+        to its own sparse blocks.
+
+        Tapered, that is ``Sigma`` itself restricted to ``rows``. Untapered, it
+        is ``D`` alone, and the low-rank term is left to :attr:`global_factor`:
+        it couples every row, so it has no block to live in.
+        """
+        block = np.diag(self.d[rows])
+        b = self.b
+        if b is None or not self.is_tapered:
+            return block
+        same = self.groups[rows][:, None] == self.groups[rows][None, :]
+        return block + same * (b[rows] @ b[rows].T)
 
     def to_dense(self) -> np.ndarray:
         """Materialise ``Sigma``. For checking against a direct solve only.
@@ -314,11 +408,32 @@ class Sigma:
         ``(n, n)`` in memory, which for a block-group run is the thing this
         whole representation exists to avoid.
         """
-        b = self.b
         dense = np.diag(self.d)
-        return dense if b is None else dense + b @ b.T
-
-    def _capacitance(self) -> np.ndarray:
-        """``I + B' D^-1 B``, the 80x80 matrix Woodbury inverts."""
         b = self.b
-        return np.eye(b.shape[1]) + b.T @ (b / self.d[:, None])
+        if b is None:
+            return dense
+        for rows in self.members:
+            dense[np.ix_(rows, rows)] += b[rows] @ b[rows].T
+        return dense
+
+    @cached_property
+    def _capacitance_factors(self) -> list[tuple[np.ndarray, bool]]:
+        """Cholesky of ``I + B_g' D_g^-1 B_g`` per group, the 80x80 matrices
+        Woodbury inverts."""
+        b, d = self.b, self.d
+        factors = []
+        for rows in self.members:
+            capacitance = np.eye(b.shape[1]) + b[rows].T @ (b[rows] / d[rows, None])
+            try:
+                factors.append(cho_factor(capacitance))
+            except np.linalg.LinAlgError as error:
+                raise ValueError(
+                    "capacitance matrix is not positive definite; Sigma is not "
+                    "a valid covariance for these inputs"
+                ) from error
+        return factors
+
+
+def _scale_rows(x: np.ndarray, s: np.ndarray) -> np.ndarray:
+    """``diag(s) @ x`` for a vector or a matrix of column vectors."""
+    return s[:, None] * x if x.ndim == 2 else s * x

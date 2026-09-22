@@ -23,7 +23,8 @@ This is not production code. This is research code to write a paper. The paper w
 - [x] write assembly (`src/pmedm_vb/assemble/`) -- attribute matrices,
       aggregation operators, targets, and the `Sigma` representation the
       solvers consume. One problem per PUMA: `assemble.build.build_all()`
-- [ ] write solvers (`src/pmedm_vb/solvers/`)
+- [ ] write solvers (`src/pmedm_vb/solvers/`) -- MAP done (`map_dual.solve_map`);
+      VB pending, as a Gaussian over lambda
 - [ ] write experiments (`experiments/`)
 
 ## Choosing constraint tables
