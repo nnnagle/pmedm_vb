@@ -42,11 +42,25 @@ and ``R`` the replicate correlation matrix, this is exactly
 
     \Sigma(\alpha) = D^{1/2}\,[\,(1-\alpha) R + \alpha I\,]\,D^{1/2}
 
--- algebraically identical, verified to 3e-17. So ``alpha`` shrinks the
-*correlation* matrix toward the identity while the variances stay exactly as
-published, which is the interpretation the residual definition was chosen for.
-The factored form is stored instead only because it is ``O(n * 80)`` where the
-correlation form is ``O(n^2)``.
+-- algebraically identical, verified to 3e-17. ``R`` here is literally
+``L~ L~'`` for ``L~`` the row-normalised deviations: unit diagonal, cosines off
+it. So ``alpha`` shrinks the *correlation* matrix toward the identity while the
+variances stay exactly as published, which is the interpretation the residual
+definition was chosen for. The factored form is stored instead only because it
+is ``O(n * 80)`` where the correlation form is ``O(n^2)``.
+
+**Why the middle factor cannot be ``R`` alone.** ``D^{1/2} R D^{1/2}`` has the
+published variances on its diagonal and is still singular: congruence by an
+invertible matrix preserves rank, so scaling rows and columns by ``sqrt(v)``
+rescales eigenvalues without creating nonzero ones, and the rank stays that of
+``L~``. The ``alpha I`` term is the only part of the expression that lifts the
+remaining ``n - 80`` eigenvalues off zero, and it does so without disturbing
+the diagonal, since ``(1 - alpha) * 1 + alpha = 1``.
+
+A zero cell also has no correlation row to speak of: ``||L_i|| = 0`` makes
+``L~_i`` a ``0/0``, so the correlation form needs a convention for it, whereas
+here ``L_i = 0`` simply contributes nothing and ``D_i = v_i = w * k`` carries
+the cell. At block group those are common rather than exceptional.
 
 This is *not* an ``LDL'`` decomposition and cannot be made into one with ``D``
 holding the variances. ``LDL'`` pivots are conditional variances,
