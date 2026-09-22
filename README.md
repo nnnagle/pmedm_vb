@@ -91,6 +91,41 @@ cell falls back on the modelled `w·k` variance.
 Everything above is cached under `$PMEDM_VB_DATA/raw/` on first call and reused
 after, so re-running while deciding costs nothing. Pass `force=True` to refetch.
 
+## Verification
+
+Two scripts, plus a check that runs implicitly. All need census.gov, which is
+unreachable from sandboxed environments.
+
+```
+tools/verify_vintage.sh                 # the data layer, against a vintage
+tools/check_mapping.py [PUMA]           # every constraint definition at once
+```
+
+`verify_vintage.sh` confirms the endpoints are shaped as the downloaders expect
+and that recomputed MOEs match Census's published ones to rounding -- the
+strongest check available, since the files publish their own answer.
+
+`check_mapping.py` compares weighted PUMS totals against published estimates
+for every constraint, standardised by the published standard error. Its
+docstring says how to read the result; briefly, a whole table off-centre is a
+definition error and scattered large `|z|` is sampling.
+
+Assembling a problem runs the third check implicitly -- `PMEDMInputs.validate()`
+per PUMA, after `ConstraintTable.validate()` has checked every declared cell
+against the published cell list:
+
+```python
+from pmedm_vb.assemble.build import build_all
+problems = build_all(area, default_tables(area))
+```
+
+**Knox County is exactly four whole PUMAs** -- 4701501 to 4701504, 121 tracts,
+301 block groups, none reaching into a neighbouring county -- so the whole-PUMA
+expansion is a no-op here. `geography.puma_coverage(area)` reports this for any
+study area and should be run before adopting a new one: a PUMA crossing the
+boundary makes a per-PUMA run ill-posed, since its PUMS records represent all
+of it.
+
 ## Every session
 
 The steps under Setup below are one-time. Each new login needs only:
@@ -121,13 +156,23 @@ pmedm() {
     conda activate /lustre/isaac24/proj/UTK0496/envs/pmedm_vb
     export PMEDM_VB_DATA=/lustre/isaac24/scratch/$USER/pmedm_vb_data
     mkdir -p "$PMEDM_VB_DATA"
-    echo "pmedm_vb: $(python -V), $(python -c 'import sys; print(sys.executable)')"
+    case "$(python -c 'import sys; print(sys.executable)')" in
+        "$CONDA_PREFIX"/*) echo "pmedm_vb: $(python -V) OK  data=$PMEDM_VB_DATA" ;;
+        *) echo "SHADOWED: python is $(command -v python), not $CONDA_PREFIX/bin/python" ;;
+    esac
 }
 ```
 
-The echo is a guard: anything other than 3.11 from inside the env prefix means
-something has shadowed it again, and `$CONDA_PREFIX/bin/python` is the fallback
-that always works.
+The guard compares the interpreter's **path** against `$CONDA_PREFIX`, not its
+version. An earlier version checked the version, and could not catch the case
+it existed for: the anaconda3 2024.06 module ships Python 3.11.11, the same
+minor version as this environment, so `python -V` reads correct while `python`
+is the module's binary. `CONDA_PREFIX` and the prompt both look right too. The
+symptom is `ModuleNotFoundError: No module named 'pmedm_vb'` from a shell that
+appears fully activated.
+
+`$CONDA_PREFIX/bin/python` always works and is worth using for real runs
+regardless.
 
 ## Setup
 

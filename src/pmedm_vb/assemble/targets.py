@@ -12,10 +12,17 @@ Two consequences that are easy to get backwards:
 * The zero-cell policy applies **after** collapsing. A category is a modelled
   zero only when every cell in it is, and a category built from several cells
   is far less often degenerate than its parts.
-* Constraints from different tables need not align with one another. They share
-  the same 80 replicate weight sets, so stacking their cells into one ``L``
-  carries the cross-table correlation directly. Only a constraint's own
-  definition has to match its own published cell.
+* Constraints from different tables need not align with one another. Only a
+  constraint's own definition has to match its own published cell; stacking
+  cells from different tables into one ``L`` is what carries the correlation
+  between them.
+
+  That rests on every cell deriving from the same 80 replicate weight sets,
+  which is **assumed, not verified**. The test is cheap and has not been run:
+  ``B01003_001`` and ``B01001_001`` are both total population, so shared
+  weights means they agree across all 80 replicates *exactly*. If they do not,
+  cross-table covariance is not what this claims and the freedom to mix
+  non-aligned constraints goes with it.
 
 Row order throughout is the stacked constraint vector, **column-major**: for a
 block of ``(n_areas, n_categories)``, entry ``(i, j)`` sits at

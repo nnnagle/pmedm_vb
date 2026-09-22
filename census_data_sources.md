@@ -2,11 +2,19 @@
 
 What the Census endpoints actually look like, and how we know.
 
-Every fact here was confirmed on **2026-09-21** against a live directory
-listing, file header, or published document — not recalled or inferred. It
-exists because the endpoints are not self-describing: directory layouts differ
-between products, casing is inconsistent, coverage varies by geography, and the
-variance formulas live in a PDF.
+Facts here are confirmed against a live directory listing, file header, or
+published document, and each says which. The document exists because the
+endpoints are not self-describing: directory layouts differ between products,
+casing is inconsistent, coverage varies by geography, and the variance formulas
+live in a PDF.
+
+**An earlier version of this line claimed every fact had been so confirmed.
+That was not true, and the exception was expensive.** `ST` was recorded as the
+PUMS state column, taken from documentation rather than from a header, and
+nothing in the package read a header either — so it survived until the first
+run that opened a zip, where it broke every housing-file load. The column is
+`STATE`. Treat an unattributed claim here as unverified, and prefer opening the
+file.
 
 The vintage probed in detail was **2019–2023 (2023 ACS 5-year)**. The
 **2020–2024** vintage was then confirmed to have the same shape and is the one
@@ -378,6 +386,7 @@ with no tables.
 | question | why it matters |
 |---|---|
 | **2019–2023 PUMA coding** | Its PUMS dictionary was never checked, and that period spans the redraw. Only matters if a run needs that vintage; 2020–2024 avoids the question. |
+| **Replicate weights shared across tables** | Cross-table covariance — and the freedom for constraints at different levels not to align — assumes every cell derives from the same 80 replicate weight sets. Asserted in `targets.py` and `report.py`, **not verified**. The test: `B01003_001` and `B01001_001` are both total population, so shared weights means they agree across all 80 replicates *exactly*, not approximately. |
 | **Suppressed values** | Whether `ESTIMATE` or the replicates ever carry non-numeric suppression markers was not observed. The parser coerces, so such a value becomes `NaN` rather than failing loudly. |
 
 ## Reproducing a probe
