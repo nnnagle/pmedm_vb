@@ -32,7 +32,7 @@
 # Resources can be overridden at submission, e.g. sbatch --cpus-per-task=48.
 # Extra arguments are passed to the solve step, e.g.
 #
-#   sbatch experiments/run_map.sbatch --alpha 1.0 0.9 0.7 0.5 0.3
+#   sbatch experiments/run_map.sbatch --alpha 1.0 0.9 0.8 0.7 0.5
 #
 # Assembled problems are reused across jobs; after changing the constraint
 # tables or assembly code, run assemble with --rebuild (edit ASSEMBLE_ARGS).

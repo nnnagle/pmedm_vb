@@ -74,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--rebuild", action="store_true", help="assemble: rebuild saved PUMAs")
     parser.add_argument(
-        "--alpha", type=float, nargs="+", default=[1.0, 0.7, 0.5],
+        "--alpha", type=float, nargs="+", default=[1.0, 0.7, 0.5, 0.3, 0.1],
         help="solve: shrinkage values to sweep",
     )
     parser.add_argument(
