@@ -81,6 +81,12 @@ class ConstraintTable:
     table: str
     universe: str
     geography: str
+    #: PUMS columns the selectors read. Declared rather than inferred: a
+    #: selector is a closure, so nothing can see inside it, and the assembly
+    #: step has to know exactly which columns to load. A column named here but
+    #: unused costs one wasted read; one used but unmissed is a ``KeyError``
+    #: after the download.
+    variables: tuple[str, ...] = ()
     categories: tuple[Category, ...] = field(default_factory=tuple)
     #: Published cells deliberately not used, so that "unused" and "forgotten"
     #: are distinguishable. A table total is the usual entry: including it
@@ -300,6 +306,7 @@ def race_ethnicity(geography: str = "block group") -> ConstraintTable:
     )
     return ConstraintTable(
         table="B03002",
+        variables=("HISP", "RAC1P"),
         universe="person",
         geography=geography,
         categories=tuple(categories),
@@ -331,6 +338,7 @@ def tenure(geography: str = "block group") -> ConstraintTable:
     published = {"owner": ("B25003_002",), "renter": ("B25003_003",)}
     return ConstraintTable(
         table="B25003",
+        variables=("TEN",),
         universe="household",
         geography=geography,
         categories=tuple(
@@ -362,6 +370,7 @@ def means_of_transportation(geography: str = "block group") -> ConstraintTable:
     """
     return ConstraintTable(
         table="B08301",
+        variables=("JWTRNS",),
         universe="person",
         geography=geography,
         categories=tuple(
@@ -548,6 +557,7 @@ def age_sex(
 
     return ConstraintTable(
         table="B01001",
+        variables=("AGEP", "SEX"),
         universe="person",
         geography=geography,
         categories=tuple(categories),
@@ -617,6 +627,7 @@ def household_income(
 
     return ConstraintTable(
         table="B19001",
+        variables=("HINCP", "ADJINC"),
         universe="household",
         geography=geography,
         categories=tuple(categories),
@@ -747,6 +758,7 @@ def sex_by_occupation(area: StudyArea, geography: str = "block group") -> Constr
     every = [f"C24010_{order:03d}" for order in range(1, C24010_CELLS + 1)]
     return ConstraintTable(
         table="C24010",
+        variables=("ESR", "SEX", "OCCP"),
         universe="person",
         geography=geography,
         categories=tuple(categories),
@@ -775,6 +787,7 @@ def group_quarters(geography: str = "tract") -> ConstraintTable:
     """
     return ConstraintTable(
         table="B26001",
+        variables=("TYPEHUGQ",),
         universe="household",
         geography=geography,
         categories=(
@@ -860,6 +873,7 @@ def poverty_by_age(geography: str = "tract") -> ConstraintTable:
         raise AssertionError(f"poverty collapse claimed {len(claimed)} cells, expected 120")
     return ConstraintTable(
         table="B17024",
+        variables=("AGEP", "POVPIP"),
         universe="person",
         geography=geography,
         categories=tuple(categories),
@@ -965,6 +979,7 @@ def employment_status(
     every = [f"B23001_{order:03d}" for order in range(1, 174)]
     return ConstraintTable(
         table="B23001",
+        variables=("SEX", "AGEP", "ESR"),
         universe="person",
         geography=geography,
         categories=tuple(categories),
@@ -1005,3 +1020,16 @@ def default_tables(area: StudyArea) -> list[ConstraintTable]:
         poverty_by_age(geography="tract"),
         employment_status(geography="tract"),
     ]
+
+
+def required_variables(tables: Sequence[ConstraintTable]) -> dict[str, tuple[str, ...]]:
+    """PUMS columns each universe needs, across a set of specifications.
+
+    What :mod:`pmedm_vb.assemble.households` loads. Person-universe tables read
+    the person file, unit-universe tables the housing file, and a column needed
+    by both is loaded from both.
+    """
+    needed: dict[str, set[str]] = {universe: set() for universe in UNIVERSES}
+    for table in tables:
+        needed[table.universe].update(table.variables)
+    return {universe: tuple(sorted(columns)) for universe, columns in needed.items()}

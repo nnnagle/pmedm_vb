@@ -152,6 +152,7 @@ def load_pums(
     variables: list[str],
     *,
     record_type: str = "person",
+    replicate_weights: bool = True,
 ) -> pd.DataFrame:
     """Read the cached PUMS file, keeping ``variables`` plus the identifiers.
 
@@ -163,16 +164,25 @@ def load_pums(
     Every requested variable the dictionary declares character is read as text;
     see :func:`text_columns` for why that is not optional.
 
+    ``replicate_weights=False`` keeps only the base weight, dropping 80 columns
+    from the read. PMEDM does not use the PUMS replicate weights: the
+    covariance comes from the published tables' replicates, not from the
+    microdata. They are kept by default because a caller doing variance work on
+    PUMS itself would need them.
+
     The state column is normalised to :data:`STATE_COLUMN` whatever the file
     spells it, and a ``puma_geoid`` column is added: state and ``PUMA``
     concatenated, which is the form :mod:`pmedm_vb.data.geography` matches
     zones on.
     """
     path = download_pums(area, record_type=record_type)
+    weights = (
+        weight_columns(record_type)
+        if replicate_weights
+        else (WEIGHT_PREFIXES[record_type],)
+    )
     required = list(
-        dict.fromkeys(
-            [*IDENTIFIER_COLUMNS[record_type], *weight_columns(record_type), *variables]
-        )
+        dict.fromkeys([*IDENTIFIER_COLUMNS[record_type], *weights, *variables])
     )
     # Every alias is read; exactly one is expected back, and which one is a
     # property of the file rather than something the caller should know.
