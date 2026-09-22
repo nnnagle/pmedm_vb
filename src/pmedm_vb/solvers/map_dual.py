@@ -53,6 +53,38 @@ is free, since ``H^{-1} g`` is the step already computed.
 
 The Laplace approximation reuses the converged Hessian; see
 :func:`laplace_precision`.
+
+**Evidence.** The derivation's model is a generative one: the sample histogram
+``w ~ Multinomial(n, q)`` and ``Y = (N/n) X'w + e`` with ``e ~ N(0, Sigma)``. Its
+marginal likelihood ``p(Y | alpha, taper)``, with ``w`` averaged out, is what
+comparing ``alpha`` and ``taper`` by evidence means. Write ``K(t)`` for the
+cumulant generating function of ``Y/N`` under that model. Then the dual
+objective minus ``Y'lambda/N`` is exactly ``K(-n lambda) / n``:
+``log q'exp(-X lambda)`` from the multinomial mean and
+``0.5 c lambda' Sigma lambda`` from the noise, ``c = n/N^2``. So the dual optimum
+is the saddlepoint of ``p(Y)``, and the multivariate saddlepoint density
+approximation (Daniels 1954, *Ann. Math. Statist.* 25; Butler 2007,
+*Saddlepoint Approximations with Applications*) gives
+
+.. math::
+
+    \\log p(Y) \\approx n f^* - \\tfrac12 \\log\\det H
+        + \\tfrac m2 \\log\\frac{n}{2\\pi} - m \\log N
+
+from the converged objective and Hessian alone. On a synthetic problem (14
+constraints, 240 cells, ``n = 200``) it matched a 400,000-draw Monte Carlo
+average of the Gaussian density to within Monte Carlo error at every
+``alpha`` and taper tried, where a plain Gaussian (CLT) approximation was off by
+several times as much. A Laplace approximation over ``p`` itself was not used:
+each cell's expected sample count ``n p`` is about ``1/n_zones``, far too small
+for a Gaussian in ``p`` to be accurate.
+
+The saddlepoint's accuracy is established as ``n`` grows with ``m`` fixed. The
+real problems have ``m`` larger than ``n`` (5,000-8,600 constraints against
+2,300-3,600 units), which the check above does not cover. Comparisons within
+one PUMA are the intended use, where approximation error should largely cancel
+-- an expectation, not something shown here. Absolute values should not be
+quoted, and values from different PUMAs are not comparable.
 """
 
 from __future__ import annotations
@@ -103,6 +135,11 @@ class MAPResult:
     newton_decrement:
         ``0.5 * g' H^{-1} g`` at ``lam`` -- an estimate of how far the
         objective is above its minimum.
+    log_evidence:
+        Saddlepoint approximation to ``log p(Y | alpha, taper)``, the marginal
+        likelihood of the published totals; see *Evidence* in the module
+        docstring for what it approximates and where it has been checked.
+        Compare it across ``alpha`` and ``taper`` within one PUMA only.
     trace:
         Per iteration: ``objective``, ``decrement``, ``step`` (the line-search
         length taken, 0 on the final row) and ``max_abs_z`` (the largest
@@ -113,8 +150,10 @@ class MAPResult:
         run's own ``Sigma``, correlations included. At ``alpha = 1`` it is the
         mean of ``z^2``. Where ``max_abs_z`` reads each cell against its own
         standard error, this lets a residual be explained by correlated
-        neighbours, which is what the penalty itself does -- so it is the one to
-        compare across ``alpha`` and ``taper``. It is not a chi-squared
+        neighbours, which is what the penalty itself does. It is still measured
+        against each run's own ``Sigma``, so a smaller value at another
+        ``alpha`` or ``taper`` does not mean a better model; that comparison is
+        what ``log_evidence`` is for. It is not a chi-squared
         statistic: the fitted residuals are shrunk by the penalty. Linearising
         the fit about the optimum, its expectation when the model holds is
         ``tr(c Sigma H^{-1}) / m``, which is below 1 because
@@ -129,6 +168,7 @@ class MAPResult:
     alpha: float
     taper: str | None
     newton_decrement: float
+    log_evidence: float
     trace: dict[str, np.ndarray] = field(default_factory=dict)
 
 
@@ -304,11 +344,14 @@ def solve_map(
         )
         state = candidate
 
+    # The loop always ends having built the Hessian at the final state.
+    log_evidence = saddlepoint_log_evidence(inputs, state.objective, hessian)
     logger.info(
         "solve_map PUMA %s: %s after %d iterations, decrement %.2e, "
-        "e'S^-1e/m %.4f, %.1fs",
+        "e'S^-1e/m %.4f, log evidence %.2f, %.1fs",
         inputs.puma, "converged" if converged else "NOT converged",
-        n_iter, decrement, trace["mahalanobis"][-1], time.perf_counter() - started,
+        n_iter, decrement, trace["mahalanobis"][-1], log_evidence,
+        time.perf_counter() - started,
     )
     return MAPResult(
         lam=state.lam,
@@ -319,7 +362,25 @@ def solve_map(
         alpha=alpha,
         taper=taper,
         newton_decrement=decrement,
+        log_evidence=log_evidence,
         trace={key: np.asarray(value) for key, value in trace.items()},
+    )
+
+
+def saddlepoint_log_evidence(
+    inputs: PMEDMInputs, objective: float, hessian: DualHessian
+) -> float:
+    """``log p(Y)`` from the dual optimum; see *Evidence* in the module docstring.
+
+    ``objective`` and ``hessian`` must both be at the minimiser: the formula is
+    the saddlepoint density evaluated at its saddlepoint.
+    """
+    m, n = inputs.n_constraints, inputs.n
+    return (
+        n * objective
+        - 0.5 * hessian.logdet()
+        + 0.5 * m * np.log(n / (2 * np.pi))
+        - m * np.log(inputs.N)
     )
 
 

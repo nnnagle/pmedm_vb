@@ -223,6 +223,7 @@ def solve_one(path: Path, taper: str | None, alpha: float, out: Path) -> dict:
             objective=result.objective,
             max_abs_z=float(result.trace["max_abs_z"][-1]),
             mahalanobis=float(result.trace["mahalanobis"][-1]),
+            log_evidence=result.log_evidence,
             seconds=time.perf_counter() - start,
             error="",
         )
@@ -242,7 +243,7 @@ def solve_one(path: Path, taper: str | None, alpha: float, out: Path) -> dict:
 def saved_row(path: Path) -> dict:
     """The summary row stored in an existing result, for resuming."""
     keys = ["puma", "taper", "alpha", "n_constraints", "converged", "n_iter",
-            "newton_decrement", "objective", "max_abs_z", "mahalanobis", "seconds", "error"]
+            "newton_decrement", "objective", "max_abs_z", "mahalanobis", "log_evidence", "seconds", "error"]
     with np.load(path) as saved:
         # Results written before a column existed resume with it blank.
         return {key: saved[key].item() if key in saved else np.nan for key in keys}
