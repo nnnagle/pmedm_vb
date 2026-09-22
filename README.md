@@ -20,9 +20,9 @@ This is not production code. This is research code to write a paper. The paper w
 ## ToDo:
 - [x] Determine package folder structure
 - [x] write downloaders (`src/pmedm_vb/data/`)
-- [ ] write assembly (`src/pmedm_vb/assemble/`) -- attribute matrices,
+- [x] write assembly (`src/pmedm_vb/assemble/`) -- attribute matrices,
       aggregation operators, targets, and the `Sigma` representation the
-      solvers consume
+      solvers consume. One problem per PUMA: `assemble.build.build_all()`
 - [ ] write solvers (`src/pmedm_vb/solvers/`)
 - [ ] write experiments (`experiments/`)
 
