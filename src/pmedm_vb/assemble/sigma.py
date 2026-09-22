@@ -60,6 +60,42 @@ design covariance. ``alpha`` must stay strictly positive: at exactly 0,
 ``D_i = v_i - s_i = 0`` on every non-degenerate cell and the Woodbury identity
 divides by it.
 
+**Why this shape, for the solvers.** The point of a diagonal-plus-low-rank
+``Sigma`` is not that it is cheap on its own, but that it composes with the
+rest of the dual Hessian. From ``pmedm_derivation.md`` that Hessian is
+``X' diag(p) X - (X'p)(p'X) + c * Sigma`` for ``c = n / N^2``. Writing
+``S = X' diag(p) X`` and ``u = X'p`` and substituting ``Sigma = D + BB'``:
+
+.. math::
+
+    H = (S + cD) \;+\; [\sqrt{c}B \;\; u]
+        \begin{bmatrix} I_{80} & \\ & -1 \end{bmatrix}
+        [\sqrt{c}B \;\; u]'
+
+So the whole Hessian is *sparse plus diagonal*, corrected by rank 81: eighty
+directions up from the replicates and one down from the outer product the
+derivation calls the annoying part. A Newton step is then one factorisation of
+``S + cD``, 81 solves against it, and an 81x81 dense solve -- verified against a
+direct solve to 1e-16.
+
+Two things follow. The ``cD`` term is what makes ``S + cD`` factorisable at
+all: ``S`` alone can be rank-deficient, and a strictly positive diagonal is
+exactly the regularisation it needs. And the cost of a *full* covariance is the
+same kind of computation as a diagonal one -- the derivation already has to
+handle a rank-1 dense downdate, and this makes it rank 81 rather than
+introducing anything new.
+
+This is also why an ``LDL'`` or Cholesky factor of ``Sigma`` would not help.
+Such a factor is dense and ``(n, n)``, and ``Sigma`` is not the matrix being
+inverted: the solver inverts ``H``, and only a low-rank representation survives
+being added to ``S``.
+
+For the VB path, the pieces the ELBO needs are here already --
+:meth:`Sigma.logdet`, :meth:`Sigma.solve` for the quadratic form, and
+:meth:`Sigma.draw`. Whether the variational family should itself be
+diagonal-plus-low-rank is open; matching this structure would keep the KL term
+in the same identities.
+
 ``alpha`` is deliberately *not* stored on the assembled inputs. It is a
 parameter of the run, and holding ``v`` and ``L`` raw lets one assembled problem
 serve an entire sweep.
