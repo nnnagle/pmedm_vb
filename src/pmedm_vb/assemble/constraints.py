@@ -785,3 +785,223 @@ def group_quarters(geography: str = "tract") -> ConstraintTable:
             ),
         ),
     )
+
+
+#: ``B17024``'s age groups as ``(first cell ORDER, lower, upper)``. Each group
+#: is a subtotal followed by the same 12 income-to-poverty bands, 13 cells in
+#: all. Note the first break: **under 6**, which is the preschool/school-age
+#: split ``B01001`` cannot give -- it breaks at 5 -- so this table supplies it
+#: at tract as a by-product of the poverty collapse.
+B17024_AGE_GROUPS = (
+    (2, 0, 6), (15, 6, 12), (28, 12, 18), (41, 18, 25), (54, 25, 35),
+    (67, 35, 45), (80, 45, 55), (93, 55, 65), (106, 65, 75), (119, 75, None),
+)
+
+#: The 12 published ratio bands as ``(offset from the group subtotal, lower,
+#: upper)`` in ``POVPIP`` units -- percent of the poverty line, so "1.00 to
+#: 1.24" is 100 to 125.
+B17024_RATIO_BANDS = (
+    (1, 0, 50), (2, 50, 75), (3, 75, 100), (4, 100, 125), (5, 125, 150),
+    (6, 150, 175), (7, 175, 185), (8, 185, 200), (9, 200, 300),
+    (10, 300, 400), (11, 400, 500), (12, 500, None),
+)
+
+#: Collapse of those 12 into three, each landing on a published boundary.
+B17024_RATIO_COLLAPSE = {
+    "below_poverty": (0, 100),
+    "near_poverty": (100, 200),
+    "above_2x_poverty": (200, None),
+}
+
+
+def poverty_by_age(geography: str = "tract") -> ConstraintTable:
+    """``B17024``: age crossed with income-to-poverty ratio, over persons.
+
+    Published at tract but not block group. Ten age groups by three collapsed
+    poverty bands, 30 constraints drawn from 120 published cells.
+
+    ``POVPIP`` is blank for anyone whose poverty status is not determined --
+    under 15 and unrelated to the householder, or in certain group quarters --
+    which is exactly this table's universe exclusion, so no separate filter is
+    needed: a null fails every band comparison.
+    """
+    high = float("inf")
+    categories, claimed = [], []
+    for first, age_low, age_high in B17024_AGE_GROUPS:
+        age_label = f"{age_low}_to_{age_high}" if age_high else f"ge_{age_low}"
+        for band, (ratio_low, ratio_high) in B17024_RATIO_COLLAPSE.items():
+            cells = tuple(
+                f"B17024_{first + offset:03d}"
+                for offset, low, upper in B17024_RATIO_BANDS
+                if low >= ratio_low
+                and (high if upper is None else upper)
+                <= (high if ratio_high is None else ratio_high)
+            )
+            claimed.extend(cells)
+
+            def select(
+                persons,
+                lo=age_low,
+                hi=high if age_high is None else age_high,
+                rlo=ratio_low,
+                rhi=high if ratio_high is None else ratio_high,
+            ):
+                age = pd.to_numeric(persons["AGEP"], errors="coerce")
+                ratio = pd.to_numeric(persons["POVPIP"], errors="coerce")
+                return (age >= lo) & (age < hi) & (ratio >= rlo) & (ratio < rhi)
+
+            categories.append(
+                Category(name=f"{age_label}_{band}", select=select, published=cells)
+            )
+
+    every = [f"B17024_{order:03d}" for order in range(1, 132)]
+    subtotals = [f"B17024_{first:03d}" for first, _, _ in B17024_AGE_GROUPS]
+    if len(set(claimed)) != len(claimed) or len(claimed) != 120:
+        raise AssertionError(f"poverty collapse claimed {len(claimed)} cells, expected 120")
+    return ConstraintTable(
+        table="B17024",
+        universe="person",
+        geography=geography,
+        categories=tuple(categories),
+        waived=tuple(c for c in every if c not in claimed),
+    )
+
+
+#: ``B23001``'s age groups per sex, as ``(first cell ORDER in the male block,
+#: lower, upper, cells in the group)``. **Two shapes**: under 65 a group has 7
+#: cells including the Armed Forces / Civilian split, at 65 and over only 5,
+#: because that split is not published there. A collapse generated uniformly
+#: would mis-index everything from cell 073 onward.
+B23001_AGE_GROUPS = (
+    (3, 16, 20, 7), (10, 20, 22, 7), (17, 22, 25, 7), (24, 25, 30, 7),
+    (31, 30, 35, 7), (38, 35, 45, 7), (45, 45, 55, 7), (52, 55, 60, 7),
+    (59, 60, 62, 7), (66, 62, 65, 7), (73, 65, 70, 5), (78, 70, 75, 5),
+    (83, 75, None, 5),
+)
+
+#: Female cells sit 86 orders after the matching male cell.
+B23001_FEMALE_OFFSET = 86
+
+#: Offsets of the terminal states within a group, per shape. Armed forces folds
+#: into employed, matching ``ESR`` 4 and 5; the intermediate "In labor force"
+#: and "Civilian" nodes are subtotals of these and are waived.
+B23001_STATE_OFFSETS = {
+    7: {"employed": (2, 4), "unemployed": (5,), "not_in_labor_force": (6,)},
+    5: {"employed": (2,), "unemployed": (3,), "not_in_labor_force": (4,)},
+}
+
+#: ``ESR`` codes per terminal state. 1 and 2 are civilian employed at work and
+#: with a job but not at work; 4 and 5 are the armed-forces equivalents.
+ESR_TO_STATE = {
+    "employed": ("1", "2", "4", "5"),
+    "unemployed": ("3",),
+    "not_in_labor_force": ("6",),
+}
+
+
+def employment_status(
+    boundaries: Sequence[int] = (25, 55, 65),
+    geography: str = "tract",
+) -> ConstraintTable:
+    """``B23001``: employment status by age and sex, over persons.
+
+    Published at tract but not block group. ``boundaries`` collapse the 13
+    published age groups; the default gives 16-24, 25-54, 55-64, 65+, so four
+    bands by three states by two sexes -- 24 constraints from 98 published
+    cells.
+
+    Every boundary must be a published break. 65 in particular has to be one:
+    it is where the group shape changes, so a band straddling it would mix
+    7-cell and 5-cell groups.
+    """
+    published_edges = {low for _, low, _, _ in B23001_AGE_GROUPS}
+    unknown = sorted(set(boundaries) - published_edges)
+    if unknown:
+        raise ValueError(
+            f"{unknown} are not published breaks of B23001. "
+            f"Available: {sorted(published_edges)}"
+        )
+
+    high = float("inf")
+    edges = [16, *sorted(boundaries), high]
+
+    categories, claimed = [], []
+    for sex, sex_offset in (("male", 0), ("female", B23001_FEMALE_OFFSET)):
+        for lower, upper in zip(edges, edges[1:]):
+            members = [
+                (first, shape)
+                for first, low, up, shape in B23001_AGE_GROUPS
+                if low >= lower and (high if up is None else up) <= upper
+            ]
+            span = (
+                f"ge_{lower:.0f}" if upper == high else f"{lower:.0f}_to_{upper:.0f}"
+            )
+            for state, codes in ESR_TO_STATE.items():
+                cells = tuple(
+                    f"B23001_{first + sex_offset + offset:03d}"
+                    for first, shape in members
+                    for offset in B23001_STATE_OFFSETS[shape][state]
+                )
+                claimed.extend(cells)
+
+                def select(persons, code=SEX_CODES[sex], lo=lower, hi=upper, esr=codes):
+                    age = pd.to_numeric(persons["AGEP"], errors="coerce")
+                    return (
+                        (persons["SEX"] == code)
+                        & (age >= lo)
+                        & (age < hi)
+                        & persons["ESR"].isin(esr)
+                    )
+
+                categories.append(
+                    Category(name=f"{sex}_{span}_{state}", select=select, published=cells)
+                )
+
+    if len(set(claimed)) != len(claimed) or len(claimed) != 98:
+        raise AssertionError(
+            f"employment collapse claimed {len(claimed)} cells "
+            f"({len(set(claimed))} distinct), expected 98 distinct"
+        )
+    every = [f"B23001_{order:03d}" for order in range(1, 174)]
+    return ConstraintTable(
+        table="B23001",
+        universe="person",
+        geography=geography,
+        categories=tuple(categories),
+        waived=tuple(c for c in every if c not in claimed),
+    )
+
+
+def core_tables(area: StudyArea, geography: str) -> list[ConstraintTable]:
+    """The six tables published at both tract and block group."""
+    return [
+        age_sex(geography=geography),
+        race_ethnicity(geography=geography),
+        means_of_transportation(geography=geography),
+        household_income(geography=geography),
+        tenure(geography=geography),
+        sex_by_occupation(area, geography=geography),
+    ]
+
+
+def default_tables(area: StudyArea) -> list[ConstraintTable]:
+    """The settled constraint set: core six at both levels, plus tract-only.
+
+    The core tables are constrained at *both* levels deliberately, and this is
+    not double counting. An ACS tract estimate is not the sum of its block
+    group estimates: the two are estimated separately from the same sample, so
+    they differ, and the tract figure has the lower variance. Constraining both
+    lets the more reliable tract estimate discipline the noisier block group
+    ones, which is much of what PMEDM is for.
+
+    The three tract-only tables add what block group cannot carry at all:
+    group quarters population, income depth below the household income bands,
+    and employment status alongside occupation.
+    """
+    return [
+        *core_tables(area, "block group"),
+        *core_tables(area, "tract"),
+        group_quarters(geography="tract"),
+        poverty_by_age(geography="tract"),
+        employment_status(geography="tract"),
+    ]
