@@ -188,19 +188,24 @@ RAC1P_TO_RACE = {
 #: read as a number it is indistinguishable from every other single-digit code.
 NOT_HISPANIC = "01"
 
-#: ``JWTRNS`` codes per published means-of-transportation category. The
-#: published table splits car/truck/van into drove-alone and carpooled, which
-#: ``JWTRNS`` cannot do on its own -- that needs ``JWRIP`` -- so the split is
-#: collapsed away instead, which is exact.
+#: ``JWTRNS`` codes per published category of ``B08301``, with the cells each
+#: maps to. The correspondence is exact at the subtotal level: ``JWTRNS`` has
+#: one code for car/truck/van against the table's ``_002``, and its five
+#: transit codes are exactly the five cells under ``_010``.
+#:
+#: The table does split car/truck/van into drove-alone and carpooled, and
+#: carpooled again by occupancy, which ``JWTRNS`` cannot reproduce -- that
+#: needs ``JWRIP``. Constraining the ``_002`` subtotal sidesteps it entirely
+#: rather than approximating anything, so ``JWRIP`` is not read at all.
 JWTRNS_TO_MODE = {
-    "car_truck_van": ("01",),
-    "public_transport": ("02", "03", "04", "05", "06"),
-    "taxicab": ("07",),
-    "motorcycle": ("08",),
-    "bicycle": ("09",),
-    "walked": ("10",),
-    "worked_from_home": ("11",),
-    "other_means": ("12",),
+    "car_truck_van": (("01",), ("B08301_002",)),
+    "public_transport": (("02", "03", "04", "05", "06"), ("B08301_010",)),
+    "taxicab": (("07",), ("B08301_016",)),
+    "motorcycle": (("08",), ("B08301_017",)),
+    "bicycle": (("09",), ("B08301_018",)),
+    "walked": (("10",), ("B08301_019",)),
+    "worked_from_home": (("11",), ("B08301_021",)),
+    "other_means": (("12",), ("B08301_020",)),
 }
 
 #: ``TEN`` codes per published tenure category. ``4`` is "occupied without
@@ -340,7 +345,20 @@ def tenure(geography: str = "block group") -> ConstraintTable:
 
 
 def means_of_transportation(geography: str = "block group") -> ConstraintTable:
-    """``B08301``: commute mode, over workers, counted per unit."""
+    """``B08301``: commute mode, over workers, counted per unit.
+
+    The universe is workers 16 and over, and it needs no explicit filter:
+    ``JWTRNS`` is blank for everyone outside it -- not in the labor force,
+    under 16, unemployed, or employed but not at work -- so a blank reads as
+    null and ``isin`` excludes it. Testing ``JWTRNS != "bb"`` instead would
+    match every record, since ``bb`` denotes a blank rather than being a value
+    the file contains.
+
+    The eight categories partition the table's top level and sum to ``_001``.
+    The two subtotals ``_002`` and ``_010`` are *used*, so everything beneath
+    them is waived: the carpool-occupancy detail under ``_004`` and the five
+    transit modes under ``_010``.
+    """
     return ConstraintTable(
         table="B08301",
         universe="person",
@@ -349,8 +367,14 @@ def means_of_transportation(geography: str = "block group") -> ConstraintTable:
             Category(
                 name=label,
                 select=(lambda c: lambda p: p["JWTRNS"].isin(c))(codes),
+                published=cells,
             )
-            for label, codes in JWTRNS_TO_MODE.items()
+            for label, (codes, cells) in JWTRNS_TO_MODE.items()
+        ),
+        waived=(
+            "B08301_001",
+            *(f"B08301_{order:03d}" for order in range(3, 10)),
+            *(f"B08301_{order:03d}" for order in range(11, 16)),
         ),
     )
 
@@ -384,22 +408,82 @@ B01001_SEX_OFFSET = {"male": 3, "female": 27}
 #: ``SEX`` codes. Character width 1, so these are strings.
 SEX_CODES = {"male": "1", "female": "2"}
 
+#: Age bands wanted across every table that publishes ages, as upper-exclusive
+#: boundaries: 0-4, 5-13, 14-17, 18-34, 35-49, 50-64, 65+. Tables break in
+#: different places, so this is the *request*; :func:`snap_boundaries` maps it
+#: onto what a given table actually publishes.
+PREFERRED_AGE_BOUNDARIES = (5, 14, 18, 35, 50, 65)
+
+
+def snap_boundaries(
+    requested: Sequence[int],
+    published: Sequence[int],
+) -> tuple[tuple[int, ...], tuple[tuple[int, int], ...]]:
+    """Move each requested boundary to the nearest one a table publishes.
+
+    A collapse is exact only at a published break, so a boundary that falls
+    inside a cell cannot be used as asked. Moving it to the nearest break keeps
+    the intended split -- one year off -- where dropping it would merge the two
+    bands entirely and lose the distinction.
+
+    Ties go to the lower break, which keeps the younger band smaller: for age
+    bands the younger side is usually the one being isolated.
+
+    Returns
+    -------
+    tuple
+        The snapped boundaries, deduplicated and sorted, and the moves actually
+        made as ``(requested, used)`` pairs. **Check the second element.** The
+        snapping is exact arithmetic on the published breaks, but whether a
+        one-year shift is acceptable is a modelling judgement this cannot make,
+        so it is reported rather than assumed.
+    """
+    available = sorted(set(published))
+    if not available:
+        raise ValueError("no published boundaries to snap to")
+
+    snapped, moves = [], []
+    for boundary in requested:
+        nearest = min(available, key=lambda edge: (abs(edge - boundary), edge))
+        snapped.append(nearest)
+        if nearest != boundary:
+            moves.append((boundary, nearest))
+    return tuple(sorted(set(snapped))), tuple(moves)
+
+
+def b01001_boundaries() -> tuple[int, ...]:
+    """:data:`PREFERRED_AGE_BOUNDARIES` snapped onto ``B01001``'s breaks.
+
+    Yields ``(5, 15, 18, 35, 50, 65)``: 0-4, 5-14, 15-17, 18-34, 35-49, 50-64,
+    65+. Only 14 moves -- ``B01001`` publishes 10-14 then 15-17, so 14 falls
+    inside a cell and 15 is the nearest break. Every other requested boundary
+    is published as asked.
+    """
+    published = [upper for _, upper in B01001_BANDS if upper is not None]
+    snapped, _ = snap_boundaries(PREFERRED_AGE_BOUNDARIES, published)
+    return snapped
+
 
 def age_sex(
-    boundaries: Sequence[int] = (5, 18, 25, 35, 65),
+    boundaries: Sequence[int] | None = None,
     geography: str = "block group",
 ) -> ConstraintTable:
     """``B01001``: sex crossed with collapsed age bands, over persons.
 
     ``boundaries`` are the collapsed breaks, each of which **must** be one
     ``B01001`` publishes -- a collapse is exact only where it merges whole
-    published cells, and no break inside one can be recovered. The default
-    ``(5, 18, 25, 35, 65)`` gives 0-4, 5-17, 18-24, 25-34, 35-64, 65+.
+    published cells, and no break inside one can be recovered. Passing ``None``
+    uses :func:`b01001_boundaries`, the preferred bands snapped onto this
+    table: 0-4, 5-14, 15-17, 18-34, 35-49, 50-64, 65+.
 
-    An age-6 split was wanted, to separate preschool from school-age children.
-    ``B01001`` does not publish one: its first two bands are "Under 5 years"
-    and "5 to 9 years", so 6 falls inside a cell. 0-4 is the closest exact
-    alternative and is what the default uses.
+    Two requested splits are not available here, and neither is approximated
+    silently. A break at 14 falls inside the published 10-14 cell, so the
+    preferred 5-13 / 14-17 becomes 5-14 / 15-17 -- one year off, with the split
+    preserved. A break at 6, wanted to separate preschool from school-age
+    children, falls inside "5 to 9 years" and has no near alternative at all;
+    0-4 is the closest exact band. Category names are generated from the
+    boundaries actually used, so they cannot describe a band the cells do not
+    contain.
 
     Which cells make up each band is *derived* from :data:`B01001_BANDS` rather
     than written out, for the reason given on :func:`household_income`: a
@@ -412,6 +496,8 @@ def age_sex(
     by ``PWGTP``; weighting by ``WGTP`` alone would leave those people
     unplaceable while the published counts still included them.
     """
+    if boundaries is None:
+        boundaries = b01001_boundaries()
     published_edges = {upper for _, upper in B01001_BANDS if upper is not None}
     unknown = sorted(set(boundaries) - published_edges)
     if unknown:
