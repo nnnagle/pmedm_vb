@@ -7,6 +7,7 @@ an expensive pure function of its URL: fetched once into
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -19,6 +20,12 @@ from pmedm_vb.progress import logger
 #: Bytes per streamed chunk. Large enough that a multi-hundred-megabyte PUMS
 #: file does not spend its time in the loop rather than on the socket.
 CHUNK_BYTES = 1 << 20
+
+#: Environment variable that forbids network access. Set it on compute nodes,
+#: which cannot reach census.gov: a file that is not already cached then raises
+#: at once, naming itself, instead of hanging until a connection times out.
+#: :func:`pmedm_vb.data.prefetch.prefetch` fills the cache beforehand.
+OFFLINE_ENV = "PMEDM_VB_OFFLINE"
 
 #: Log a progress line each time a download passes another multiple of this.
 PROGRESS_BYTES = 64 << 20
@@ -95,6 +102,13 @@ def fetch(url: str, dest: Path, *, force: bool = False) -> Path:
     if dest.exists() and not force:
         logger.info("cached   %s", dest.name)
         return dest
+
+    if os.environ.get(OFFLINE_ENV):
+        raise FileNotFoundError(
+            f"{dest} is not cached, and {OFFLINE_ENV} is set so it will not be "
+            f"downloaded ({url}). Run `python experiments/run_map.py prefetch` "
+            f"on a login or data transfer node first"
+        )
 
     ensure_dir(dest.parent)
     partial = dest.with_name(dest.name + ".part")
