@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from pmedm_vb.config import StudyArea
+from pmedm_vb.data.pums import variable_labels
 from pmedm_vb.data.summary import cell_labels
 
 #: Universes a constraint table can be defined over, and which frame its
@@ -620,4 +621,130 @@ def household_income(
         geography=geography,
         categories=tuple(categories),
         waived=("B19001_001",),
+    )
+
+
+#: ``OCCP`` label prefixes making up each of ``C24010``'s five major groups.
+#: The prefix taxonomy lines up with the published hierarchy exactly, which is
+#: what makes this a reading of the table rather than an approximation of it:
+#: ``BUS``+``FIN`` is cell ``_006``, ``CON``+``EXT`` is ``_032``, ``MED`` is
+#: ``_017``+``_018``, ``PRT`` is ``_022``+``_023``, ``TRN`` is ``_036``+``_037``.
+OCCP_TO_MAJOR_GROUP = {
+    "management_business_science_arts": (
+        "MGR", "BUS", "FIN", "CMM", "ENG", "SCI", "CMS", "LGL", "EDU", "ENT", "MED",
+    ),
+    "service": ("HLS", "PRT", "EAT", "CLN", "PRS"),
+    "sales_office": ("SAL", "OFF"),
+    "natural_resources_construction_maintenance": ("FFF", "CON", "EXT", "RPR"),
+    "production_transportation_material_moving": ("PRD", "TRN"),
+}
+
+#: Armed forces. Outside ``C24010``'s civilian universe, and excluded by
+#: :data:`ESR_CIVILIAN_EMPLOYED` as well -- named here so that an unmapped
+#: prefix is a deliberate omission rather than an oversight.
+OCCP_EXCLUDED_PREFIXES = ("MIL",)
+
+#: ``ESR`` codes for "civilian employed": at work, and with a job but not at
+#: work. Excludes armed forces (4, 5), the unemployed (3), those not in the
+#: labor force (6), and the under-16 blank.
+ESR_CIVILIAN_EMPLOYED = ("1", "2")
+
+#: Cell ``ORDER`` of each major group in ``C24010``'s male block.
+C24010_MAJOR_GROUP_CELLS = {
+    "management_business_science_arts": 3,
+    "service": 19,
+    "sales_office": 27,
+    "natural_resources_construction_maintenance": 30,
+    "production_transportation_material_moving": 34,
+}
+
+#: Female cells sit exactly 36 orders after the matching male cell.
+C24010_FEMALE_OFFSET = 36
+
+#: Number of cells ``C24010`` publishes.
+C24010_CELLS = 73
+
+
+def occupation_crosswalk(area: StudyArea) -> pd.Series:
+    """``OCCP`` code to ``C24010`` major group, read from the data dictionary.
+
+    The occupation code in the data is a bare number (``"0010"``); the major
+    group appears only in the *dictionary label* (``"MGR-Chief Executives And
+    Legislators"``). So the crosswalk is derived from published metadata at run
+    time rather than transcribing 500-odd codes into this file, where they
+    would be one vintage's recode silently frozen into the source.
+
+    Raises
+    ------
+    ValueError
+        If a prefix appears that is neither mapped nor explicitly excluded,
+        which means the occupation recode changed and the grouping needs
+        revisiting rather than quietly dropping those records.
+    """
+    labels = variable_labels(area, "OCCP")
+    prefixes = labels["label"].str.extract(r"^([A-Z]{3})-")[0]
+
+    group_of = {
+        prefix: group
+        for group, members in OCCP_TO_MAJOR_GROUP.items()
+        for prefix in members
+    }
+    unknown = sorted(
+        set(prefixes.dropna()) - set(group_of) - set(OCCP_EXCLUDED_PREFIXES)
+    )
+    if unknown:
+        raise ValueError(
+            f"unmapped OCCP prefixes {unknown} -- the occupation recode has "
+            f"changed since this grouping was written. Assign them to a "
+            f"C24010 major group, or to OCCP_EXCLUDED_PREFIXES"
+        )
+
+    crosswalk = pd.Series(
+        prefixes.map(group_of).to_numpy(),
+        index=pd.Index(labels["lo"].to_numpy(), name="occp"),
+        name="group",
+    )
+    return crosswalk.dropna()
+
+
+def sex_by_occupation(area: StudyArea, geography: str = "block group") -> ConstraintTable:
+    """``C24010``: the five occupation major groups by sex, over workers.
+
+    Ten categories, one per group per sex, taken at the published major-group
+    subtotals rather than the detail beneath them -- at block group the finer
+    cells are mostly zeros, and the subtotals are exactly what the ``OCCP``
+    prefixes reconstruct.
+
+    The universe is the *civilian* employed population 16 and over, which needs
+    an explicit filter: unlike ``JWTRNS``, ``OCCP`` is populated for anyone who
+    worked in the last five years, so it does not exclude the unemployed or
+    those who have left the labour force on its own.
+    """
+    crosswalk = occupation_crosswalk(area)
+
+    categories, claimed = [], []
+    for sex, offset in (("male", 0), ("female", C24010_FEMALE_OFFSET)):
+        for group, order in C24010_MAJOR_GROUP_CELLS.items():
+            cell = f"C24010_{order + offset:03d}"
+            codes = tuple(crosswalk.index[crosswalk == group])
+
+            def select(persons, code=SEX_CODES[sex], codes=codes):
+                return (
+                    persons["ESR"].isin(ESR_CIVILIAN_EMPLOYED)
+                    & (persons["SEX"] == code)
+                    & persons["OCCP"].isin(codes)
+                )
+
+            categories.append(
+                Category(name=f"{sex}_{group}", select=select, published=(cell,))
+            )
+            claimed.append(cell)
+
+    every = [f"C24010_{order:03d}" for order in range(1, C24010_CELLS + 1)]
+    return ConstraintTable(
+        table="C24010",
+        universe="person",
+        geography=geography,
+        categories=tuple(categories),
+        waived=tuple(cell for cell in every if cell not in claimed),
     )
