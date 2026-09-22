@@ -40,6 +40,7 @@ import pandas as pd
 
 from pmedm_vb.config import StudyArea
 from pmedm_vb.data.cache import PUBLISHED_ENCODINGS, fetch_cached
+from pmedm_vb.progress import stage
 
 PUMS_BASE = "https://www2.census.gov/programs-surveys/acs/data/pums"
 
@@ -190,7 +191,8 @@ def load_pums(
     dtypes = {column: str for column in text_columns(area, wanted)}
 
     frames = []
-    with zipfile.ZipFile(path) as archive:
+    with stage(f"read PUMS {record_type} file {path.name}") as step, \
+            zipfile.ZipFile(path) as archive:
         members = [n for n in archive.namelist() if n.lower().endswith(".csv")]
         if not members:
             raise ValueError(f"no CSV member in {path}")
@@ -219,7 +221,8 @@ def load_pums(
                     PUBLISHED_ENCODINGS[-1], b"", 0, 1,
                     f"none of {list(PUBLISHED_ENCODINGS)} decodes {path}::{member}",
                 )
-    frame = pd.concat(frames, ignore_index=True)
+        frame = pd.concat(frames, ignore_index=True)
+        step.detail = f"{len(frame):,} records, {frame.shape[1]} columns"
 
     missing = [column for column in required if column not in frame.columns]
     if missing:

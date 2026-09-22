@@ -25,6 +25,7 @@ from pmedm_vb.assemble.inputs import PMEDMInputs
 from pmedm_vb.assemble.targets import build_targets
 from pmedm_vb.config import StudyArea
 from pmedm_vb.data.geography import puma_crosswalk_whole
+from pmedm_vb.progress import logger, stage
 
 #: Geography whose zones the weights are defined over. Block group is the
 #: finest level the constraints reach, so it is what ``W`` is indexed by; tract
@@ -61,23 +62,27 @@ def build_puma(
     if missing:
         raise ValueError(f"no constraint tables specified for {sorted(missing)}")
 
-    units = build_units(area, puma, tables)
+    logger.info(
+        "PUMA %s: %d tracts, %d block groups", puma, len(tracts), len(block_groups)
+    )
+    with stage(f"PUMA {puma}: units from PUMS") as step:
+        units = build_units(area, puma, tables)
+        step.detail = f"{units.n_units:,} units"
 
-    blocks = {
-        "tract": build_targets(
-            area, by_geography["tract"], geography="tract",
-            geoids=tracts, policy=policy,
-        ),
-        ZONE_GEOGRAPHY: build_targets(
-            area, by_geography[ZONE_GEOGRAPHY], geography=ZONE_GEOGRAPHY,
-            geoids=block_groups, policy=policy,
-        ),
-    }
+    blocks = {}
+    for geography, geoids in (("tract", tracts), (ZONE_GEOGRAPHY, block_groups)):
+        with stage(f"PUMA {puma}: {geography} targets") as step:
+            blocks[geography] = build_targets(
+                area, by_geography[geography], geography=geography,
+                geoids=geoids, policy=policy,
+            )
+            step.detail = f"{blocks[geography].Y.size:,} constraint rows"
 
     factors = {}
     for geography, block in blocks.items():
-        counts = person_counts(units, by_geography[geography])
-        matrix, labels = build_attribute_matrix(counts)
+        with stage(f"PUMA {puma}: {geography} attribute matrix"):
+            counts = person_counts(units, by_geography[geography])
+            matrix, labels = build_attribute_matrix(counts)
         if labels != list(block.names):
             raise ValueError(
                 f"{geography}: X's columns and Y's do not agree. "
@@ -117,7 +122,8 @@ def build_puma(
         tract_constraints=list(blocks["tract"].names),
         bg_constraints=list(blocks[ZONE_GEOGRAPHY].names),
     )
-    problem.validate()
+    with stage(f"PUMA {puma}: validate"):
+        problem.validate()
     return problem
 
 
@@ -132,7 +138,11 @@ def build_all(
     The crosswalk is read once and shared, since it is a national file.
     """
     zones = puma_crosswalk_whole(area)
-    return {
-        str(puma): build_puma(area, str(puma), tables, zones=zones, policy=policy)
-        for puma in sorted(zones["puma_geoid"].unique())
-    }
+    pumas = sorted(zones["puma_geoid"].unique())
+    problems = {}
+    for i, puma in enumerate(pumas, start=1):
+        with stage(f"PUMA {puma} ({i} of {len(pumas)})"):
+            problems[str(puma)] = build_puma(
+                area, str(puma), tables, zones=zones, policy=policy
+            )
+    return problems

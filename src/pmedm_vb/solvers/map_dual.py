@@ -57,6 +57,7 @@ The Laplace approximation reuses the converged Hessian; see
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -65,6 +66,7 @@ from scipy.linalg import cho_factor, cho_solve, lu_factor, lu_solve
 
 from pmedm_vb.assemble.inputs import PMEDMInputs
 from pmedm_vb.assemble.sigma import Sigma
+from pmedm_vb.progress import logger
 from pmedm_vb.solvers.base import (
     ConstraintOperator,
     DualState,
@@ -239,7 +241,13 @@ def solve_map(
     converged = False
     decrement = np.inf
     n_iter = 0
+    started = time.perf_counter()
+    logger.info(
+        "solve_map PUMA %s: %s constraints, alpha=%s, taper=%s",
+        inputs.puma, f"{inputs.n_constraints:,}", alpha, taper,
+    )
     for n_iter in range(max_iter + 1):
+        tick = time.perf_counter()
         hessian = DualHessian(inputs, state, sigma)
         direction = -hessian.solve(state.gradient)
         slope = float(state.gradient @ direction)
@@ -275,8 +283,18 @@ def solve_map(
                 f"the objective can resolve in floating point"
             )
         trace["step"].append(step)
+        logger.info(
+            "  iter %3d  objective %.12g  decrement %.2e  step %.3g  max|z| %.2f  %.1fs",
+            n_iter, state.objective, decrement, step, trace["max_abs_z"][-1],
+            time.perf_counter() - tick,
+        )
         state = candidate
 
+    logger.info(
+        "solve_map PUMA %s: %s after %d iterations, decrement %.2e, %.1fs",
+        inputs.puma, "converged" if converged else "NOT converged",
+        n_iter, decrement, time.perf_counter() - started,
+    )
     return MAPResult(
         lam=state.lam,
         W=inputs.N * state.p,

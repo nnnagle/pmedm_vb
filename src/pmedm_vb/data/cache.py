@@ -7,16 +7,21 @@ an expensive pure function of its URL: fetched once into
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import requests
 
 from pmedm_vb.config import ensure_dir, raw_dir
+from pmedm_vb.progress import logger
 
 #: Bytes per streamed chunk. Large enough that a multi-hundred-megabyte PUMS
 #: file does not spend its time in the loop rather than on the socket.
 CHUNK_BYTES = 1 << 20
+
+#: Log a progress line each time a download passes another multiple of this.
+PROGRESS_BYTES = 64 << 20
 
 #: Seconds to wait for the *response headers*, not for the whole transfer --
 #: requests applies a read timeout per chunk, so a slow but live download is
@@ -88,22 +93,46 @@ def fetch(url: str, dest: Path, *, force: bool = False) -> Path:
     """
     dest = Path(dest)
     if dest.exists() and not force:
+        logger.info("cached   %s", dest.name)
         return dest
 
     ensure_dir(dest.parent)
     partial = dest.with_name(dest.name + ".part")
+    start = time.perf_counter()
+    received = 0
     try:
         with requests.get(url, stream=True, timeout=TIMEOUT_SECONDS) as response:
             response.raise_for_status()
+            total = int(response.headers.get("Content-Length") or 0)
+            logger.info(
+                "download %s%s", dest.name, f" ({_megabytes(total)})" if total else ""
+            )
+            reported = 0
             with open(partial, "wb") as handle:
                 for chunk in response.iter_content(CHUNK_BYTES):
                     handle.write(chunk)
+                    received += len(chunk)
+                    if received - reported >= PROGRESS_BYTES:
+                        reported = received
+                        share = f" of {_megabytes(total)}" if total else ""
+                        logger.info("  ... %s%s", _megabytes(received), share)
     except BaseException:
+        logger.info(
+            "download %s: failed after %s", dest.name, _megabytes(received)
+        )
         partial.unlink(missing_ok=True)
         raise
 
     partial.replace(dest)
+    logger.info(
+        "download %s: done, %s in %.1fs",
+        dest.name, _megabytes(received), time.perf_counter() - start,
+    )
     return dest
+
+
+def _megabytes(size: int) -> str:
+    return f"{size / (1 << 20):,.1f} MB"
 
 
 def cached_path(url: str, subdir: str = "") -> Path:
