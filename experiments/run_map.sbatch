@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=pmedm-map
 #SBATCH --account=acf-utk0011
-#SBATCH --partition=campus
-#SBATCH --qos=campus
+#SBATCH --partition=short
+#SBATCH --qos=short
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=64G
-#SBATCH --time=04:00:00
+#SBATCH --time=01:00:00
 #SBATCH --output=/lustre/isaac24/proj/UTK0496/pmedm_vb_runs/slurm-%j.log
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=nnagle@utk.edu
@@ -25,9 +25,11 @@
 #   mkdir -p /lustre/isaac24/proj/UTK0496/pmedm_vb_runs   # once; Slurm needs it for --output
 #   sbatch experiments/run_map.sbatch
 #
-# The account/partition/qos above are the CPU counterparts of the GPU sample
-# this was modelled on, and have not been checked against sacctmgr. Resources
-# can be overridden at submission, e.g. sbatch --cpus-per-task=48 --time=8:00:00.
+# short/short caps a job at one hour. That is enough for the solves (about a
+# minute each, run in parallel), but first-time assembly is still untimed. If a
+# job runs out of time, resubmit: PUMAs already assembled are saved and skipped.
+# A PUMA whose assembly alone takes over an hour needs a longer partition.
+# Resources can be overridden at submission, e.g. sbatch --cpus-per-task=48.
 # Extra arguments are passed to the solve step, e.g.
 #
 #   sbatch experiments/run_map.sbatch --alpha 1.0 0.9 0.7 0.5 0.3
