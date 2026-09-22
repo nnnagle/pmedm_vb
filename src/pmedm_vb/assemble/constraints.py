@@ -639,6 +639,10 @@ OCCP_TO_MAJOR_GROUP = {
     "production_transportation_material_moving": ("PRD", "TRN"),
 }
 
+#: ``TYPEHUGQ`` codes for a group-quarters record: institutional and
+#: noninstitutional. ``"1"`` is an ordinary housing unit.
+TYPEHUGQ_GROUP_QUARTERS = ("2", "3")
+
 #: Armed forces. Outside ``C24010``'s civilian universe, and excluded by
 #: :data:`ESR_CIVILIAN_EMPLOYED` as well -- named here so that an unmapped
 #: prefix is a deliberate omission rather than an oversight.
@@ -747,4 +751,37 @@ def sex_by_occupation(area: StudyArea, geography: str = "block group") -> Constr
         geography=geography,
         categories=tuple(categories),
         waived=tuple(cell for cell in every if cell not in claimed),
+    )
+
+
+def group_quarters(geography: str = "tract") -> ConstraintTable:
+    """``B26001``: the group-quarters population. One cell.
+
+    Published at tract but not block group, so this is a tract-only constraint.
+
+    The universe is declared ``"household"`` -- meaning the unit frame -- even
+    though the table counts *people*. That is exact rather than approximate
+    here: a GQ housing record corresponds to exactly one person record (16,280
+    of each in Tennessee), so a GQ unit contains one person and the unit
+    indicator equals the person count. A household unit contributes zero,
+    which is right: it is outside this table's universe.
+
+    Worth constraining despite being a single cell. Group quarters enter the
+    model only because ``WGTP`` is zero on those records and ``PWGTP`` is used
+    instead; if that handling is wrong, the GQ population goes somewhere it
+    should not, and this is the constraint that says so. It matters most
+    exactly where it is hardest -- Knox County's dorm population is
+    concentrated in a few tracts rather than spread thin.
+    """
+    return ConstraintTable(
+        table="B26001",
+        universe="household",
+        geography=geography,
+        categories=(
+            Category(
+                name="group_quarters",
+                select=lambda units: units["TYPEHUGQ"].isin(TYPEHUGQ_GROUP_QUARTERS),
+                published=("B26001_001",),
+            ),
+        ),
     )
