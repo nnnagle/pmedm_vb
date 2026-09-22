@@ -36,6 +36,7 @@ the published one exactly. That is expected, not a defect here.
 
 from __future__ import annotations
 
+import io
 import re
 import zipfile
 from pathlib import Path
@@ -44,7 +45,7 @@ import numpy as np
 import pandas as pd
 
 from pmedm_vb.config import StudyArea, raw_dir
-from pmedm_vb.data.cache import fetch, fetch_cached
+from pmedm_vb.data.cache import decode, fetch, fetch_cached
 
 VRE_BASE = "https://www2.census.gov/programs-surveys/acs/replicate_estimates"
 
@@ -125,7 +126,7 @@ def table_list(area: StudyArea, *, force: bool = False) -> pd.DataFrame:
         subdir=f"vre/{area.year}/documentation",
         force=force,
     )
-    return pd.read_csv(path, dtype=str)
+    return pd.read_csv(io.StringIO(decode(path.read_bytes(), source=str(path))), dtype=str)
 
 
 def available_tables(area: StudyArea) -> list[str]:
@@ -264,13 +265,19 @@ def _read_replicate_file(path: Path) -> pd.DataFrame:
     the table title and its universe, carrying a ``TBLID`` but no ``GEOID``;
     they are dropped. ``CME`` is the MOE as a display string (``"+/-251"``) and
     is not kept.
+
+    Decoded through :func:`~pmedm_vb.data.cache.decode` rather than handed to
+    pandas, because these files are not UTF-8 -- an accented place name in
+    ``NAME`` or ``TITLE`` is a raw ``0xFA``, and pandas' default decoding
+    fails on the whole table for it.
     """
     with zipfile.ZipFile(path) as archive:
         members = [n for n in archive.namelist() if n.lower().endswith(".csv")]
         if len(members) != 1:
             raise ValueError(f"expected one CSV in {path}, found {members}")
         with archive.open(members[0]) as handle:
-            raw = pd.read_csv(handle, dtype=str, keep_default_na=False)
+            text = decode(handle.read(), source=f"{path}::{members[0]}")
+    raw = pd.read_csv(io.StringIO(text), dtype=str, keep_default_na=False)
 
     raw = raw[raw["GEOID"].str.len() > 0].copy()
 
@@ -365,7 +372,10 @@ def average_weight(area: StudyArea) -> float:
         documentation_url(area, f"VRE_AVERAGE_WEIGHT_{area.year}.csv"),
         subdir=f"vre/{area.year}/documentation",
     )
-    weights = pd.read_csv(path, dtype={"STATE": str})
+    weights = pd.read_csv(
+        io.StringIO(decode(path.read_bytes(), source=str(path))),
+        dtype={"STATE": str},
+    )
     row = weights.loc[weights["STATE"] == area.state, "AVERAGE_WEIGHT"]
     if row.empty:
         raise KeyError(f"no average weight published for state {area.state!r}")

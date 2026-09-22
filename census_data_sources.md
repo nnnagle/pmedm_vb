@@ -131,6 +131,19 @@ Two-digit **state FIPS**. Codes `03`, `07` and `14` are absent, which is what
 identifies the suffix as FIPS rather than a sequence — those three are
 unassigned.
 
+### Encoding
+
+**Not UTF-8.** A replicate file carrying an accented place name holds a raw
+`0xFA` (`ú` in Windows-1252), and pandas' default decoding fails on the entire
+table for it — first hit on `B08301` at block group. `cache.decode()` tries
+UTF-8 then cp1252, which keeps a genuinely UTF-8 file correct and reads the
+legacy ones without loss. It is a fallback order, not detection: cp1252 leaves
+only five byte values undefined, so it decodes nearly anything.
+
+The PUMS CSVs come from the same publisher and take the same treatment, by
+retrying the read rather than decoding in memory — those files are hundreds of
+megabytes.
+
 ### Column layout
 
 ```

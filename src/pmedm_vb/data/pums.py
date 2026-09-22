@@ -39,7 +39,7 @@ from pathlib import Path
 import pandas as pd
 
 from pmedm_vb.config import StudyArea
-from pmedm_vb.data.cache import fetch_cached
+from pmedm_vb.data.cache import PUBLISHED_ENCODINGS, fetch_cached
 
 PUMS_BASE = "https://www2.census.gov/programs-surveys/acs/data/pums"
 
@@ -185,14 +185,29 @@ def load_pums(
         if not members:
             raise ValueError(f"no CSV member in {path}")
         for member in sorted(members):
-            with archive.open(member) as handle:
-                frames.append(
-                    pd.read_csv(
-                        handle,
-                        usecols=lambda column: column in wanted,
-                        dtype=dtypes,
-                        low_memory=False,
-                    )
+            # Same publisher, same encoding question as the replicate files, but
+            # these run to hundreds of megabytes so they cannot be read into
+            # memory to decode. Re-opening the member and retrying costs nothing
+            # in the normal case, where the first attempt succeeds.
+            for encoding in PUBLISHED_ENCODINGS:
+                try:
+                    with archive.open(member) as handle:
+                        frames.append(
+                            pd.read_csv(
+                                handle,
+                                usecols=lambda column: column in wanted,
+                                dtype=dtypes,
+                                low_memory=False,
+                                encoding=encoding,
+                            )
+                        )
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                raise UnicodeDecodeError(
+                    PUBLISHED_ENCODINGS[-1], b"", 0, 1,
+                    f"none of {list(PUBLISHED_ENCODINGS)} decodes {path}::{member}",
                 )
     frame = pd.concat(frames, ignore_index=True)
 
