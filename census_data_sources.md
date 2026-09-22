@@ -89,6 +89,28 @@ their type. Read as text, then zero-pad defensively.
   housing file, where `TEN` is null for exactly 26,484 records = 10,204 vacant
   + 16,280 group quarters.
 
+**PUMS weights pin household population exactly, and group quarters not at
+all.** For PUMA 4701501 (2020–2024, Knox County):
+
+| | PUMS | published | gap |
+|---|---|---|---|
+| total population | 137,125 | 138,155 | 1,030 |
+| group quarters (`B26001`) | 8,634 | 9,664 | 1,030 |
+| household population | **128,491** | **128,491** | **0** |
+
+The whole total-population shortfall is the group-quarters shortfall, and the
+household side agrees to the person. So `PWGTP` is controlled to household
+population and group quarters is left to drift — about 11 percent here. This is
+a property of the published weights, not of any join: the person and housing
+files are internally consistent (763 GQ records each way, no orphans in either
+direction).
+
+Consequence for PMEDM: design weights start ~11 percent low on group quarters
+and exact on households. That is what `B26001` as a constraint is for — the
+solver scales the GQ units up. It also means a person-level check against
+published totals should expect a small deficit concentrated entirely in GQ,
+rather than treating it as a mapping error.
+
 **Group quarters carry no housing weight.** `WGTP` is exactly 0 for every record
 with `TYPEHUGQ` in `{2, 3}` (8,077 institutional + 8,203 noninstitutional in
 Tennessee); the weight is on the person record's `PWGTP` instead. Each GQ
