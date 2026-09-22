@@ -71,6 +71,11 @@ class Units:
     units: pd.DataFrame
     persons: pd.DataFrame
     puma: str
+    #: Person records in the PUMA whose ``SERIALNO`` matched no unit, and so
+    #: were dropped. Counted *before* the filter, because afterwards the
+    #: question cannot be asked -- which is how an earlier version of this
+    #: check managed to be vacuous.
+    dropped_persons: pd.DataFrame
 
     @property
     def n_units(self) -> int:
@@ -89,11 +94,15 @@ class Units:
             problems.append("negative weights")
         if self.units["weight"].sum() <= 0:
             problems.append("weights sum to zero; no unit can receive any weight")
-        orphans = set(self.persons["SERIALNO"]) - set(self.units.index)
-        if orphans:
+        if len(self.dropped_persons):
+            serials = self.dropped_persons["SERIALNO"]
+            gq = int(serials.str.contains("GQ").sum())
             problems.append(
-                f"{len(orphans)} person record(s) belong to no unit, "
-                f"e.g. {sorted(orphans)[:3]}"
+                f"{serials.nunique()} person record(s) in this PUMA belong to no "
+                f"unit and were dropped ({gq} of them group quarters, by SERIALNO). "
+                f"Every person should sit in an occupied housing unit or a "
+                f"group-quarters record; any that do not are missing from the "
+                f"model while the published tables still count them"
             )
         gq = self.units.index[self.units["is_group_quarters"]]
         if len(gq):
@@ -156,7 +165,9 @@ def build_units(
     units = units.set_index("SERIALNO")
     units["is_group_quarters"] = units["TYPEHUGQ"].isin(TYPEHUGQ_GROUP_QUARTERS)
 
-    persons = persons[persons["SERIALNO"].isin(set(units.index))].copy()
+    belongs = persons["SERIALNO"].isin(set(units.index))
+    dropped = persons[~belongs].copy()
+    persons = persons[belongs].copy()
 
     # A GQ unit's weight is its occupant's. Checked rather than assumed: if a GQ
     # record ever held more than one person, PWGTP would not be the unit weight.
@@ -177,7 +188,9 @@ def build_units(
         pd.to_numeric(units[WEIGHT_PREFIXES["housing"]], errors="coerce").to_numpy(),
     )
 
-    frame = Units(units=units, persons=persons, puma=str(puma))
+    frame = Units(
+        units=units, persons=persons, puma=str(puma), dropped_persons=dropped
+    )
     frame.validate()
     return frame
 
