@@ -326,6 +326,35 @@ def replicate_matrix(frame: pd.DataFrame) -> np.ndarray:
     return frame.loc[:, list(REPLICATE_COLUMNS)].to_numpy(dtype=float)
 
 
+def deviations(frame: pd.DataFrame) -> np.ndarray:
+    """``(n_cells, 80)`` replicate deviations from the full-sample estimate.
+
+    Taken against the published estimate, not the replicate mean -- the two
+    differ, and the documentation's formula specifies the former.
+
+    This is the ``L`` the solver carries: every variance and covariance here is
+    a quadratic form in it, so it is named once rather than recomputed at each
+    use.
+    """
+    return replicate_matrix(frame) - frame["estimate"].to_numpy(float)[:, None]
+
+
+def sdr_variances(frame: pd.DataFrame) -> pd.Series:
+    """Raw SDR variance per cell, before any zero-cell policy is applied.
+
+    Exactly zero wherever every replicate equals the estimate, which is what a
+    zero count produces and what :func:`variances` then substitutes for. Both
+    that raw value and the substituted one are needed to form the residual
+    diagonal ``D_i = v_i - (1 - alpha) * s_i``, so it is exposed rather than
+    left as an intermediate.
+    """
+    return pd.Series(
+        SDR_FACTOR * np.square(deviations(frame)).sum(axis=1),
+        index=frame.index,
+        name="variance",
+    )
+
+
 def average_weight(area: StudyArea) -> float:
     """State average weight ``w`` for the zero-count model.
 
@@ -395,13 +424,7 @@ def variances(
     if policy not in ZERO_POLICIES:
         raise ValueError(f"policy must be one of {ZERO_POLICIES}, got {policy!r}")
 
-    deviations = replicate_matrix(frame) - frame["estimate"].to_numpy(float)[:, None]
-    result = pd.Series(
-        SDR_FACTOR * np.square(deviations).sum(axis=1),
-        index=frame.index,
-        name="variance",
-    )
-
+    result = sdr_variances(frame)
     degenerate = result == 0.0
     if not degenerate.any():
         return result
