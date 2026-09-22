@@ -35,7 +35,10 @@
 # Assembled problems are reused across jobs; after changing the constraint
 # tables or assembly code, run assemble with --rebuild (edit ASSEMBLE_ARGS).
 
-set -euo pipefail
+# -u (unset variables are errors) is switched on only after conda activates:
+# the environment's activate.d hooks read variables such as
+# MKL_INTERFACE_LAYER that are normally unset, and abort under -u.
+set -eo pipefail
 
 REPO=/lustre/isaac24/proj/UTK0496/pmedm_vb
 RUNS=/lustre/isaac24/proj/UTK0496/pmedm_vb_runs
@@ -45,6 +48,7 @@ ASSEMBLE_ARGS=""
 module purge
 source /sw/isaac/applications/anaconda3/2024.06/rhel8_cascadelake_binary/anaconda3-2024.06/etc/profile.d/conda.sh
 conda activate /lustre/isaac24/proj/UTK0496/envs/pmedm_vb
+set -u
 export PMEDM_VB_DATA=/lustre/isaac24/scratch/$USER/pmedm_vb_data
 
 # No network here: a file the prefetch missed fails at once, by name.
