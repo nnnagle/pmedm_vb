@@ -30,6 +30,18 @@ fit, measures three things:
    inconclusive on real PUMAs; parts 1 and 2 are the evidence. The Laplace
    formula ``-n f* + (m/2) log 2 pi - (1/2) log det(n H)`` is printed beside it
    for scale; it is an approximation, not a bound.
+4. **Worst VB draws, decomposed.** With ``delta = lambda - lambda*`` and
+   ``z = -X delta`` the change in every (zone, unit) logit, the excess of
+   part 1 splits exactly into ``n grad f*' delta`` (near zero at the optimum)
+   plus ``n [log E exp(z) - E z - Var(z)/2]``, expectations under ``p*``: the
+   log-sum-exp term's departure from its quadratic. It is large when
+   ``p(lambda)`` piles onto cells where ``z`` is large, so for each of the
+   worst draws the report lists the cells holding most of ``p(lambda)``, then,
+   for the top cell, the constraints its logit shift comes from
+   (``-loading x delta_k`` for each constraint the cell loads on). If one
+   constraint carries nearly all of the shift, the wall is axis-aligned and a
+   per-coordinate skew can in principle follow it; if the shift is spread
+   over several constraints, it cannot.
 
 Needs torch. Takes a few minutes per fit for an 8,000-constraint PUMA. Several
 PUMAs, alphas and tapers may be given; every combination runs in its own
@@ -55,6 +67,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import scipy.sparse as sp
 import torch
 from scipy.special import logsumexp
 
@@ -82,6 +95,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--draws", type=int, default=400)
     parser.add_argument("--is-draws", type=int, default=4000)
     parser.add_argument("--top", type=int, default=25)
+    parser.add_argument("--worst", type=int, default=5, help="VB draws decomposed in part 4")
     parser.add_argument("--batch", type=int, default=32)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
@@ -144,6 +158,83 @@ def load_vb(path: Path) -> tuple[StructuredGaussian, float, float]:
             V=saved["V"],
             **skewed,
         ), float(saved["elbo"]), float(saved["elbo_se"])
+
+
+def cell_loadings(inputs: PMEDMInputs, zone: int, unit: int) -> tuple[np.ndarray, np.ndarray]:
+    """Stacked-constraint indices a (zone, unit) cell loads on, and the loadings.
+
+    Constraint ``(area a, attribute k)`` sits at ``a + k n_areas`` within its
+    level (column-major), and the cell's loading on it is ``A[a, zone] X[unit, k]``.
+    """
+    index, value, offset = [], [], 0
+    for A, X, Y in ((inputs.A_T, inputs.X_T, inputs.Y_T), (inputs.A_B, inputs.X_B, inputs.Y_B)):
+        col = sp.csc_matrix(A)[:, [zone]]
+        row = sp.csr_matrix(X)[[unit], :]
+        areas, attributes = col.indices, row.indices
+        index.append(offset + (areas[:, None] + attributes[None, :] * Y.shape[0]).ravel())
+        value.append((col.data[:, None] * row.data[None, :]).ravel())
+        offset += Y.size
+    return np.concatenate(index), np.concatenate(value)
+
+
+def worst_draws(inputs: PMEDMInputs, op: ConstraintOperator, lam_star: np.ndarray,
+                gradient: np.ndarray, lam: np.ndarray, extra: np.ndarray,
+                cells: pd.DataFrame, vb: StructuredGaussian, count: int, top: int) -> None:
+    """Part 4: split each of the ``count`` worst draws' excess over cells and constraints."""
+    n, N = inputs.n, inputs.N
+    with np.errstate(divide="ignore"):
+        base = np.log(inputs.q) - op.adjoint(lam_star)
+    base -= logsumexp(base)
+    p_star = np.exp(base)
+    zone_ids = inputs.zones.iloc[:, 0].to_numpy()
+    unit_ids = inputs.units.iloc[:, 0].to_numpy()
+    shares, top_units = [], []
+    print(f"\n4. The {count} worst VB draws of part 1, decomposed"
+          "\n   excess = n grad' delta + n [log E exp(z) - E z - Var z / 2],  z = -X delta, E under p*")
+    for rank, d in enumerate(np.argsort(extra)[::-1][:count], start=1):
+        delta = lam[:, d] - lam_star
+        z = -op.adjoint(delta)
+        shifted = base + z
+        log_mgf = logsumexp(shifted)
+        p_new = np.exp(shifted - log_mgf)
+        mean = float((p_star * z).sum())
+        cumulant = n * (log_mgf - mean - 0.5 * (float((p_star * z * z).sum()) - mean**2))
+        linear = n * float(gradient @ delta)
+        print(f"\n   worst {rank}: excess {extra[d]:,.1f} = cumulant part {cumulant:,.1f} "
+              f"+ gradient part {linear:,.1f}  (residual {extra[d] - cumulant - linear:,.2g})")
+
+        order = np.argsort(p_new, axis=None)[::-1][:top]
+        zones, units = np.unravel_index(order, p_new.shape)
+        print(f"   top {top} cells hold {p_new.ravel()[order].sum():.1%} of p(lambda), "
+              f"{p_star.ravel()[order].sum():.2%} of p*")
+        print(pd.DataFrame({
+            "zone": zone_ids[zones], "unit": unit_ids[units],
+            "N p*": N * p_star[zones, units], "N p(lambda)": N * p_new[zones, units],
+            "z": z[zones, units],
+        }).round(3).to_string(index=False))
+
+        index, loading = cell_loadings(inputs, zones[0], units[0])
+        contribution = -loading * delta[index]
+        positive = contribution[contribution > 0].sum()
+        share = contribution.max() / positive if positive > 0 else float("nan")
+        shares.append(share)
+        top_units.append(unit_ids[units[0]])
+        table = cells.iloc[index][["level", "geoid", "constraint", "published", "se", "fitted"]].copy()
+        table["loading"] = loading
+        table["delta/sd"] = delta[index] / cells["sd"].to_numpy()[index]
+        if vb.is_skewed:
+            table["skew"] = vb.skew[index]
+            table["log_tail"] = vb.log_tail[index]
+        table["contribution"] = contribution
+        print(f"   top cell's logit shift z = {contribution.sum():.3f} over {index.size} constraints; "
+              f"the largest carries {share:.0%} of the positive part")
+        print(table.sort_values("contribution", ascending=False).head(6)
+              .round(3).to_string(index=False))
+
+    print(f"\n   across the {count} draws: largest single constraint's share of the top cell's "
+          f"positive shift: median {np.nanmedian(shares):.0%}, range "
+          f"{np.nanmin(shares):.0%} to {np.nanmax(shares):.0%}; "
+          f"{len(set(top_units))} distinct top units")
 
 
 def quantiles(x: np.ndarray) -> str:
@@ -251,6 +342,11 @@ def diagnose(args: argparse.Namespace) -> None:
             else "PROBLEM: ELBO above the normaliser estimate"
         print(f"   {verdict}. The IS estimate is biased low when ESS is small, so a "
               f"violation is only conclusive with a healthy ESS.")
+
+    # -- 4. worst VB draws, decomposed ---------------------------------------
+    if vb is not None and args.worst > 0:
+        worst_draws(inputs, ConstraintOperator(inputs), result.lam, sigma_state.gradient,
+                    lam_vb, extra_vb, cells, vb, args.worst, 5)
 
 
 def diagnose_to_file(args: argparse.Namespace, path: Path) -> tuple[Path, str]:
