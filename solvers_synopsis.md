@@ -25,6 +25,11 @@ tract taper unless stated.
   second stage. `posterior_weights` turns draws into weights.
 - `src/pmedm_vb/assemble/inputs.py` -- `variance_floor=None | "zero" | number`;
   `"zero"` floors every cell at its area's zero-count variance.
+- `src/pmedm_vb/assemble/build.py` -- `build_puma(..., epsilon=E)`: optional
+  statewide support. The PUMA's records keep `(1 - E) d_puma`, every state
+  record adds `E d_state N / sum(d_state)`, identical rows of X (households
+  and GQ kept apart) are merged, and `n`, `N` stay the PUMA's own. Off by
+  default; `run_map.py --epsilon`. See finding 8 for why it did not help.
 - `experiments/run_map.py` + `run_map.sbatch` -- steps `prefetch` (login
   node), `assemble`, `solve` (MAP), `vb`; per-task logs; resumable sweeps.
 - `experiments/laplace_diagnostic.py` + `.sbatch` -- per fit: (1) per-draw
@@ -82,6 +87,59 @@ tract taper unless stated.
 6. **Training saw them.** In the last 500 steps, 23-41% of steps dip more than
    100 nats below the median ELBO and 4-12% more than 1,000; the worst steps
    imply single draws hundreds of thousands of nats low.
+7. **More draws per step halve the tail but do not remove it.** The skewed
+   fits of run 6271480 repeated with 64 draws per step instead of 8, all
+   else equal (weight draws as in 5):
+
+   | PUMA | alpha | > 1% of N, 8 -> 64 draws | > 10% of N, 8 -> 64 draws |
+   |---|---|---|---|
+   | 4701501 | 1 | 13.2% -> 7.5% | 1.50% -> 0.38% |
+   | 4701501 | 0.1 | 17.1% -> 12.9% | 1.52% -> 0.68% |
+   | 4701502 | 1 | 10.1% -> 7.7% | 0.65% -> 0.47% |
+   | 4701502 | 0.1 | 14.7% -> 12.6% | 0.90% -> 0.60% |
+   | 4701503 | 1 | 9.9% -> 6.2% | 1.18% -> 0.50% |
+   | 4701503 | 0.1 | 15.8% -> 10.1% | 1.88% -> 0.65% |
+   | 4701504 | 1 | 9.9% -> 5.8% | 1.52% -> 0.33% |
+   | 4701504 | 0.1 | 14.1% -> 10.8% | 1.75% -> 0.62% |
+
+   The remaining tail is still rejected by the posterior (`log pi - log q`
+   medians -44 to -71 for the 1-10% class, -400 to -920 for >= 10%; ESS 1-3
+   of 4,000), and the households are the same kind. So gradient noise is part
+   of the cause, not all of it. The comparison is not of draws alone: with
+   smaller window standard errors the stopping rule also ran longer. ELBO
+   gains over Laplace were unchanged (24,560-91,511 nats); the skewed stage
+   added 106-215 nats over the Gaussian.
+8. **A statewide support makes the tail worse.** With `epsilon = 0.01` the
+   155,047 Tennessee records collapse to 69,291 rows, of which a PUMA's own
+   2,329-3,565 records form 1,757-2,361; 0.70-0.75% of the prior lands on
+   the ~67,000 new rows (run 6272529, MAP; 6272652, VB with 8 draws per step).
+   MAP converges in 7-9 Newton steps, 50-98 s; a VB fit takes 11-19 min.
+   - Most rare categories gain carriers at or above the PUMA's highest
+     loading (4701501: nh_aian 1 -> 106 rows, nh_asian 1 -> 173,
+     other_means 1 -> 103), but the prior share on the largest carrier barely
+     moves, since the new rows hold ~1% of the prior. Two walls stay
+     unshared: taxicab x3 (2021HU1143286, 4701501) and nh_other_race x10
+     (2023HU0854456, 4701504). `B08301.motorcycle` and `B03002.nh_nhpi` had no
+     carrier in 4701501 at all before; now 82 and 89.
+   - Against the 8-draw PUMA-only fits of run 6271480, draws with a row over
+     1% of N rose on every fit (4701501: 13.2 -> 40.1% at alpha 1, 17.1 ->
+     53.9% at 0.1; the others 10-16% -> 12-23%), and over 10% of N from
+     0.65-1.9% to 2.4-5.7%. `weight_draws.py` now counts merged rows, but the
+     MAP's largest row is 38-59 people, about 0.1% of N, so this is not
+     the merging.
+   - The posterior rejects these draws more strongly than before (4701503 at
+     alpha 1 and 4701504 at both: `log pi - log q` median -980 to -1,380 and
+     p10 -7,200 to -11,900 for the >= 10% class), and the bulk widens (< 1% class: p10 -43 to
+     -75, p90 +50 to +94, against p10 -18 to -33, p90 +19 to +38 in the
+     64-draw PUMA-only fits of finding 7).
+   - **The tail moves onto the new rows.** In 4701504 at alpha 1, 13 of the 15
+     largest-weight rows seen hold no PUMA record, each a single record with
+     a MAP weight of 0.001-0.02 people, and reach 77-99.5% of N in their
+     worst draw: e.g. six Hispanic men over 65 below poverty (x6 on four
+     cells at once), bicycle x3, nh_aian x7. Widening the support adds
+     walls: every record whose loading is concentrated on a few cells is a
+     direction along which a modest shift in those multipliers multiplies its
+     weight by `exp(loading x shift)`.
 
 Consequences:
 
@@ -90,15 +148,24 @@ Consequences:
 - The ELBO means average heavy-tailed terms, so their standard errors (and
   the "3-20 se" skewed-over-Gaussian gains) are less reliable than they look.
 
-Why VB keeps the tail is **not established**. Two candidates, neither tested:
-KL(q || pi) weights the tail only by its frequency (about 1.5% x ~1,000 nats is
-~15 nats of ELBO), so the family's optimum may carry it; and Adam's running
-squared-gradient average, dominated by these spikes, may shrink the steps of
-exactly the parameters that would remove it.
+Why VB keeps the tail is **partly established**. Gradient noise contributes
+(finding 7: 64 draws per step halve the > 10% class), but the tail survives
+it. The other candidate, untested: KL(q || pi) weights the tail only by its
+frequency (about 1.5% x ~1,000 nats is ~15 nats of ELBO), so the family's
+optimum may carry it. Findings 5 and 8 give the walls' shape: each is a
+record's row `x_i` of X, and a draw `delta` goes wrong when the largest
+`x_i' delta` over records makes that record dominate `p(lambda)`. A wall
+involves several coordinates at once, which a per-coordinate skew cannot
+follow.
 
 ## The open decision
 
-Research-direction choices, none started:
+**Decided: an MCMC reference posterior for one PUMA, PUMA-only support,** to
+see how the posterior itself treats these directions before designing a
+family around them. The statewide support (last option below) was tried and
+made the tail worse (finding 8).
+
+The options as first recorded:
 
 - **A family built around the walls** -- transform or constrain along the
   (block group, household) directions where a cell's logit can blow up.
@@ -118,8 +185,9 @@ Research-direction choices, none started:
   `(k/2) log(1/alpha)` as alpha -> 0 (see the `map_dual` docstring).
 - **Duplicate rows.** 24-34% of units per PUMA share their X row with another.
   Merging identical rows and summing their design weights leaves `f(lambda)`
-  exactly unchanged, provided `n` stays the record count -- a computational
-  saving only, worth doing if the row count grows (statewide support).
+  exactly unchanged, provided `n` stays the record count. Implemented for the
+  statewide support (`design.collapse_units`); not applied to the PUMA-only
+  problem.
 - **`weight_draws.py` reports per record**, so concentration on a household
   *type* with duplicates is understated.
 
@@ -130,3 +198,9 @@ Under `/lustre/isaac24/proj/UTK0496/pmedm_vb_runs/`:
 - `6271250` -- VB, Gaussian family, `--variance-floor zero`.
 - `6271480` -- VB, skewed family, `--variance-floor zero`, alpha 1 and 0.1;
   `diagnostics/` and `weight_draws/` hold the reports quoted above.
+- The 64-draw repeat of `6271480` (finding 7); its job id was not recorded.
+- `6272529` -- MAP, `--epsilon 0.01 --variance-floor zero`, alpha 1 and 0.1.
+- `6272652` -- VB on the same inputs, skewed, 8 draws per step, with
+  `weight_draws/` (finding 8). Inputs under
+  `$PMEDM_VB_DATA/processed/inputs/knox-2024-5yr-state-e0.01`, with
+  `support_summary.csv`.
