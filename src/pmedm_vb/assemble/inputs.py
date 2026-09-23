@@ -140,7 +140,12 @@ class PMEDMInputs:
         """
         return self.sigma_l is None
 
-    def sigma(self, alpha: float, taper: str | None = "tract") -> Sigma:
+    def sigma(
+        self,
+        alpha: float,
+        taper: str | None = "tract",
+        variance_floor: str | float | None = None,
+    ) -> Sigma:
         """The covariance at this shrinkage, as a :class:`Sigma` view.
 
         ``alpha`` is a parameter of the *run*, not of the assembled problem, so
@@ -148,12 +153,90 @@ class PMEDMInputs:
         one assembled problem serves an entire sweep. ``taper`` is too:
         ``"tract"`` keeps replicate covariance only between cells in the same
         tract, ``None`` keeps all of it. Why tract is the default is under
-        *Tapering* in :mod:`pmedm_vb.assemble.sigma`.
+        *Tapering* in :mod:`pmedm_vb.assemble.sigma`. So is ``variance_floor``;
+        see :meth:`floored_variances`.
         """
         if taper not in ("tract", None):
             raise ValueError(f"taper must be 'tract' or None, got {taper!r}")
         groups = self.constraint_tracts() if taper == "tract" else None
-        return Sigma(v=self.sigma_v, l=self.sigma_l, alpha=alpha, groups=groups)
+        v = self.floored_variances(variance_floor)
+        return Sigma(v=v, l=self.sigma_l, alpha=alpha, groups=groups)
+
+    def floored_variances(self, variance_floor: str | float | None) -> np.ndarray:
+        """``sigma_v`` with no cell more certain than a floor.
+
+        ``None`` leaves the published variances alone. ``"zero"`` floors each
+        cell at the zero-count variance ``w * k`` of its own area and level
+        (:meth:`zero_cell_variances`); a number floors every cell at that value.
+
+        **Why.** A published zero is given the modelled variance ``w * k`` --
+        72 at Knox block groups -- while a published count of 1 or 2 carries
+        its replicate variance, often 2 or 3. So "1 +- 1.4" is a far tighter
+        constraint than "0 +- 8.5", although both are estimates of a count at or
+        near zero. On the Knox fits those tight small-count cells
+        were where the posterior over the multipliers was furthest from
+        Gaussian: steep on one side, flat on the other, with Laplace draws
+        landing tens of thousands of nats below it
+        (``experiments/laplace_diagnostic.py``). Flooring at the zero-count
+        variance says no estimate is more certain than a zero in the same
+        place. It binds only where ``v`` is below the floor, which in practice
+        is small counts: at Knox block groups the median variance of counts 1
+        to 12 was 68.6 against a floor of 72.
+
+        Raising ``v`` raises the residual diagonal ``D`` and leaves the
+        replicate factor alone, so a floored cell's correlations with the rest
+        shrink -- the added variance is noise the replicates did not see.
+        """
+        if variance_floor is None:
+            return self.sigma_v
+        if isinstance(variance_floor, str):
+            if variance_floor != "zero":
+                raise ValueError(
+                    f"variance_floor must be None, 'zero' or a number, got {variance_floor!r}"
+                )
+            floor = self.zero_cell_variances()
+        else:
+            if variance_floor <= 0:
+                raise ValueError(f"a numeric variance_floor must be positive, got {variance_floor}")
+            floor = np.full(self.n_constraints, float(variance_floor))
+        return np.maximum(self.sigma_v, floor)
+
+    def zero_cell_variances(self) -> np.ndarray:
+        """``(n_constraints,)`` the zero-count variance of each row's area and level.
+
+        Read off the data rather than recomputed: a cell published as zero,
+        with no replicate spread, carries exactly the modelled ``w * k`` of its
+        area (the ``"model"`` zero-cell policy), and ``k`` depends on the area's
+        population, so it differs between areas. An area with no zero cell of
+        its own takes the median over the areas at its level that have one.
+
+        Raises
+        ------
+        ValueError
+            If a level has no zero cells at all, so there is nothing to read.
+        """
+        m = self.n_constraints
+        replicate = (
+            np.zeros(m) if self.sigma_l is None
+            else SDR_FACTOR * np.square(self.sigma_l).sum(axis=1)
+        )
+        zero = (self.targets() == 0) & (replicate == 0)
+        split = self.Y_T.size
+        levels = [
+            (slice(0, split), np.tile(np.arange(self.Y_T.shape[0]), self.Y_T.shape[1]), "tract"),
+            (slice(split, m), np.tile(np.arange(self.Y_B.shape[0]), self.Y_B.shape[1]), "block group"),
+        ]
+        out = np.empty(m)
+        for rows, areas, name in levels:
+            v, is_zero = self.sigma_v[rows], zero[rows]
+            if not is_zero.any():
+                raise ValueError(
+                    f"no {name} cell is a published zero, so there is no zero-count "
+                    f"variance to floor at; pass a number instead"
+                )
+            per_area = pd.Series(v[is_zero]).groupby(areas[is_zero]).median()
+            out[rows] = per_area.reindex(areas).fillna(per_area.median()).to_numpy()
+        return out
 
     def targets(self) -> np.ndarray:
         """The stacked constraint vector ``[vec(Y_T); vec(Y_B)]``, column-major."""

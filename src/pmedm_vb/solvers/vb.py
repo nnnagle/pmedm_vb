@@ -153,7 +153,7 @@ class StructuredGaussian:
     @classmethod
     def laplace(cls, inputs: PMEDMInputs, result: MAPResult) -> "StructuredGaussian":
         """``N(lambda*, (n H)^{-1})`` written in this family."""
-        sigma = inputs.sigma(result.alpha, result.taper)
+        sigma = inputs.sigma(result.alpha, result.taper, result.variance_floor)
         hessian = DualHessian(inputs, dual_state(inputs, result.lam, sigma), sigma)
         n = inputs.n
         blocks = [np.linalg.cholesky(n * block) for block in hessian.blocks]
@@ -197,7 +197,7 @@ class VBResult:
         see *Stopping* in the module docstring.
     n_iter, converged:
         As for :class:`~pmedm_vb.solvers.map_dual.MAPResult`.
-    alpha, taper:
+    alpha, taper, variance_floor:
         The ``Sigma`` the posterior is under.
     """
 
@@ -213,6 +213,7 @@ class VBResult:
     alpha: float
     taper: str | None
     map_result: MAPResult | None = field(default=None, repr=False)
+    variance_floor: str | float | None = None
 
 
 class _DualTarget:
@@ -379,6 +380,7 @@ def solve_vb(
     alpha: float,
     taper: str | None = "tract",
     init: MAPResult | None = None,
+    variance_floor: str | float | None = None,
     max_iter: int = 1000,
     tol: float = 2.0,
     draws: int = 8,
@@ -393,11 +395,11 @@ def solve_vb(
 
     Parameters
     ----------
-    alpha, taper:
+    alpha, taper, variance_floor:
         Select ``Sigma``, as for :func:`~pmedm_vb.solvers.map_dual.solve_map`.
     init:
-        MAP fit to start from; solved here when ``None``. Its ``alpha`` and
-        ``taper`` must match.
+        MAP fit to start from; solved here when ``None``. Its ``alpha``,
+        ``taper`` and ``variance_floor`` must match.
     tol, patience:
         A window whose mean ELBO beats the previous window's by less than
         ``tol`` standard errors of the difference halves the learning rate;
@@ -414,15 +416,16 @@ def solve_vb(
         A torch device, e.g. ``"cuda"``.
     """
     if init is None:
-        init = solve_map(inputs, alpha=alpha, taper=taper)
-    if (init.alpha, init.taper) != (alpha, taper):
+        init = solve_map(inputs, alpha=alpha, taper=taper, variance_floor=variance_floor)
+    if (init.alpha, init.taper, init.variance_floor) != (alpha, taper, variance_floor):
         raise ValueError(
             f"init was fitted at alpha={init.alpha}, taper={init.taper}, "
-            f"not alpha={alpha}, taper={taper}"
+            f"variance_floor={init.variance_floor}, not alpha={alpha}, "
+            f"taper={taper}, variance_floor={variance_floor}"
         )
     torch.manual_seed(seed)
     started = time.perf_counter()
-    target = _DualTarget(inputs, inputs.sigma(alpha, taper), device)
+    target = _DualTarget(inputs, inputs.sigma(alpha, taper, variance_floor), device)
     model = _Variational(StructuredGaussian.laplace(inputs, init), device)
     n = inputs.n
 
@@ -495,6 +498,7 @@ def solve_vb(
         alpha=alpha,
         taper=taper,
         map_result=init,
+        variance_floor=variance_floor,
     )
 
 

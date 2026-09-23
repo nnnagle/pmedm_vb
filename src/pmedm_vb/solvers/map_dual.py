@@ -142,7 +142,7 @@ class MAPResult:
         Newton steps taken.
     converged:
         Whether the decrement tolerance was met before the iteration cap.
-    alpha, taper:
+    alpha, taper, variance_floor:
         The ``Sigma`` this was fitted under, as passed to
         :meth:`~pmedm_vb.assemble.inputs.PMEDMInputs.sigma`.
     newton_decrement:
@@ -184,6 +184,7 @@ class MAPResult:
     newton_decrement: float
     log_evidence: float
     trace: dict[str, np.ndarray] = field(default_factory=dict)
+    variance_floor: str | float | None = None
 
 
 class DualHessian:
@@ -272,6 +273,7 @@ def solve_map(
     alpha: float,
     taper: str | None = "tract",
     init: np.ndarray | None = None,
+    variance_floor: str | float | None = None,
     max_iter: int = 100,
     tol: float = 1e-10,
     device: str = "cpu",
@@ -280,7 +282,7 @@ def solve_map(
 
     Parameters
     ----------
-    alpha, taper:
+    alpha, taper, variance_floor:
         Select ``Sigma``; see
         :meth:`~pmedm_vb.assemble.inputs.PMEDMInputs.sigma`. ``alpha`` has no
         default because the sweep over it is the comparison.
@@ -294,7 +296,7 @@ def solve_map(
     """
     if device != "cpu":
         raise ValueError(f"solve_map runs on numpy/scipy only; got device={device!r}")
-    sigma = inputs.sigma(alpha, taper)
+    sigma = inputs.sigma(alpha, taper, variance_floor)
     op = ConstraintOperator(inputs)
     lam = np.zeros(inputs.n_constraints) if init is None else np.asarray(init, float)
     state = dual_state(inputs, lam, sigma, op)
@@ -377,6 +379,7 @@ def solve_map(
         taper=taper,
         newton_decrement=decrement,
         log_evidence=log_evidence,
+        variance_floor=variance_floor,
         trace={key: np.asarray(value) for key, value in trace.items()},
     )
 
@@ -410,7 +413,7 @@ def laplace_precision(inputs: PMEDMInputs, result: MAPResult) -> DualHessian:
     Still open, and deliberately not decided here: how this is scaled (the
     ``n^{-1}``) and mapped into the posterior precision the VB comparison uses.
     """
-    sigma = inputs.sigma(result.alpha, result.taper)
+    sigma = inputs.sigma(result.alpha, result.taper, result.variance_floor)
     state = dual_state(inputs, result.lam, sigma)
     return DualHessian(inputs, state, sigma)
 

@@ -88,3 +88,14 @@ def test_posterior_weights_are_population_weights(problem):
     assert draws.shape == (4, problem.n_zones, problem.n_units)
     np.testing.assert_allclose(draws.sum(axis=(1, 2)), problem.N)
     assert not np.allclose(draws[0], draws[1])
+
+
+def test_vb_start_must_share_the_floor(problem):
+    from test_inputs import with_zero_cells
+
+    inputs, _, _ = with_zero_cells(problem)
+    start = solve_map(inputs, alpha=0.3, variance_floor="zero")
+    with pytest.raises(ValueError, match="variance_floor"):
+        solve_vb(inputs, alpha=0.3, init=start, max_iter=1)
+    fit = solve_vb(inputs, alpha=0.3, variance_floor="zero", init=start, max_iter=100, final_draws=16)
+    assert fit.variance_floor == "zero"

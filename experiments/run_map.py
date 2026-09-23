@@ -88,10 +88,24 @@ def parse_args() -> argparse.Namespace:
         help="solve: Sigma tapers to sweep",
     )
     parser.add_argument("--out", type=Path, default=None, help="solve, vb: results directory")
+    parser.add_argument(
+        "--variance-floor", type=floor_spec, default=None,
+        help="solve, vb: 'zero' floors each cell's variance at its area's zero-count "
+             "variance; a number floors at that value; 'none' (default) leaves them",
+    )
     parser.add_argument("--max-iter", type=int, default=1000, help="vb: iteration cap")
     parser.add_argument("--draws", type=int, default=8, help="vb: Monte Carlo draws per step")
     parser.add_argument("--learning-rate", type=float, default=0.02, help="vb: Adam step")
     return parser.parse_args()
+
+
+def floor_spec(text: str) -> str | float | None:
+    """``--variance-floor``: ``none``, ``zero`` or a positive number."""
+    if text == "none":
+        return None
+    if text == "zero":
+        return "zero"
+    return float(text)
 
 
 def study_area(args: argparse.Namespace) -> StudyArea:
@@ -223,18 +237,20 @@ def result_name(puma: str, taper: str | None, alpha: float) -> str:
     return f"{puma}_{taper or 'none'}_a{alpha:g}"
 
 
-def solve_one(path: Path, taper: str | None, alpha: float, out: Path) -> dict:
+def solve_one(path: Path, taper: str | None, alpha: float, out: Path, options: dict) -> dict:
     """Worker: solve one (PUMA, taper, alpha) and save it. Never raises."""
     from pmedm_vb.assemble.inputs import PMEDMInputs
     from pmedm_vb.solvers.map_dual import solve_map
 
     puma = path.name
     log_to_file(out / "logs" / f"{result_name(puma, taper, alpha)}.log")
-    row = {"puma": puma, "taper": taper or "none", "alpha": alpha}
+    floor = options["variance_floor"]
+    row = {"puma": puma, "taper": taper or "none", "alpha": alpha,
+           "variance_floor": "none" if floor is None else str(floor)}
     start = time.perf_counter()
     try:
         inputs = PMEDMInputs.load(path)
-        result = solve_map(inputs, alpha=alpha, taper=taper)
+        result = solve_map(inputs, alpha=alpha, taper=taper, variance_floor=floor)
         row.update(
             n_constraints=inputs.n_constraints,
             converged=result.converged,
@@ -271,12 +287,16 @@ def vb_one(path: Path, taper: str | None, alpha: float, out: Path, options: dict
     torch.set_num_threads(int(os.environ.get("OMP_NUM_THREADS", "1")))
     puma = path.name
     log_to_file(out / "logs" / f"{result_name(puma, taper, alpha)}.log")
-    row = {"puma": puma, "taper": taper or "none", "alpha": alpha}
+    floor = options["variance_floor"]
+    row = {"puma": puma, "taper": taper or "none", "alpha": alpha,
+           "variance_floor": "none" if floor is None else str(floor)}
+    vb_options = {k: v for k, v in options.items() if k != "variance_floor"}
     start = time.perf_counter()
     try:
         inputs = PMEDMInputs.load(path)
-        fit = solve_vb(inputs, alpha=alpha, taper=taper,
-                       init=solve_map(inputs, alpha=alpha, taper=taper), **options)
+        start_map = solve_map(inputs, alpha=alpha, taper=taper, variance_floor=floor)
+        fit = solve_vb(inputs, alpha=alpha, taper=taper, variance_floor=floor,
+                       init=start_map, **vb_options)
         row.update(
             n_constraints=inputs.n_constraints,
             converged=fit.converged,
@@ -308,10 +328,10 @@ def vb_one(path: Path, taper: str | None, alpha: float, out: Path, options: dict
 
 #: Summary columns per step, in order; read back from a saved result on resume.
 SUMMARY_KEYS = {
-    "solve": ["puma", "taper", "alpha", "n_constraints", "converged", "n_iter",
+    "solve": ["puma", "taper", "alpha", "variance_floor", "n_constraints", "converged", "n_iter",
               "newton_decrement", "objective", "max_abs_z", "mahalanobis",
               "log_evidence", "seconds", "error"],
-    "vb": ["puma", "taper", "alpha", "n_constraints", "converged", "n_iter", "elbo",
+    "vb": ["puma", "taper", "alpha", "variance_floor", "n_constraints", "converged", "n_iter", "elbo",
            "elbo_se", "laplace_elbo", "laplace_elbo_se", "gain", "seconds", "error"],
 }
 
@@ -365,7 +385,7 @@ def run_sweep(
         logger.info("%d workers x %d BLAS thread(s), largest problems first", workers, threads)
         with pool(workers, threads) as executor:
             futures = [
-                executor.submit(solve_one, path, taper, alpha, out) if step == "solve"
+                executor.submit(solve_one, path, taper, alpha, out, options) if step == "solve"
                 else executor.submit(vb_one, path, taper, alpha, out, options)
                 for _, path, taper, alpha in tasks
             ]
@@ -401,7 +421,7 @@ def main() -> None:
         run_assemble(area, cores, args.rebuild)
     else:
         options = {"max_iter": args.max_iter, "draws": args.draws,
-                   "learning_rate": args.learning_rate}
+                   "learning_rate": args.learning_rate, "variance_floor": args.variance_floor}
         run_sweep(args.step, area, cores, args.alpha, args.taper, args.out, options)
 
 

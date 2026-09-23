@@ -44,6 +44,17 @@ This is not production code. This is research code to write a paper. The paper w
   differ everywhere else, and the VB family -- a Gaussian over `lambda` --
   corresponds to the second. `map_dual.laplace_precision` returns the dual
   Hessian, from which either follows.
+- **The posterior over `lambda` is one-sided for rare cells.** On Knox the
+  Laplace approximation `N(lambda*, (nH)^-1)` fails badly: its median draw sits
+  about 44,000 nats below the posterior (PUMA 4701501, alpha = 1), and VB beats
+  it by 27,000-400,000. `experiments/laplace_diagnostic.py` traces this to
+  cells published as 1, 2 or 6 with SEs of 1.4-2.6: the fitted mass on those
+  attributes is tiny, so the curvature is small and the Laplace sd large, but
+  lowering the multiplier multiplies those units' weight exponentially. Flat on
+  one side, a wall on the other; VB, being Gaussian, can only shrink it. Two
+  responses: a family that can be one-sided in those coordinates, or treating
+  such tight small-count SEs as too small -- `variance_floor="zero"` floors
+  every cell at its area's zero-count variance, to test the second.
 - **Group quarters.** A PUMS shortfall the fit cannot place; see the open
   questions in `census_data_sources.md`.
 

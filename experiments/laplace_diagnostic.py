@@ -72,6 +72,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--taper", nargs="+", choices=["tract", "none"], default=["tract"])
     parser.add_argument("--area", default="knox-2024-5yr", help="assembled-inputs directory name")
     parser.add_argument("--run", type=Path, default=None, help="VB results directory (optional)")
+    parser.add_argument(
+        "--variance-floor", default="none",
+        help="'none', 'zero' or a number, as in run_map.py; must match the VB run",
+    )
     parser.add_argument("--draws", type=int, default=400)
     parser.add_argument("--is-draws", type=int, default=4000)
     parser.add_argument("--top", type=int, default=25)
@@ -149,14 +153,22 @@ def diagnose(args: argparse.Namespace) -> None:
     taper = None if args.taper == "none" else args.taper
     inputs = PMEDMInputs.load(processed_dir() / "inputs" / args.area / args.puma)
     n, m = inputs.n, inputs.n_constraints
-    sigma = inputs.sigma(args.alpha, taper)
+    floor = {"none": None, "zero": "zero"}.get(args.variance_floor)
+    if floor is None and args.variance_floor not in ("none", None):
+        floor = float(args.variance_floor)
+    sigma = inputs.sigma(args.alpha, taper, floor)
 
-    result = solve_map(inputs, alpha=args.alpha, taper=taper)
+    result = solve_map(inputs, alpha=args.alpha, taper=taper, variance_floor=floor)
     f_star = result.objective
     laplace = StructuredGaussian.laplace(inputs, result)
     target = _DualTarget(inputs, sigma, "cpu")
-    print(f"PUMA {args.puma}, taper {args.taper}, alpha {args.alpha}: m = {m:,}, n = {n:,}, "
-          f"f* = {f_star:.6f}")
+    print(f"PUMA {args.puma}, taper {args.taper}, alpha {args.alpha}, "
+          f"variance floor {args.variance_floor}: m = {m:,}, n = {n:,}, f* = {f_star:.6f}")
+    if floor is not None:
+        raised = sigma.v > inputs.sigma_v
+        print(f"   floor raised {raised.sum():,} of {m:,} variances; published values of those "
+              f"cells: median {np.median(inputs.targets()[raised]):.0f}, "
+              f"max {inputs.targets()[raised].max():.0f}")
 
     # -- 1. per-draw excess -------------------------------------------------
     lam = laplace.sample(rng, args.draws)
