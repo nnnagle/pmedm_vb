@@ -46,6 +46,7 @@ import pandas as pd
 
 from pmedm_vb.config import StudyArea, raw_dir
 from pmedm_vb.data.cache import decode, fetch, fetch_cached
+from pmedm_vb.progress import stage
 
 VRE_BASE = "https://www2.census.gov/programs-surveys/acs/replicate_estimates"
 
@@ -315,10 +316,12 @@ def fetch_replicates(
         ``estimate``, ``moe`` and ``se`` columns followed by ``rep_1``
         through ``rep_80``. Restricted to ``area.counties`` when set.
     """
-    frames = [
-        _read_replicate_file(download_replicates(area, table, geography=geography))
-        for table in tables
-    ]
+    frames = []
+    for table in tables:
+        path = download_replicates(area, table, geography=geography)
+        with stage(f"read {table} replicates ({geography})") as step:
+            frames.append(_read_replicate_file(path))
+            step.detail = f"{len(frames[-1]):,} rows"
     frame = pd.concat(frames, ignore_index=True)
 
     counties = set(area.county_geoids())

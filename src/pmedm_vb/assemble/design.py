@@ -69,7 +69,12 @@ def build_aggregation(
     zones = list(zones)
     areas = list(areas)
     if membership is None:
-        membership = nesting(zones)
+        if set(areas) == set(zones):
+            # The identity case the docstring promises: nesting() would map a
+            # block group to its tract, which is not among these areas.
+            membership = pd.Series(zones, index=pd.Index(zones, name="zone"), name="area")
+        else:
+            membership = nesting(zones)
 
     area_position = {area: i for i, area in enumerate(areas)}
     rows, columns = [], []
