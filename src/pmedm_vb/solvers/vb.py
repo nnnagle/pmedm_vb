@@ -58,15 +58,13 @@ its mean -- about 65 at ``m = 8,000`` -- so a relative tolerance on the raw
 ELBO cannot be met. Instead the ELBO is averaged over consecutive windows, and
 a window that improves on the one before by less than ``tol`` standard errors
 of the difference counts as a stall. Each stall halves the learning rate, and
-the fit stops after ``patience`` of them. With a constant rate Adam's iterates
-keep a fixed amount of jitter about the optimum; on a synthetic problem where
-the Laplace start was already nearly optimal, that jitter left the fit below
-its own starting ELBO, and a single-window stopping rule also stopped with
-two thirds of the gain that a long run reaches. The reported fit is the average of the
-parameters over the last window (Polyak-Ruppert averaging), not the last
-iterate: with a constant step, Adam's iterates keep jittering about the
-optimum, and on a synthetic problem the last iterate's ELBO fell below the
-Laplace start it had begun from.
+the fit stops after ``patience`` of them. The reported fit is the average of
+the parameters over the last window (Polyak-Ruppert averaging), not the last
+iterate. Both answer the same problem: with a constant step Adam's iterates
+keep a fixed amount of jitter about the optimum, and on a synthetic problem
+where the Laplace start was already nearly optimal the last iterate's ELBO
+fell below that start. A single-window stopping rule, tried first, also
+stopped with two thirds of the gain a long run reaches.
 """
 
 from __future__ import annotations
