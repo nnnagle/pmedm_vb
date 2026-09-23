@@ -1,13 +1,14 @@
-"""Run the MAP sweep for a study area: prefetch, assemble, solve.
+"""Run the MAP or VB sweep for a study area: prefetch, assemble, solve / vb.
 
-Three steps, because ISAAC's compute nodes cannot reach census.gov::
+Separate steps, because ISAAC's compute nodes cannot reach census.gov::
 
     # login or data transfer node: download whatever is not cached yet
     $CONDA_PREFIX/bin/python experiments/run_map.py prefetch
 
-    # compute node (see run_map.sbatch): build one problem per PUMA, then solve
+    # compute node (see run_map.sbatch): build one problem per PUMA, then fit
     $CONDA_PREFIX/bin/python experiments/run_map.py assemble
-    $CONDA_PREFIX/bin/python experiments/run_map.py solve --out DIR
+    $CONDA_PREFIX/bin/python experiments/run_map.py solve --out DIR   # MAP
+    $CONDA_PREFIX/bin/python experiments/run_map.py vb --out DIR      # VB
 
 **assemble** builds each PUMA in its own process and saves it with
 :meth:`~pmedm_vb.assemble.inputs.PMEDMInputs.save` under
@@ -15,18 +16,23 @@ Three steps, because ISAAC's compute nodes cannot reach census.gov::
 skipped; ``--rebuild`` rebuilds it, which is needed after changing the
 constraint tables or the assembly code.
 
-**solve** runs every (PUMA, taper, alpha) combination in a process pool.
+**solve** and **vb** run every (PUMA, taper, alpha) combination in a process
+pool. ``vb`` fits the MAP solution first, in the same worker, and starts from
+its Laplace approximation (see :mod:`pmedm_vb.solvers.vb`).
 Problems are started largest first, so a big one does not start last and set
 the finishing time. Each process gets ``cores // workers`` BLAS threads -- one
 each when there are at least as many solves as cores. Every solve writes
 ``<puma>_<taper>_a<alpha>.npz`` (``lam``, ``W``, the trace and the scalars), and
 ``summary.csv`` is rewritten after each one, so a job that hits its time limit
-keeps what finished. Solves whose ``.npz`` already exists in ``--out`` are
-skipped, so re-submitting with the same ``--out`` resumes. A solve that raises
+keeps what finished. Fits whose ``.npz`` already exists in ``--out`` are
+skipped, so re-submitting with the same ``--out`` resumes. A fit that raises
 is recorded in ``summary.csv`` with its error and does not stop the others.
 
-Log lines from worker processes carry a tag -- ``[4701502 tract a=0.7]`` -- since
-they arrive interleaved.
+**Logs.** Each worker task writes its progress -- every Newton or VB iteration --
+to its own file, ``<out>/logs/<puma>_<taper>_a<alpha>.log`` for a fit and
+``<inputs>/logs/assemble_<puma>.log`` for assembly, rather than interleaving
+with the others. The main log carries one line per finished task, naming the
+file to read when one fails.
 """
 
 from __future__ import annotations
@@ -59,7 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("step", choices=["prefetch", "assemble", "solve"])
+    parser.add_argument("step", choices=["prefetch", "assemble", "solve", "vb"])
     parser.add_argument("--name", default="knox")
     parser.add_argument("--state", default="47", help="state FIPS")
     parser.add_argument(
@@ -81,7 +87,10 @@ def parse_args() -> argparse.Namespace:
         "--taper", nargs="+", default=["tract", "none"], choices=["tract", "none"],
         help="solve: Sigma tapers to sweep",
     )
-    parser.add_argument("--out", type=Path, default=None, help="solve: results directory")
+    parser.add_argument("--out", type=Path, default=None, help="solve, vb: results directory")
+    parser.add_argument("--max-iter", type=int, default=1000, help="vb: iteration cap")
+    parser.add_argument("--draws", type=int, default=8, help="vb: Monte Carlo draws per step")
+    parser.add_argument("--learning-rate", type=float, default=0.02, help="vb: Adam step")
     return parser.parse_args()
 
 
@@ -105,12 +114,19 @@ def available_cores(requested: int | None) -> int:
     return int(os.environ.get("SLURM_CPUS_PER_TASK") or os.cpu_count() or 1)
 
 
-def tag_logs(tag: str) -> None:
-    """Prefix this process's log lines, since workers' lines interleave."""
-    for handler in logger.handlers:
-        handler.setFormatter(
-            logging.Formatter(f"%(asctime)s pmedm_vb [{tag}]  %(message)s", "%H:%M:%S")
-        )
+def log_to_file(path: Path) -> None:
+    """Send this process's log lines to ``path``, and only there.
+
+    Pool processes are reused, so whatever handler the previous task left --
+    the default stderr one, or the previous task's file -- is closed first.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+    handler = logging.FileHandler(path, mode="a")
+    handler.setFormatter(logging.Formatter("%(asctime)s  %(message)s", "%H:%M:%S"))
+    logger.addHandler(handler)
 
 
 def pool(workers: int, threads: int) -> ProcessPoolExecutor:
@@ -146,7 +162,7 @@ def assemble_one(area: StudyArea, puma: str, path: Path) -> tuple[str, float]:
     from pmedm_vb.assemble.constraints import default_tables
     from pmedm_vb.data.geography import puma_crosswalk_whole
 
-    tag_logs(puma)
+    log_to_file(path.parent / "logs" / f"assemble_{puma}.log")
     start = time.perf_counter()
     zones = puma_crosswalk_whole(area)
     build_puma(area, puma, default_tables(area), zones=zones).save(path)
@@ -173,8 +189,12 @@ def run_assemble(area: StudyArea, cores: int, rebuild: bool) -> None:
                 puma, seconds = future.result()
                 logger.info("assembled PUMA %s in %.0fs", puma, seconds)
             except Exception:
-                failed.append(futures[future])
-                logger.error("PUMA %s failed:\n%s", futures[future], traceback.format_exc())
+                puma = futures[future]
+                failed.append(puma)
+                logger.error(
+                    "PUMA %s failed; see %s\n%s", puma,
+                    root / "logs" / f"assemble_{puma}.log", traceback.format_exc(),
+                )
     if failed:
         raise SystemExit(f"assembly failed for PUMA(s) {failed}")
 
@@ -209,7 +229,7 @@ def solve_one(path: Path, taper: str | None, alpha: float, out: Path) -> dict:
     from pmedm_vb.solvers.map_dual import solve_map
 
     puma = path.name
-    tag_logs(f"{puma} {taper or 'none'} a={alpha:g}")
+    log_to_file(out / "logs" / f"{result_name(puma, taper, alpha)}.log")
     row = {"puma": puma, "taper": taper or "none", "alpha": alpha}
     start = time.perf_counter()
     try:
@@ -240,18 +260,80 @@ def solve_one(path: Path, taper: str | None, alpha: float, out: Path) -> dict:
     return row
 
 
-def saved_row(path: Path) -> dict:
+def vb_one(path: Path, taper: str | None, alpha: float, out: Path, options: dict) -> dict:
+    """Worker: MAP, then VB from its Laplace approximation, and save. Never raises."""
+    import torch
+
+    from pmedm_vb.assemble.inputs import PMEDMInputs
+    from pmedm_vb.solvers.map_dual import solve_map
+    from pmedm_vb.solvers.vb import solve_vb
+
+    torch.set_num_threads(int(os.environ.get("OMP_NUM_THREADS", "1")))
+    puma = path.name
+    log_to_file(out / "logs" / f"{result_name(puma, taper, alpha)}.log")
+    row = {"puma": puma, "taper": taper or "none", "alpha": alpha}
+    start = time.perf_counter()
+    try:
+        inputs = PMEDMInputs.load(path)
+        fit = solve_vb(inputs, alpha=alpha, taper=taper,
+                       init=solve_map(inputs, alpha=alpha, taper=taper), **options)
+        row.update(
+            n_constraints=inputs.n_constraints,
+            converged=fit.converged,
+            n_iter=fit.n_iter,
+            elbo=fit.elbo,
+            elbo_se=fit.elbo_se,
+            laplace_elbo=fit.laplace_elbo,
+            laplace_elbo_se=fit.laplace_elbo_se,
+            gain=fit.elbo - fit.laplace_elbo,
+            seconds=time.perf_counter() - start,
+            error="",
+        )
+        np.savez(
+            out / f"{result_name(puma, taper, alpha)}.npz",
+            mean=fit.q.mean,
+            W=fit.q.W,
+            V=fit.q.V,
+            map_lam=fit.map_result.lam,
+            elbo_trace=fit.elbo_trace,
+            **{f"rows_{i}": rows for i, rows in enumerate(fit.q.rows)},
+            **{f"block_{i}": block for i, block in enumerate(fit.q.blocks)},
+            **{key: np.asarray(value) for key, value in row.items()},
+        )
+    except Exception as error:
+        row.update(seconds=time.perf_counter() - start, error=repr(error))
+        logger.error("failed:\n%s", traceback.format_exc())
+    return row
+
+
+#: Summary columns per step, in order; read back from a saved result on resume.
+SUMMARY_KEYS = {
+    "solve": ["puma", "taper", "alpha", "n_constraints", "converged", "n_iter",
+              "newton_decrement", "objective", "max_abs_z", "mahalanobis",
+              "log_evidence", "seconds", "error"],
+    "vb": ["puma", "taper", "alpha", "n_constraints", "converged", "n_iter", "elbo",
+           "elbo_se", "laplace_elbo", "laplace_elbo_se", "gain", "seconds", "error"],
+}
+
+
+def saved_row(path: Path, step: str) -> dict:
     """The summary row stored in an existing result, for resuming."""
-    keys = ["puma", "taper", "alpha", "n_constraints", "converged", "n_iter",
-            "newton_decrement", "objective", "max_abs_z", "mahalanobis", "log_evidence", "seconds", "error"]
+    keys = SUMMARY_KEYS[step]
     with np.load(path) as saved:
         # Results written before a column existed resume with it blank.
         return {key: saved[key].item() if key in saved else np.nan for key in keys}
 
 
-def run_solve(
-    area: StudyArea, cores: int, alphas: list[float], tapers: list[str], out: Path | None
+def run_sweep(
+    step: str,
+    area: StudyArea,
+    cores: int,
+    alphas: list[float],
+    tapers: list[str],
+    out: Path | None,
+    options: dict,
 ) -> None:
+    """Run ``solve`` or ``vb`` over every (PUMA, taper, alpha) not already in ``out``."""
     import json
 
     root = inputs_root(area)
@@ -268,28 +350,34 @@ def run_solve(
             for alpha in alphas:
                 done = out / f"{result_name(path.name, taper, alpha)}.npz"
                 if done.exists():
-                    rows.append(saved_row(done))
+                    rows.append(saved_row(done, step))
                 else:
                     tasks.append((estimated_cost(manifest, taper), path, taper, alpha))
     tasks.sort(key=lambda task: task[0], reverse=True)
 
     logger.info(
-        "solve %s: %d to run, %d already in %s", area.slug, len(tasks), len(rows), out
+        "%s %s: %d to run, %d already in %s; per-task logs in %s",
+        step, area.slug, len(tasks), len(rows), out, out / "logs",
     )
     if tasks:
         workers = min(cores, len(tasks))
         threads = max(1, cores // workers)
         logger.info("%d workers x %d BLAS thread(s), largest problems first", workers, threads)
         with pool(workers, threads) as executor:
-            futures = [executor.submit(solve_one, path, taper, alpha, out)
-                       for _, path, taper, alpha in tasks]
+            futures = [
+                executor.submit(solve_one, path, taper, alpha, out) if step == "solve"
+                else executor.submit(vb_one, path, taper, alpha, out, options)
+                for _, path, taper, alpha in tasks
+            ]
             for count, future in enumerate(as_completed(futures), start=1):
                 row = future.result()
                 rows.append(row)
                 logger.info(
                     "%d of %d done: %s %s a=%g %s",
                     count, len(tasks), row["puma"], row["taper"], row["alpha"],
-                    f"FAILED {row['error']}" if row["error"] else
+                    f"FAILED {row['error']} -- see "
+                    f"{out / 'logs' / (result_name(row['puma'], row['taper'], row['alpha']) + '.log')}"
+                    if row["error"] else
                     f"converged={row['converged']} iters={row['n_iter']} {row['seconds']:.0f}s",
                 )
                 write_summary(rows, out)
@@ -312,7 +400,9 @@ def main() -> None:
     elif args.step == "assemble":
         run_assemble(area, cores, args.rebuild)
     else:
-        run_solve(area, cores, args.alpha, args.taper, args.out)
+        options = {"max_iter": args.max_iter, "draws": args.draws,
+                   "learning_rate": args.learning_rate}
+        run_sweep(args.step, area, cores, args.alpha, args.taper, args.out, options)
 
 
 if __name__ == "__main__":
