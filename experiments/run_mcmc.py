@@ -50,7 +50,7 @@ import pandas as pd
 
 from pmedm_vb.assemble.inputs import PMEDMInputs
 from pmedm_vb.config import processed_dir
-from pmedm_vb.progress import logger
+from pmedm_vb.progress import logger, record_run
 
 from laplace_diagnostic import constraint_table, load_vb
 
@@ -125,6 +125,7 @@ def sample(args: argparse.Namespace) -> None:
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     args.out.mkdir(parents=True, exist_ok=True)
+    record_run(args.out, args)
     name = fit_name(args)
     state_path = args.out / f"{name}_state.npz"
     trace_path = args.out / f"{name}_trace.npz"

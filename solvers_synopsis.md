@@ -198,7 +198,7 @@ Under `/lustre/isaac24/proj/UTK0496/pmedm_vb_runs/`:
 - `6271250` -- VB, Gaussian family, `--variance-floor zero`.
 - `6271480` -- VB, skewed family, `--variance-floor zero`, alpha 1 and 0.1;
   `diagnostics/` and `weight_draws/` hold the reports quoted above.
-- The 64-draw repeat of `6271480` (finding 7); its job id was not recorded.
+- `6272357` -- the 64-draw repeat of `6271480` (finding 7).
 - `6272529` -- MAP, `--epsilon 0.01 --variance-floor zero`, alpha 1 and 0.1.
 - `6272652` -- VB on the same inputs, skewed, 8 draws per step, with
   `weight_draws/` (finding 8). Inputs under

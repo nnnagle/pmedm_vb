@@ -60,7 +60,7 @@ import numpy as np
 import pandas as pd
 
 from pmedm_vb.config import StudyArea, processed_dir
-from pmedm_vb.progress import logger
+from pmedm_vb.progress import logger, record_run
 
 #: Environment variables that set BLAS/OpenMP thread counts in a fresh process.
 THREAD_VARIABLES = (
@@ -206,12 +206,14 @@ def assemble_one(
 
 
 def run_assemble(
+    args: argparse.Namespace,
     area: StudyArea, cores: int, rebuild: bool, epsilon: float | None = None
 ) -> None:
     from pmedm_vb.data.geography import puma_crosswalk_whole
 
     pumas = sorted(str(p) for p in puma_crosswalk_whole(area)["puma_geoid"].unique())
     root = inputs_root(area, epsilon)
+    record_run(root, args)
     todo = [p for p in pumas if rebuild or not (root / p / "manifest.json").exists()]
     logger.info(
         "assemble %s: %d PUMAs, %d to build, into %s", area.slug, len(pumas), len(todo), root
@@ -398,6 +400,7 @@ def saved_row(path: Path, step: str) -> dict:
 
 
 def run_sweep(
+    args: argparse.Namespace,
     step: str,
     area: StudyArea,
     cores: int,
@@ -415,6 +418,7 @@ def run_sweep(
         raise SystemExit(f"no assembled problems under {root}; run the assemble step first")
     out = out or processed_dir() / "runs" / time.strftime("%Y%m%d-%H%M%S")
     out.mkdir(parents=True, exist_ok=True)
+    record_run(out, args)
 
     rows, tasks = [], []
     for path in pumas:
@@ -471,13 +475,13 @@ def main() -> None:
     if args.step == "prefetch":
         run_prefetch(area)
     elif args.step == "assemble":
-        run_assemble(area, cores, args.rebuild, args.epsilon)
+        run_assemble(args, area, cores, args.rebuild, args.epsilon)
     else:
         options = {"max_iter": args.max_iter, "draws": args.draws,
                    "learning_rate": args.learning_rate, "variance_floor": args.variance_floor,
                    "epsilon": args.epsilon,
                    **({"family": args.family} if args.step == "vb" else {})}
-        run_sweep(args.step, area, cores, args.alpha, args.taper, args.out, options)
+        run_sweep(args, args.step, area, cores, args.alpha, args.taper, args.out, options)
 
 
 if __name__ == "__main__":
