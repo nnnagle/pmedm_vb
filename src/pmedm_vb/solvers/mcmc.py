@@ -56,6 +56,50 @@ DA_T0 = 10.0
 DA_KAPPA = 0.75
 
 
+def largest_share(target: _DualTarget, lam: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per row of ``lam`` (``(k, m)``), the largest (zone, unit) cell's share of
+    ``p(lambda)`` and its flat index into the ``(n_zones, n_units)`` matrix."""
+    with torch.no_grad():
+        logits = target.log_q[None] - target.adjoint(lam)
+        flat = logits.reshape(lam.shape[0], -1)
+        top, index = flat.max(1)
+        return torch.exp(top - torch.logsumexp(flat, 1)), index
+
+
+def starting_points(
+    target: _DualTarget,
+    mean: np.ndarray,
+    A: np.ndarray,
+    chains: int,
+    rng: np.random.Generator,
+    max_share: float = 0.01,
+    device: str = "cpu",
+    tries: int = 20,
+) -> np.ndarray:
+    """``(chains, m)`` whitened starting points: standard normal draws, keeping
+    only those whose largest cell holds at most ``max_share`` of ``p``.
+
+    A draw from the whitening Gaussian can land on a wall -- as VB draws do --
+    and a chain started there diverges on every trajectory at a step size that
+    suits the bulk, so it never moves. Screening the start does not stop a chain
+    reaching such a region by itself; it only keeps warmup out of one.
+    """
+    keep = []
+    mean_t = torch.as_tensor(mean, dtype=DTYPE, device=device)
+    A_t = torch.as_tensor(A, dtype=DTYPE, device=device)
+    for _ in range(tries):
+        x = rng.standard_normal((chains, mean.size))
+        lam = mean_t + torch.as_tensor(x, dtype=DTYPE, device=device) @ A_t.T
+        share, _ = largest_share(target, lam)
+        keep.extend(x[(share <= max_share).cpu().numpy()])
+        if len(keep) >= chains:
+            return np.asarray(keep[:chains])
+    raise RuntimeError(
+        f"only {len(keep)} of {chains * tries} starting draws had a largest cell under "
+        f"{max_share:.1%} of p; the whitening Gaussian is far from the posterior"
+    )
+
+
 def whitening_matrix(q: StructuredGaussian) -> np.ndarray:
     """``A = G'^{-1}`` as a dense ``(m, m)`` array, so that ``mean + A eps`` is a
     draw from the Gaussian part of ``q`` for ``eps ~ N(0, I)``."""
@@ -211,11 +255,7 @@ class HMC:
     def largest_cell(self) -> tuple[np.ndarray, np.ndarray]:
         """Per chain, the largest cell's share of ``p(lambda)`` and its flat
         ``(zone, unit)`` index into the ``(n_zones, n_units)`` weight matrix."""
-        with torch.no_grad():
-            logits = self.target.log_q[None] - self.target.adjoint(self.lam(self.x))
-            flat = logits.reshape(self.chains, -1)
-            top, index = flat.max(1)
-            share = torch.exp(top - torch.logsumexp(flat, 1))
+        share, index = largest_share(self.target, self.lam(self.x))
         return share.cpu().numpy(), index.cpu().numpy()
 
     def state_dict(self) -> dict:

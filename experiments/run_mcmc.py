@@ -12,7 +12,10 @@ same question ``weight_draws.py`` asks of VB. Two steps::
     $CONDA_PREFIX/bin/python experiments/run_mcmc.py report --puma 4701502 --alpha 1.0 \\
         --variance-floor zero --vb-run $RUNS/<vb jobid> --out $RUNS/<jobid>/mcmc
 
-**sample** starts every chain at a draw from the VB Gaussian, runs ``--warmup``
+**sample** starts every chain at a draw from the VB Gaussian -- screened so
+that no chain starts with over ``--init-max-share`` of ``p`` on one cell, since
+a chain started on a wall never moves (see
+:func:`~pmedm_vb.solvers.mcmc.starting_points`) -- runs ``--warmup``
 iterations adapting the step size, then ``--samples`` more at a fixed one. Every
 iteration records, per chain, ``log pi``, the acceptance probability, whether it
 diverged, the energy, and the largest (zone, unit) cell's share of ``p`` and
@@ -24,7 +27,8 @@ its time limit is resubmitted, not restarted. The settings must match.
 
 **report** writes ``<out>/<name>_report.txt``:
 
-1. Sampler: step size, leapfrog steps, acceptance, divergences, E-BFMI per chain.
+1. Sampler: step size, leapfrog steps, acceptance, divergences, E-BFMI per chain,
+   and any chain that is stuck (mean acceptance under 5%).
 2. Convergence: rank-normalised split R-hat and bulk/tail ESS (Vehtari et al.
    2021, *Bayesian Analysis* 16) for ``log pi`` and the largest-cell share, and
    over every coordinate of the kept ``lambda`` draws, with the ten worst.
@@ -84,6 +88,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trajectory", type=float, default=1.5)
     parser.add_argument("--target-accept", type=float, default=0.8)
     parser.add_argument("--max-leapfrog", type=int, default=1000)
+    parser.add_argument("--init-max-share", type=float, default=0.01,
+                        help="largest share of p on one cell a starting point may have")
     parser.add_argument("--checkpoint", type=int, default=100)
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--seed", type=int, default=0)
@@ -120,7 +126,7 @@ def load_problem(args: argparse.Namespace):
 def sample(args: argparse.Namespace) -> None:
     import torch
 
-    from pmedm_vb.solvers.mcmc import HMC, HMCSettings, whitening_matrix
+    from pmedm_vb.solvers.mcmc import HMC, HMCSettings, starting_points, whitening_matrix
     from pmedm_vb.solvers.vb import _DualTarget
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -134,7 +140,7 @@ def sample(args: argparse.Namespace) -> None:
     target = _DualTarget(inputs, sigma, device)
     A = whitening_matrix(q)
     rng = np.random.default_rng(args.seed)
-    x0 = rng.standard_normal((args.chains, q.size))
+    x0 = starting_points(target, q.mean, A, args.chains, rng, args.init_max_share, device)
     settings = HMCSettings(
         step_size=args.step_size, trajectory=args.trajectory,
         target_accept=args.target_accept, max_leapfrog=args.max_leapfrog,
@@ -237,6 +243,8 @@ def report(args: argparse.Namespace) -> None:
              f"iterations"]
 
     divergent = chains_first("divergent")
+    chain_accept = chains_first("accept_prob").mean(1)
+    stuck = np.flatnonzero(chain_accept < 0.05)
     lines += [
         "",
         "1. Sampler",
@@ -246,6 +254,9 @@ def report(args: argparse.Namespace) -> None:
         f"   divergent transitions {int(divergent.sum()):,} of {divergent.size:,} "
         f"({100 * divergent.mean():.2f}%); per chain min {divergent.sum(1).min()} "
         f"max {divergent.sum(1).max()}",
+        f"   chain mean acceptance min {chain_accept.min():.3f}, median {np.median(chain_accept):.3f}; "
+        + (f"STUCK (under 5%): chains {', '.join(map(str, stuck))} -- everything below "
+           f"includes them" if stuck.size else "no chain stuck"),
         "   E-BFMI per chain (below 0.3 is a warning sign): min {:.2f}, median {:.2f}".format(
             *np.quantile(az.bfmi(chains_first("energy")), [0.0, 0.5])),
     ]
