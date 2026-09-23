@@ -99,3 +99,90 @@ def test_vb_start_must_share_the_floor(problem):
         solve_vb(inputs, alpha=0.3, init=start, max_iter=1)
     fit = solve_vb(inputs, alpha=0.3, variance_floor="zero", init=start, max_iter=100, final_draws=16)
     assert fit.variance_floor == "zero"
+
+
+# -- skewed family -------------------------------------------------------------
+
+from pmedm_vb.solvers.vb import sinh_arcsinh, sinh_arcsinh_inverse  # noqa: E402
+
+
+def test_sinh_arcsinh_is_identity_at_zero_and_invertible():
+    z = np.linspace(-6, 6, 101)
+    value, log_derivative = sinh_arcsinh(z, 0.0, 0.0)
+    np.testing.assert_allclose(value, z, atol=1e-12)
+    np.testing.assert_allclose(log_derivative, 0.0, atol=1e-12)
+    for skew, log_tail in [(0.7, 0.3), (-1.2, -0.4)]:
+        value, log_derivative = sinh_arcsinh(z, skew, log_tail)
+        assert np.all(np.diff(value) > 0) and value[50] == pytest.approx(0.0, abs=1e-12)
+        np.testing.assert_allclose(sinh_arcsinh_inverse(value, skew, log_tail), z, atol=1e-9)
+        h = 1e-6
+        numeric = (sinh_arcsinh(z + h, skew, log_tail)[0] - sinh_arcsinh(z - h, skew, log_tail)[0]) / (2 * h)
+        np.testing.assert_allclose(log_derivative, np.log(numeric), atol=1e-6)
+
+
+def small_family(skewed: bool) -> StructuredGaussian:
+    """A 2-dimensional member, one block, with a nonzero low-rank part."""
+    rng = np.random.default_rng(3)
+    block = np.array([[1.3, 0.0], [0.4, 0.9]])
+    family = StructuredGaussian(np.array([0.2, -0.5]), [np.arange(2)], [block],
+                                rng.normal(0, 0.2, (2, 1)), rng.normal(0, 0.2, (2, 1)))
+    if skewed:
+        family.skew, family.log_tail, family.scale = (
+            np.array([0.9, -0.6]), np.array([0.2, -0.3]), np.array([0.8, 1.1]))
+    return family
+
+
+@pytest.mark.parametrize("skewed", [False, True])
+def test_log_density_integrates_to_one(skewed):
+    family = small_family(skewed)
+    # Wide: a tail weight below 1 makes the skewed tails heavy, and a +-12 grid
+    # misses a quarter of a percent of the mass.
+    grid = np.linspace(-40, 40, 1601)
+    a, b = np.meshgrid(grid, grid, indexing="ij")
+    points = np.vstack([a.ravel(), b.ravel()])
+    total = np.exp(family.log_density(points)).sum() * (grid[1] - grid[0]) ** 2
+    assert total == pytest.approx(1.0, abs=1e-4)
+
+
+def test_skewed_draws_match_the_log_density():
+    """Bin counts of the first coordinate against bin probabilities from ``log_density``."""
+    family, count = small_family(True), 400_000
+    draws = family.sample(np.random.default_rng(0), count)
+    edges = np.linspace(-2.5, 3.5, 13)
+    observed, _ = np.histogram(draws[0], bins=edges)
+    other = np.linspace(-60, 60, 4001)
+    expected = []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        # Integrate over the bin, not just its centre: the steep side of a skewed
+        # density changes a lot within one bin.
+        xs = lo + (np.arange(20) + 0.5) * (hi - lo) / 20
+        mass = sum(np.exp(family.log_density(np.vstack([np.full_like(other, x), other]))).sum()
+                   for x in xs) * (other[1] - other[0]) * (hi - lo) / 20
+        expected.append(mass * count)
+    expected = np.asarray(expected)
+    assert np.abs((observed - expected) / np.sqrt(expected)).max() < 4
+
+
+def test_skewed_family_starts_at_the_gaussian():
+    gaussian = small_family(False)
+    skewed = small_family(False)
+    skewed.skew, skewed.log_tail, skewed.scale = np.zeros(2), np.zeros(2), np.array([0.8, 1.1])
+    np.testing.assert_allclose(skewed.sample(np.random.default_rng(1), 50),
+                               gaussian.sample(np.random.default_rng(1), 50), atol=1e-12)
+
+
+def test_skewed_stage_improves_a_skewed_posterior():
+    inputs = dataclasses.replace(make_problem(), n=8)
+    start = solve_map(inputs, alpha=0.3, taper="tract")
+    fit = solve_vb(inputs, alpha=0.3, taper="tract", init=start, family="skewed",
+                   max_iter=3000, seed=1)
+    assert fit.family == "skewed" and fit.q.is_skewed and fit.converged
+    se = np.hypot(fit.elbo_se, fit.gaussian_elbo_se)
+    assert fit.elbo > fit.gaussian_elbo + 3 * se
+    draws = posterior_weights(inputs, fit, n_draws=2, rng=np.random.default_rng(0))
+    np.testing.assert_allclose(draws.sum(axis=(1, 2)), inputs.N)
+
+
+def test_family_is_checked(problem):
+    with pytest.raises(ValueError, match="family"):
+        solve_vb(problem, alpha=0.3, family="flow", max_iter=1)

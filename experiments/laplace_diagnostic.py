@@ -10,7 +10,10 @@ fit, measures three things:
    Laplace approximation, a Gaussian posterior would give
    ``n (f(lambda) - f*) = |eps|^2 / 2`` exactly. The excess over that is how far
    the posterior falls below the Gaussian at that draw. Quantiles are printed
-   for Laplace draws and, when a VB result is given, for VB draws.
+   for Laplace draws and, when a VB result is given, for VB draws. VB draws
+   are measured against the same Laplace quadratic, so a skewed fit that
+   moves mass to the flat side can read negative; the upper tail (p99, max) is
+   what says whether its draws still reach a wall.
 2. **Coordinate scan.** Each multiplier is moved alone to
    ``lambda* +- 2 sd_k``, with ``sd_k`` its Laplace marginal standard deviation,
    and the rise in ``n f`` is compared with the quadratic prediction
@@ -129,15 +132,17 @@ def batched_f(target: _DualTarget, lam: np.ndarray, batch: int) -> np.ndarray:
 
 
 def load_vb(path: Path) -> tuple[StructuredGaussian, float, float]:
-    """The fitted VB Gaussian and its ELBO, from a run_map.py vb result."""
+    """The fitted VB family and its ELBO, from a run_map.py vb result."""
     with np.load(path) as saved:
         count = sum(1 for key in saved.files if key.startswith("block_"))
+        skewed = {key: saved[key] for key in ("skew", "log_tail", "scale") if key in saved.files}
         return StructuredGaussian(
             mean=saved["mean"],
             rows=[saved[f"rows_{i}"] for i in range(count)],
             blocks=[saved[f"block_{i}"] for i in range(count)],
             W=saved["W"],
             V=saved["V"],
+            **skewed,
         ), float(saved["elbo"]), float(saved["elbo_se"])
 
 
@@ -189,7 +194,7 @@ def diagnose(args: argparse.Namespace) -> None:
             d = lam_vb - result.lam[:, None]
             rise_vb = n * (batched_f(target, lam_vb, args.batch) - f_star)
             extra_vb = rise_vb - 0.5 * np.einsum("id,id->d", d, laplace.precision_matvec(d))
-            print(f"   VB draws, same quantity: {quantiles(extra_vb)}")
+            print(f"   VB draws ({'skewed' if vb.is_skewed else 'Gaussian'} family), same quantity: {quantiles(extra_vb)}")
             print(f"   VB mean shift from lambda*, in Laplace metric: "
                   f"{math.sqrt(float((vb.mean - result.lam) @ laplace.precision_matvec(vb.mean - result.lam))):.2f}")
         else:
@@ -236,9 +241,7 @@ def diagnose(args: argparse.Namespace) -> None:
     print(f"   Laplace formula:                  {laplace_normaliser:,.1f}")
     if vb is not None:
         lam_is = vb.sample(rng, args.is_draws)
-        d = lam_is - vb.mean[:, None]
-        log_q = (-0.5 * m * math.log(2 * math.pi) + 0.5 * vb.logdet_precision()
-                 - 0.5 * np.einsum("id,id->d", d, vb.precision_matvec(d)))
+        log_q = vb.log_density(lam_is)
         log_w = -n * batched_f(target, lam_is, args.batch) - log_q
         estimate = logsumexp(log_w) - math.log(args.is_draws)
         ess = math.exp(2 * logsumexp(log_w) - logsumexp(2 * log_w))

@@ -35,6 +35,31 @@ square root of ``I + Z J Z'`` for ``Z = L^{-1} w sqrt(n)``. The fit starts
 there, so the Laplace approximation is the initial point and the ELBO can only
 improve on it.
 
+**Skewed family.** On Knox the Gaussian leaves a tail: about 1 percent of its
+draws run thousands of nats into a wall. ``experiments/laplace_diagnostic.py``
+traced the wall to multipliers of cells with small fitted counts, where ``-n f``
+behaves like a Poisson log-likelihood in a log-rate -- exponential on one side,
+nearly linear on the other -- which no symmetric family can follow. With
+``family="skewed"`` each coordinate is then passed through a monotone
+sinh-arcsinh map (Jones & Pewsey 2009, *Biometrika* 96),
+
+.. math::
+
+    \\lambda_k = \\mu_k + s_k T_k(x_k / s_k), \\qquad
+    T(z) = \\sinh\\big((\\operatorname{asinh} z + a_k) / b_k\\big)
+           - \\sinh(a_k / b_k)
+
+with ``x = G'^{-1} eps`` the Gaussian part, ``a_k`` a skew, ``b_k > 0`` a tail
+weight and ``s_k`` the Gaussian marginal sd, fixed so ``T`` sees a unit-scale
+argument. ``T(0) = 0`` keeps the median at ``mu_k``; ``a = 0, b = 1`` is the
+identity, so the Gaussian is a member and the skewed fit starts from it. The
+map is monotone and coordinatewise, so the entropy is the Gaussian's plus
+``E[sum_k log T_k'(x_k / s_k)]``, estimated from the same draws as the rest of
+the ELBO. It is fitted in a second stage, after the Gaussian has converged,
+so each run reports Laplace, Gaussian and skewed ELBOs. Sinh-arcsinh bends
+both tails but is not the log-gamma shape the Poisson argument predicts; how
+much of the tail it removes is for the diagnostic to say.
+
 Draws are ``lambda = mu + G'^{-1} eps``: an ``r x r`` Woodbury solve for
 ``(I + V W')^{-1}``, then one triangular solve per tract. The entropy is
 ``m/2 log(2 pi e) - sum log diag L_t - log|det(I + V'W)|``.
@@ -84,6 +109,30 @@ from pmedm_vb.solvers.map_dual import DualHessian, MAPResult, solve_map
 
 DTYPE = torch.float64
 
+#: Draws used to fix the skewed stage's per-coordinate scale ``s``. Any fixed
+#: positive ``s`` gives a valid family; it only needs to be about right.
+SCALE_DRAWS = 2000
+
+
+def sinh_arcsinh(z, skew, log_tail):
+    """``T(z) = sinh((asinh z + a) / b) - sinh(a / b)`` and ``log T'(z)``.
+
+    Works on numpy arrays and torch tensors alike, broadcasting ``skew`` and
+    ``log_tail`` (``b = exp(log_tail)``) over trailing draws.
+    """
+    lib = torch if isinstance(z, torch.Tensor) else np
+    tail = lib.exp(log_tail)
+    inner = (lib.arcsinh(z) + skew) / tail
+    value = lib.sinh(inner) - lib.sinh(skew / tail)
+    log_derivative = lib.log(lib.cosh(inner)) - log_tail - 0.5 * lib.log1p(z * z)
+    return value, log_derivative
+
+
+def sinh_arcsinh_inverse(y, skew, log_tail):
+    """``T^{-1}``: ``sinh(b asinh(y + sinh(a / b)) - a)``."""
+    tail = np.exp(log_tail)
+    return np.sinh(tail * np.arcsinh(y + np.sinh(skew / tail)) - skew)
+
 
 @dataclass
 class StructuredGaussian:
@@ -99,6 +148,10 @@ class StructuredGaussian:
         Lower-triangular factors, one per tract, aligned with ``rows``.
     W, V:
         ``(m, r)`` low-rank factors.
+    skew, log_tail, scale:
+        ``(m,)`` sinh-arcsinh parameters and the fixed scale ``s``, or ``None``
+        for the plain Gaussian. See *Skewed family* in the module docstring;
+        with them, ``mean`` is the median of each coordinate, not its mean.
     """
 
     mean: np.ndarray
@@ -106,6 +159,13 @@ class StructuredGaussian:
     blocks: list[np.ndarray]
     W: np.ndarray
     V: np.ndarray
+    skew: np.ndarray | None = None
+    log_tail: np.ndarray | None = None
+    scale: np.ndarray | None = None
+
+    @property
+    def is_skewed(self) -> bool:
+        return self.skew is not None
 
     @property
     def size(self) -> int:
@@ -132,13 +192,33 @@ class StructuredGaussian:
         y = y + self.W @ (self.V.T @ y)                   # (I + W V') ...
         return self._block_apply(y, transpose=False)      # L ...
 
-    def sample(self, rng: np.random.Generator, size: int = 1) -> np.ndarray:
-        """``(m, size)`` draws: ``mean + G'^{-1} eps``."""
-        eps = rng.standard_normal((self.size, size))
+    def gaussian_part(self, eps: np.ndarray) -> np.ndarray:
+        """``G'^{-1} eps``, the zero-mean Gaussian offsets before any skewing."""
         r = self.W.shape[1]
         small = np.eye(r) + self.W.T @ self.V
         y = eps - self.V @ np.linalg.solve(small, self.W.T @ eps)
-        return self.mean[:, None] + self._block_solve_transpose(y)
+        return self._block_solve_transpose(y)
+
+    def sample(self, rng: np.random.Generator, size: int = 1) -> np.ndarray:
+        """``(m, size)`` draws: ``mean + G'^{-1} eps``, skewed if the family is."""
+        x = self.gaussian_part(rng.standard_normal((self.size, size)))
+        if self.is_skewed:
+            s = self.scale[:, None]
+            x = s * sinh_arcsinh(x / s, self.skew[:, None], self.log_tail[:, None])[0]
+        return self.mean[:, None] + x
+
+    def log_density(self, lam: np.ndarray) -> np.ndarray:
+        """``log q`` at each column of ``lam`` (m x k)."""
+        x = lam - self.mean[:, None]
+        log_jacobian = 0.0
+        if self.is_skewed:
+            s = self.scale[:, None]
+            z = sinh_arcsinh_inverse(x / s, self.skew[:, None], self.log_tail[:, None])
+            log_jacobian = sinh_arcsinh(z, self.skew[:, None], self.log_tail[:, None])[1].sum(0)
+            x = s * z
+        quadratic = np.einsum("id,id->d", x, self.precision_matvec(x))
+        gaussian = -0.5 * self.size * math.log(2 * math.pi) + 0.5 * self.logdet_precision() - 0.5 * quadratic
+        return gaussian - log_jacobian
 
     def logdet_precision(self) -> float:
         """``log det(G G')``."""
@@ -148,6 +228,7 @@ class StructuredGaussian:
         return float(blocks + 2.0 * low_rank)
 
     def entropy(self) -> float:
+        """Entropy of the Gaussian part; the skew adds ``E[sum log T']``."""
         return 0.5 * self.size * math.log(2 * math.pi * math.e) - 0.5 * self.logdet_precision()
 
     @classmethod
@@ -199,6 +280,12 @@ class VBResult:
         As for :class:`~pmedm_vb.solvers.map_dual.MAPResult`.
     alpha, taper, variance_floor:
         The ``Sigma`` the posterior is under.
+    family:
+        ``"gaussian"`` or ``"skewed"``.
+    gaussian_elbo, gaussian_elbo_se:
+        The ELBO of the Gaussian fit the skewed stage started from; for the
+        Gaussian family the same as ``elbo``. ``elbo`` above it by more than a
+        few standard errors means the skew found a closer approximation.
     """
 
     q: StructuredGaussian
@@ -214,6 +301,9 @@ class VBResult:
     taper: str | None
     map_result: MAPResult | None = field(default=None, repr=False)
     variance_floor: str | float | None = None
+    family: str = "gaussian"
+    gaussian_elbo: float | None = None
+    gaussian_elbo_se: float | None = None
 
 
 class _DualTarget:
@@ -269,7 +359,7 @@ class _DualTarget:
 class _Variational(torch.nn.Module):
     """The family in whitened coordinates about a starting ``StructuredGaussian``."""
 
-    def __init__(self, start: StructuredGaussian, device: str) -> None:
+    def __init__(self, start: StructuredGaussian, device: str, skewed: bool = False) -> None:
         super().__init__()
 
         def tensor(x):
@@ -289,6 +379,14 @@ class _Variational(torch.nn.Module):
         )
         self.W = torch.nn.Parameter(tensor(start.W))
         self.V = torch.nn.Parameter(tensor(start.V))
+        self.skewed = skewed
+        if skewed:
+            # Identity at the start: the skewed family begins exactly at ``start``.
+            self.skew = torch.nn.Parameter(torch.zeros(self.m, dtype=DTYPE, device=device))
+            self.log_tail = torch.nn.Parameter(torch.zeros(self.m, dtype=DTYPE, device=device))
+            if start.scale is None:
+                raise ValueError("a skewed family needs start.scale, the Gaussian marginal sd")
+            self.scale = tensor(start.scale)
 
     def blocks(self) -> list[torch.Tensor]:
         return [
@@ -306,15 +404,26 @@ class _Variational(torch.nn.Module):
     def mean(self) -> torch.Tensor:
         return self.mean0 + self._solve_transpose(self.blocks0, self.delta[:, None])[:, 0]
 
-    def sample(self, count: int) -> torch.Tensor:
-        """``(count, m)`` reparameterised draws."""
+    def sample(self, count: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """``(count, m)`` reparameterised draws and each draw's ``sum log T'``.
+
+        The log-Jacobian is zero for the Gaussian family; skewed, it is the
+        term that turns the Gaussian part's entropy into the family's.
+        """
         blocks = self.blocks()
         eps = torch.randn(self.m, count, dtype=DTYPE, device=self.delta.device)
         r = self.W.shape[1]
         if r:
             small = torch.eye(r, dtype=DTYPE, device=eps.device) + self.W.T @ self.V
             eps = eps - self.V @ torch.linalg.solve(small, self.W.T @ eps)
-        return (self.mean()[:, None] + self._solve_transpose(blocks, eps)).T
+        x = self._solve_transpose(blocks, eps)
+        log_jacobian = torch.zeros(count, dtype=DTYPE, device=eps.device)
+        if self.skewed:
+            s = self.scale[:, None]
+            value, log_derivative = sinh_arcsinh(x / s, self.skew[:, None], self.log_tail[:, None])
+            x = s * value
+            log_jacobian = log_derivative.sum(0)
+        return (self.mean()[:, None] + x).T, log_jacobian
 
     def entropy(self) -> torch.Tensor:
         logdet = sum(
@@ -329,12 +438,20 @@ class _Variational(torch.nn.Module):
 
     def export(self) -> StructuredGaussian:
         with torch.no_grad():
+            skewed = {}
+            if self.skewed:
+                skewed = dict(
+                    skew=self.skew.detach().cpu().numpy(),
+                    log_tail=self.log_tail.detach().cpu().numpy(),
+                    scale=self.scale.cpu().numpy(),
+                )
             return StructuredGaussian(
                 mean=self.mean().cpu().numpy(),
                 rows=[r.cpu().numpy() for r in self.rows],
                 blocks=[b.cpu().numpy() for b in self.blocks()],
                 W=self.W.detach().cpu().numpy(),
                 V=self.V.detach().cpu().numpy(),
+                **skewed,
             )
 
 
@@ -357,12 +474,20 @@ def _parameter_groups(model: "_Variational", learning_rate: float) -> list[dict]
     ]
     for block in model.lower:
         groups.append({"params": [block], "lr": learning_rate / block.shape[0]})
+    if model.skewed:
+        # One pair per coordinate, each acting on a unit-scale argument.
+        groups.append({"params": [model.skew, model.log_tail], "lr": learning_rate})
     return groups
 
 
 def _elbo_terms(model: _Variational, target: _DualTarget, n: int, count: int) -> torch.Tensor:
-    """Per-draw ``-n f(lambda) + H[q]``, whose mean is the ELBO."""
-    return -n * target(model.sample(count)) + model.entropy()
+    """Per-draw ``-n f(lambda) + H[q]``, whose mean is the ELBO.
+
+    ``H[q]`` is the Gaussian part's entropy plus, skewed, the draw's
+    ``sum log T'``, whose expectation is the rest of it.
+    """
+    lam, log_jacobian = model.sample(count)
+    return -n * target(lam) + model.entropy() + log_jacobian
 
 
 def _estimate(model, target, n, draws, batch=16) -> tuple[float, float]:
@@ -381,6 +506,7 @@ def solve_vb(
     taper: str | None = "tract",
     init: MAPResult | None = None,
     variance_floor: str | float | None = None,
+    family: str = "gaussian",
     max_iter: int = 1000,
     tol: float = 2.0,
     draws: int = 8,
@@ -410,11 +536,18 @@ def solve_vb(
         Adam step, in posterior standard deviations (see *Parameterisation*).
     window:
         Iterations per ELBO window for the stopping rule.
+    family:
+        ``"gaussian"``, or ``"skewed"`` to add a second stage fitting a
+        sinh-arcsinh skew per coordinate on top of the converged Gaussian (see
+        *Skewed family*). ``max_iter`` applies to each stage.
     final_draws:
-        Draws for the reported ELBO of the fit and of the Laplace start.
+        Draws for the reported ELBOs of the fit, the Gaussian stage and the
+        Laplace start.
     device:
         A torch device, e.g. ``"cuda"``.
     """
+    if family not in ("gaussian", "skewed"):
+        raise ValueError(f"family must be 'gaussian' or 'skewed', got {family!r}")
     if init is None:
         init = solve_map(inputs, alpha=alpha, taper=taper, variance_floor=variance_floor)
     if (init.alpha, init.taper, init.variance_floor) != (alpha, taper, variance_floor):
@@ -431,13 +564,91 @@ def solve_vb(
 
     laplace_elbo, laplace_se = _estimate(model, target, n, final_draws)
     logger.info(
-        "solve_vb PUMA %s: %s multipliers, alpha=%s, taper=%s, Laplace ELBO %.2f +- %.2f",
-        inputs.puma, f"{model.m:,}", alpha, taper, laplace_elbo, laplace_se,
+        "solve_vb PUMA %s: %s multipliers, alpha=%s, taper=%s, family=%s, "
+        "Laplace ELBO %.2f +- %.2f",
+        inputs.puma, f"{model.m:,}", alpha, taper, family, laplace_elbo, laplace_se,
+    )
+    settings = dict(learning_rate=learning_rate, draws=draws, max_iter=max_iter,
+                    tol=tol, window=window, patience=patience, started=started)
+    trace, n_iter, converged = _optimise(model, target, n, **settings)
+    gaussian_elbo, gaussian_se = _estimate(model, target, n, final_draws)
+    elbo_value, elbo_se = gaussian_elbo, gaussian_se
+    logger.info(
+        "  Gaussian stage: %s after %d iterations, ELBO %.2f +- %.2f",
+        "converged" if converged else "NOT converged", n_iter, gaussian_elbo, gaussian_se,
     )
 
+    if family == "skewed":
+        start = model.export()
+        rng = np.random.default_rng(seed)
+        start.scale = start.gaussian_part(rng.standard_normal((model.m, SCALE_DRAWS))).std(
+            axis=1, ddof=1
+        )
+        model = _Variational(start, device, skewed=True)
+        skew_trace, skew_iter, skew_converged = _optimise(model, target, n, **settings)
+        trace += skew_trace
+        n_iter += skew_iter
+        converged = converged and skew_converged
+        elbo_value, elbo_se = _estimate(model, target, n, final_draws)
+        logger.info(
+            "  skewed stage: %s after %d iterations, ELBO %.2f +- %.2f",
+            "converged" if skew_converged else "NOT converged", skew_iter, elbo_value, elbo_se,
+        )
+
+    q = model.export()
+    logger.info(
+        "solve_vb PUMA %s: %s after %d iterations, ELBO %.2f +- %.2f "
+        "(Gaussian %.2f +- %.2f, Laplace %.2f +- %.2f), %.1fs",
+        inputs.puma, "converged" if converged else "NOT converged", n_iter,
+        elbo_value, elbo_se, gaussian_elbo, gaussian_se, laplace_elbo, laplace_se,
+        time.perf_counter() - started,
+    )
+    params = {"mean": q.mean, "W": q.W, "V": q.V}
+    if q.is_skewed:
+        params.update(skew=q.skew, log_tail=q.log_tail, scale=q.scale)
+    return VBResult(
+        q=q,
+        params=params,
+        elbo=elbo_value,
+        elbo_se=elbo_se,
+        laplace_elbo=laplace_elbo,
+        laplace_elbo_se=laplace_se,
+        elbo_trace=np.asarray(trace),
+        n_iter=n_iter,
+        converged=converged,
+        alpha=alpha,
+        taper=taper,
+        map_result=init,
+        variance_floor=variance_floor,
+        family=family,
+        gaussian_elbo=gaussian_elbo,
+        gaussian_elbo_se=gaussian_se,
+    )
+
+
+def _optimise(
+    model: _Variational,
+    target: _DualTarget,
+    n: int,
+    *,
+    learning_rate: float,
+    draws: int,
+    max_iter: int,
+    tol: float,
+    window: int,
+    patience: int,
+    started: float,
+) -> tuple[list[float], int, bool]:
+    """Adam with window stalls, learning-rate halving and parameter averaging.
+
+    Leaves ``model`` at its parameters averaged over the last window (see
+    *Stopping*) and returns the per-iteration ELBO trace, the iterations taken
+    and whether it converged before ``max_iter``.
+    """
     parameters = list(model.parameters())
     optimiser = torch.optim.Adam(_parameter_groups(model, learning_rate))
     running = [torch.zeros_like(p) for p in parameters]
+    averaged = [p.detach().clone() for p in parameters]
     in_window = 0
     stalled = 0
     trace: list[float] = []
@@ -478,28 +689,7 @@ def solve_vb(
         final = [total / in_window for total in running] if in_window else averaged
         for parameter, value in zip(parameters, final):
             parameter.copy_(value)
-    elbo_value, elbo_se = _estimate(model, target, n, final_draws)
-    q = model.export()
-    logger.info(
-        "solve_vb PUMA %s: %s after %d iterations, ELBO %.2f +- %.2f (Laplace %.2f +- %.2f), %.1fs",
-        inputs.puma, "converged" if converged else "NOT converged", n_iter,
-        elbo_value, elbo_se, laplace_elbo, laplace_se, time.perf_counter() - started,
-    )
-    return VBResult(
-        q=q,
-        params={"mean": q.mean, "W": q.W, "V": q.V},
-        elbo=elbo_value,
-        elbo_se=elbo_se,
-        laplace_elbo=laplace_elbo,
-        laplace_elbo_se=laplace_se,
-        elbo_trace=np.asarray(trace),
-        n_iter=n_iter,
-        converged=converged,
-        alpha=alpha,
-        taper=taper,
-        map_result=init,
-        variance_floor=variance_floor,
-    )
+    return trace, n_iter, converged
 
 
 def posterior_weights(

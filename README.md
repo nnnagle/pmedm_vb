@@ -54,7 +54,11 @@ This is not production code. This is research code to write a paper. The paper w
   one side, a wall on the other; VB, being Gaussian, can only shrink it. Two
   responses: a family that can be one-sided in those coordinates, or treating
   such tight small-count SEs as too small -- `variance_floor="zero"` floors
-  every cell at its area's zero-count variance, to test the second.
+  every cell at its area's zero-count variance, to test the second. The floor
+  removed the extra blow-up at small alpha but little at alpha = 1: the
+  curvature comes from how rare the attribute is in the sample, not from its
+  SE. So `solve_vb(..., family="skewed")` adds a per-coordinate sinh-arcsinh
+  skew on top of the converged Gaussian, to test the first.
 - **Group quarters.** A PUMS shortfall the fit cannot place; see the open
   questions in `census_data_sources.md`.
 

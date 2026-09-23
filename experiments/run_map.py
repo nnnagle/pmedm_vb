@@ -93,7 +93,11 @@ def parse_args() -> argparse.Namespace:
         help="solve, vb: 'zero' floors each cell's variance at its area's zero-count "
              "variance; a number floors at that value; 'none' (default) leaves them",
     )
-    parser.add_argument("--max-iter", type=int, default=1000, help="vb: iteration cap")
+    parser.add_argument(
+        "--family", choices=["gaussian", "skewed"], default="gaussian",
+        help="vb: 'skewed' adds a second stage fitting a per-coordinate skew",
+    )
+    parser.add_argument("--max-iter", type=int, default=1000, help="vb: iteration cap (per stage)")
     parser.add_argument("--draws", type=int, default=8, help="vb: Monte Carlo draws per step")
     parser.add_argument("--learning-rate", type=float, default=0.02, help="vb: Adam step")
     return parser.parse_args()
@@ -305,6 +309,9 @@ def vb_one(path: Path, taper: str | None, alpha: float, out: Path, options: dict
             elbo_se=fit.elbo_se,
             laplace_elbo=fit.laplace_elbo,
             laplace_elbo_se=fit.laplace_elbo_se,
+            family=fit.family,
+            gaussian_elbo=fit.gaussian_elbo,
+            gaussian_elbo_se=fit.gaussian_elbo_se,
             gain=fit.elbo - fit.laplace_elbo,
             seconds=time.perf_counter() - start,
             error="",
@@ -318,6 +325,8 @@ def vb_one(path: Path, taper: str | None, alpha: float, out: Path, options: dict
             elbo_trace=fit.elbo_trace,
             **{f"rows_{i}": rows for i, rows in enumerate(fit.q.rows)},
             **{f"block_{i}": block for i, block in enumerate(fit.q.blocks)},
+            **({"skew": fit.q.skew, "log_tail": fit.q.log_tail, "scale": fit.q.scale}
+               if fit.q.is_skewed else {}),
             **{key: np.asarray(value) for key, value in row.items()},
         )
     except Exception as error:
@@ -331,8 +340,9 @@ SUMMARY_KEYS = {
     "solve": ["puma", "taper", "alpha", "variance_floor", "n_constraints", "converged", "n_iter",
               "newton_decrement", "objective", "max_abs_z", "mahalanobis",
               "log_evidence", "seconds", "error"],
-    "vb": ["puma", "taper", "alpha", "variance_floor", "n_constraints", "converged", "n_iter", "elbo",
-           "elbo_se", "laplace_elbo", "laplace_elbo_se", "gain", "seconds", "error"],
+    "vb": ["puma", "taper", "alpha", "variance_floor", "family", "n_constraints", "converged",
+           "n_iter", "elbo", "elbo_se", "gaussian_elbo", "gaussian_elbo_se", "laplace_elbo",
+           "laplace_elbo_se", "gain", "seconds", "error"],
 }
 
 
@@ -421,7 +431,8 @@ def main() -> None:
         run_assemble(area, cores, args.rebuild)
     else:
         options = {"max_iter": args.max_iter, "draws": args.draws,
-                   "learning_rate": args.learning_rate, "variance_floor": args.variance_floor}
+                   "learning_rate": args.learning_rate, "variance_floor": args.variance_floor,
+                   **({"family": args.family} if args.step == "vb" else {})}
         run_sweep(args.step, area, cores, args.alpha, args.taper, args.out, options)
 
 
