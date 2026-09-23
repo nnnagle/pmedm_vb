@@ -28,18 +28,26 @@ fit, measures three things:
    formula ``-n f* + (m/2) log 2 pi - (1/2) log det(n H)`` is printed beside it
    for scale; it is an approximation, not a bound.
 
-Needs torch. Takes a few minutes for an 8,000-constraint PUMA; on ISAAC run it
-on a compute node (``srun``) rather than the shared login node::
+Needs torch. Takes a few minutes per fit for an 8,000-constraint PUMA. Several
+PUMAs, alphas and tapers may be given; every combination runs in its own
+process and writes its report to ``<out>/<puma>_<taper>_a<alpha>.txt``. On
+ISAAC use ``laplace_diagnostic.sbatch``, or a compute node from ``srun``, not
+the shared login node::
 
     $CONDA_PREFIX/bin/python experiments/laplace_diagnostic.py \\
-        --puma 4701501 --taper tract --alpha 1.0 \\
+        --alpha 1.0 0.1 --taper tract \\
         --run /lustre/isaac24/proj/UTK0496/pmedm_vb_runs/<jobid>
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import math
+import multiprocessing
+import os
+import traceback
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -59,9 +67,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--puma", required=True)
-    parser.add_argument("--alpha", type=float, required=True)
-    parser.add_argument("--taper", choices=["tract", "none"], default="tract")
+    parser.add_argument("--puma", nargs="*", default=None, help="default: every assembled PUMA")
+    parser.add_argument("--alpha", type=float, nargs="+", required=True)
+    parser.add_argument("--taper", nargs="+", choices=["tract", "none"], default=["tract"])
     parser.add_argument("--area", default="knox-2024-5yr", help="assembled-inputs directory name")
     parser.add_argument("--run", type=Path, default=None, help="VB results directory (optional)")
     parser.add_argument("--draws", type=int, default=400)
@@ -69,6 +77,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top", type=int, default=25)
     parser.add_argument("--batch", type=int, default=32)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--out", type=Path, default=None,
+        help="report directory (default: <run>/diagnostics, else ./diagnostics)",
+    )
+    parser.add_argument(
+        "--cores", type=int, default=None,
+        help="cores to use (default: $SLURM_CPUS_PER_TASK, else all)",
+    )
     return parser.parse_args()
 
 
@@ -126,8 +142,8 @@ def quantiles(x: np.ndarray) -> str:
     return "  ".join(f"{name} {value:>12,.1f}" for name, value in zip(["median", "p90", "p99", "max"], qs))
 
 
-def main() -> None:
-    args = parse_args()
+def diagnose(args: argparse.Namespace) -> None:
+    """Print the report for one (PUMA, taper, alpha); ``args`` holds scalars here."""
     pmedm_vb.set_verbosity("WARNING")
     rng = np.random.default_rng(args.seed)
     taper = None if args.taper == "none" else args.taper
@@ -220,6 +236,45 @@ def main() -> None:
             else "PROBLEM: ELBO above the normaliser estimate"
         print(f"   {verdict}. The IS estimate is biased low when ESS is small, so a "
               f"violation is only conclusive with a healthy ESS.")
+
+
+def diagnose_to_file(args: argparse.Namespace, path: Path) -> tuple[Path, str]:
+    """Worker: one report to ``path``. Never raises; a failure is written into it."""
+    torch.set_num_threads(int(os.environ.get("OMP_NUM_THREADS", "1")))
+    with open(path, "w") as handle, contextlib.redirect_stdout(handle):
+        try:
+            diagnose(args)
+            return path, ""
+        except Exception as error:
+            print(f"\nFAILED\n{traceback.format_exc()}")
+            return path, repr(error)
+
+
+def main() -> None:
+    args = parse_args()
+    root = processed_dir() / "inputs" / args.area
+    pumas = args.puma or sorted(p.name for p in root.glob("*") if (p / "manifest.json").exists())
+    out = args.out or ((args.run / "diagnostics") if args.run else Path("diagnostics"))
+    out.mkdir(parents=True, exist_ok=True)
+    jobs = [
+        (argparse.Namespace(**{**vars(args), "puma": puma, "taper": taper, "alpha": alpha}),
+         out / f"{puma}_{taper}_a{alpha:g}.txt")
+        for puma in pumas for taper in args.taper for alpha in args.alpha
+    ]
+    cores = args.cores or int(os.environ.get("SLURM_CPUS_PER_TASK") or os.cpu_count() or 1)
+    workers = min(cores, len(jobs))
+    threads = max(1, cores // workers)
+    for variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ[variable] = str(threads)
+    print(f"{len(jobs)} diagnostics, {workers} workers x {threads} thread(s), reports in {out}",
+          flush=True)
+    context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=workers, mp_context=context) as executor:
+        futures = [executor.submit(diagnose_to_file, job, path) for job, path in jobs]
+        for count, future in enumerate(as_completed(futures), start=1):
+            path, error = future.result()
+            print(f"{count} of {len(jobs)}: {path.name}" + (f"  FAILED {error}" if error else ""),
+                  flush=True)
 
 
 if __name__ == "__main__":
