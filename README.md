@@ -23,9 +23,10 @@ This is not production code. This is research code to write a paper. The paper w
 - [x] write assembly (`src/pmedm_vb/assemble/`) -- attribute matrices,
       aggregation operators, targets, and the `Sigma` representation the
       solvers consume. One problem per PUMA: `assemble.build.build_all()`
-- [ ] write solvers (`src/pmedm_vb/solvers/`) -- MAP done (`map_dual.solve_map`);
-      VB first version (`vb.solve_vb`): a Gaussian over lambda with tract-block
-      plus low-rank precision, started at Laplace. Not yet run on real data
+- [x] write solvers (`src/pmedm_vb/solvers/`) -- MAP (`map_dual.solve_map`)
+      and VB (`vb.solve_vb`, Gaussian or skewed family). Both work as
+      algorithms; the VB fit is not yet usable as a simulator. Status,
+      findings and the open decision: `solvers_synopsis.md`
 - [ ] write experiments (`experiments/`)
 
 ## Open research questions
@@ -58,7 +59,14 @@ This is not production code. This is research code to write a paper. The paper w
   removed the extra blow-up at small alpha but little at alpha = 1: the
   curvature comes from how rare the attribute is in the sample, not from its
   SE. So `solve_vb(..., family="skewed")` adds a per-coordinate sinh-arcsinh
-  skew on top of the converged Gaussian, to test the first.
+  skew on top of the converged Gaussian, to test the first. It fits the bulk
+  but keeps a tail; see the next question.
+- **Making VB usable as a simulator.** In 10-17% of VB draws, more than 1%
+  of a PUMA's units sit on one household record in one block group, and the
+  posterior rejects those draws (`log pi - log q` hundreds to thousands of
+  nats below typical). How to remove them -- a family built around those
+  directions, another divergence, an MCMC reference, or a wider support -- is
+  undecided; `solvers_synopsis.md` has the evidence and the options.
 - **Group quarters.** A PUMS shortfall the fit cannot place; see the open
   questions in `census_data_sources.md`.
 
