@@ -42,6 +42,11 @@
 #
 #   sbatch experiments/run_map.sbatch vb --out /lustre/isaac24/proj/UTK0496/pmedm_vb_runs/<jobid>
 #
+# --epsilon E builds and solves the statewide-support problems instead, in their
+# own inputs directory (see run_map.py), e.g.
+#
+#   sbatch experiments/run_map.sbatch --epsilon 0.01 --alpha 1.0 --taper tract
+#
 # Assembled problems are reused across jobs; after changing the constraint
 # tables or assembly code, run assemble with --rebuild (edit ASSEMBLE_ARGS).
 
@@ -58,10 +63,12 @@ STEP=solve
 case "${1:-}" in
     solve|vb) STEP=$1; shift ;;
 esac
-# An --out among the arguments (resuming an earlier sweep) replaces the default.
+# An --out among the arguments (resuming an earlier sweep) replaces the default;
+# an --epsilon (statewide support) goes to the assemble step as well.
 args=("$@")
 for ((i = 0; i < ${#args[@]} - 1; i++)); do
     [ "${args[i]}" = "--out" ] && OUT=${args[i + 1]}
+    [ "${args[i]}" = "--epsilon" ] && ASSEMBLE_ARGS="$ASSEMBLE_ARGS --epsilon ${args[i + 1]}"
 done
 
 module purge
