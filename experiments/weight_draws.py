@@ -2,28 +2,39 @@
 
 Part 4 of ``laplace_diagnostic.py`` found the worst VB draws piling tens of
 thousands of people onto a single (block group, household) cell. This script
-measures how often that happens and who is responsible. For each fit it draws
-``lambda`` from the VB family, forms ``N p(lambda)`` for every cell, and flags
-a cell whose weight exceeds the **largest cell weight at the MAP**,
-``N max p*`` -- bigger than anything the point estimate gives any record. It
+measures how often that happens, who is responsible, and whether the
+posterior itself or only the VB family puts mass there. For each fit it draws
+``lambda`` from the VB family and forms ``N p(lambda)`` for every cell. It
 reports:
 
-- the share of draws with at least one flagged cell, and quantiles of each
-  draw's largest cell weight relative to that threshold;
-- the households behind the flags: how many draws flag them, their largest
-  weight, size, whether a group-quarters person, and the categories they carry
-  more than once (the loadings above 1 that make a small move in ``lambda`` a
-  large move in their weight).
+- **Concentration.** Quantiles of each draw's largest cell as a share of
+  ``N``, and the share of draws whose largest cell exceeds each of three
+  thresholds: the largest cell weight at the MAP, ``N max p*`` (for
+  reference; ordinary posterior spread exceeds it), 1% of ``N`` and 10% of
+  ``N``.
+- **Artifact or posterior?** For each draw the log importance ratio
+  ``log pi(lambda) - log q(lambda)`` with ``pi ~ exp(-n f)``. Its quantiles
+  are compared, relative to the median over all draws, between draws whose
+  largest cell is under 1%, 1-10% and over 10% of ``N``. Draws that sit far
+  below the rest are ones q overweights -- an artifact of the family; if they
+  sit with the rest, the posterior itself allows them. The self-normalised
+  importance estimate of each group's posterior probability is printed beside
+  q's share, with its ESS; in thousands of dimensions the ESS will be small,
+  so the quantile comparison is the robust part.
+- **Households.** Every household whose weight ever exceeds 1% of ``N``,
+  sorted by its largest weight: size, whether a group-quarters person, draws
+  over each threshold, and the categories it carries more than once.
 
 Household size is the sum of the unit's ``B01001`` (sex by age) counts, which
 cover every member; it is blank if ``B01001`` is not among the constraints.
 
 ``p*`` comes from the MAP multipliers saved with the VB result, so nothing is
-re-solved. Every (PUMA, taper, alpha) runs in its own process; each writes
-``<out>/<puma>_<taper>_a<alpha>.txt`` and, for every flagged household,
-``..._households.csv``. On ISAAC use ``weight_draws.sbatch``::
+re-solved; ``--variance-floor`` must match the VB run, since it sets
+``Sigma`` in ``f``. Every (PUMA, taper, alpha) runs in its own process; each
+writes ``<out>/<puma>_<taper>_a<alpha>.txt`` and ``..._households.csv``. On
+ISAAC use ``weight_draws.sbatch``::
 
-    $CONDA_PREFIX/bin/python experiments/weight_draws.py \\
+    $CONDA_PREFIX/bin/python experiments/weight_draws.py --variance-floor zero \\
         --alpha 1.0 0.1 --run /lustre/isaac24/proj/UTK0496/pmedm_vb_runs/<jobid>
 """
 
@@ -40,6 +51,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
+import torch
 from scipy.special import logsumexp
 
 import pmedm_vb
@@ -47,7 +59,8 @@ from pmedm_vb.assemble.inputs import PMEDMInputs
 from pmedm_vb.config import processed_dir
 from pmedm_vb.solvers.base import ConstraintOperator
 
-from laplace_diagnostic import load_vb, quantiles
+from laplace_diagnostic import batched_f, load_vb, quantiles
+from pmedm_vb.solvers.vb import _DualTarget
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,9 +72,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha", type=float, nargs="+", required=True)
     parser.add_argument("--taper", nargs="+", choices=["tract", "none"], default=["tract"])
     parser.add_argument("--area", default="knox-2024-5yr", help="assembled-inputs directory name")
+    parser.add_argument(
+        "--variance-floor", default="none",
+        help="'none', 'zero' or a number, as in run_map.py; must match the VB run",
+    )
     parser.add_argument("--draws", type=int, default=4000)
     parser.add_argument("--batch", type=int, default=100)
     parser.add_argument("--top", type=int, default=20, help="households listed in the report")
+    parser.add_argument("--f-batch", type=int, default=32, help="draws per evaluation of f")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path, default=None, help="default: <run>/weight_draws")
     parser.add_argument(
@@ -101,6 +119,16 @@ def household_profile(inputs: PMEDMInputs) -> tuple[np.ndarray, list[str]]:
     return size, bulk
 
 
+SHARES = (0.01, 0.10)
+
+
+def parse_floor(value: str):
+    """``--variance-floor`` as :meth:`PMEDMInputs.sigma` takes it."""
+    if value in (None, "none"):
+        return None
+    return "zero" if value == "zero" else float(value)
+
+
 def check(args: argparse.Namespace) -> None:
     """Print the report for one (PUMA, taper, alpha); ``args`` holds scalars here."""
     pmedm_vb.set_verbosity("WARNING")
@@ -110,83 +138,98 @@ def check(args: argparse.Namespace) -> None:
     vb, _, _ = load_vb(path)
     with np.load(path) as saved:
         lam_star = saved["map_lam"]
+    taper = None if args.taper == "none" else args.taper
+    target = _DualTarget(inputs, inputs.sigma(args.alpha, taper, parse_floor(args.variance_floor)), "cpu")
 
     op = ConstraintOperator(inputs)
-    N = inputs.N
+    N, n = inputs.N, inputs.n
     with np.errstate(divide="ignore"):
         log_q = np.log(inputs.q)
     logits = log_q - op.adjoint(lam_star)
     weight_star = N * np.exp(logits - logsumexp(logits))
-    threshold = weight_star.max()
+    thresholds = {"MAP max": weight_star.max(), **{f"{s:.0%} of N": s * N for s in SHARES}}
     n_zones, n_units = weight_star.shape
 
     largest = np.empty(args.draws)
-    flagged_cells = np.zeros(args.draws, dtype=int)
-    draws_flagged = np.zeros(n_units, dtype=int)
-    zones_flagged = np.zeros((n_zones, n_units), dtype=bool)
+    log_ratio = np.empty(args.draws)
+    over = {name: np.zeros(n_units, dtype=int) for name in thresholds}
     unit_max = np.zeros(n_units)
     done = 0
     while done < args.draws:
         lam = vb.sample(rng, min(args.batch, args.draws - done))
+        span = slice(done, done + lam.shape[1])
+        log_ratio[span] = -n * batched_f(target, lam, args.f_batch) - vb.log_density(lam)
         for k in range(lam.shape[1]):
             logits = log_q - op.adjoint(lam[:, k])
-            weight = N * np.exp(logits - logsumexp(logits))
-            flag = weight > threshold
-            largest[done] = weight.max()
-            flagged_cells[done] = flag.sum()
-            draws_flagged += flag.any(axis=0)
-            zones_flagged |= flag
-            np.maximum(unit_max, weight.max(axis=0), out=unit_max)
+            unit_weight = (N * np.exp(logits - logsumexp(logits))).max(axis=0)
+            largest[done] = unit_weight.max()
+            for name, level in thresholds.items():
+                over[name] += unit_weight > level
+            np.maximum(unit_max, unit_weight, out=unit_max)
             done += 1
 
-    any_flag = flagged_cells > 0
-    print(f"PUMA {args.puma}, taper {args.taper}, alpha {args.alpha}: "
-          f"{n_zones} zones x {n_units:,} units, N = {N:,.0f}, {args.draws:,} VB draws")
-    print(f"   threshold = largest cell weight at the MAP: {threshold:,.1f} "
-          f"({threshold / N:.3%} of N)")
-    print(f"\n   draws with at least one cell above it: {any_flag.sum():,} of {args.draws:,} "
-          f"({any_flag.mean():.2%})")
-    print(f"   cells above it per draw, among those draws: "
-          + (f"median {np.median(flagged_cells[any_flag]):.0f}, max {flagged_cells.max()}"
-             if any_flag.any() else "none"))
-    print(f"   each draw's largest cell / threshold: {quantiles(largest / threshold)}")
-    print(f"   each draw's largest cell / N:         "
-          + "  ".join(f"{name} {value:.3%}" for name, value in
-                      zip(["median", "p90", "p99", "max"],
-                          np.percentile(largest / N, [50, 90, 99, 100]))))
+    share = largest / N
+    print(f"PUMA {args.puma}, taper {args.taper}, alpha {args.alpha}, variance floor "
+          f"{args.variance_floor}: {n_zones} zones x {n_units:,} units, N = {N:,.0f}, "
+          f"{args.draws:,} VB draws")
+    print(f"\n1. Each draw's largest cell (one household record in one block group)")
+    print("   share of N: " + "  ".join(
+        f"{name} {value:.3%}" for name, value in
+        zip(["median", "p90", "p99", "max"], np.percentile(share, [50, 90, 99, 100]))))
+    for name, level in thresholds.items():
+        above = largest > level
+        print(f"   draws with a cell over {name} ({level:,.1f}): {above.sum():,} of {args.draws:,} "
+              f"({above.mean():.2%}); households ever over it: {(over[name] > 0).sum():,}")
 
-    responsible = np.flatnonzero(draws_flagged)
-    print(f"\n   households ever above the threshold: {responsible.size:,} of {n_units:,}")
-    if responsible.size == 0:
+    print("\n2. log pi(lambda) - log q(lambda), relative to its median over all draws")
+    print("   (far below the rest: q overweights those draws; with the rest: pi allows them)")
+    centred = log_ratio - np.median(log_ratio)
+    weights = np.exp(log_ratio - logsumexp(log_ratio))
+    ess = 1.0 / np.sum(weights**2)
+    groups = {
+        "largest < 1% of N": share < SHARES[0],
+        "1% to 10% of N": (share >= SHARES[0]) & (share < SHARES[1]),
+        "largest >= 10% of N": share >= SHARES[1],
+    }
+    for name, member in groups.items():
+        if not member.any():
+            print(f"   {name:<20} no draws")
+            continue
+        q10, q50, q90 = np.percentile(centred[member], [10, 50, 90])
+        print(f"   {name:<20} {member.sum():>5,} draws  p10 {q10:>10,.1f}  median {q50:>10,.1f}  "
+              f"p90 {q90:>10,.1f}   share under q {member.mean():.2%}, "
+              f"IS estimate under pi {weights[member].sum():.2%}")
+    print(f"   IS effective sample size {ess:,.1f} of {args.draws:,}; the IS shares mean little "
+          f"when it is small")
+
+    listed = np.flatnonzero(over[f"{SHARES[0]:.0%} of N"])
+    print(f"\n3. Households ever over {SHARES[0]:.0%} of N: {listed.size:,} of {n_units:,}")
+    if listed.size == 0:
         return
     size, bulk = household_profile(inputs)
     table = pd.DataFrame({
-        "unit": inputs.units["SERIALNO"].to_numpy()[responsible],
-        "gq": inputs.units["is_group_quarters"].to_numpy()[responsible],
-        "size": size[responsible],
-        "draws": draws_flagged[responsible],
-        "share of draws": draws_flagged[responsible] / args.draws,
-        "zones": zones_flagged[:, responsible].sum(axis=0),
-        "MAP max": weight_star.max(axis=0)[responsible],
-        "draw max": unit_max[responsible],
-        "draw max / N": unit_max[responsible] / N,
-        "carried more than once": [bulk[u] for u in responsible],
-    }).sort_values("draws", ascending=False)
+        "unit": inputs.units["SERIALNO"].to_numpy()[listed],
+        "gq": inputs.units["is_group_quarters"].to_numpy()[listed],
+        "size": size[listed],
+        **{f"draws > {name}": over[name][listed] for name in thresholds},
+        "MAP max": weight_star.max(axis=0)[listed],
+        "draw max / N": unit_max[listed] / N,
+        "carried more than once": [bulk[u] for u in listed],
+    }).sort_values("draw max / N", ascending=False)
     csv = args.report.with_name(args.report.stem + "_households.csv")
     table.to_csv(csv, index=False)
-    print(f"   all of them in {csv.name}; the {min(args.top, len(table))} flagged most often:")
+    print(f"   all of them in {csv.name}; the {min(args.top, len(table))} with the largest weight:")
     pd.set_option("display.width", 250, "display.max_columns", 20, "display.max_colwidth", 120)
     print(table.head(args.top).round(4).to_string(index=False))
-    top_share = table["draws"].head(args.top).sum() / draws_flagged.sum()
-    print(f"\n   these {min(args.top, len(table))} account for {top_share:.0%} of household-draw flags")
     if not np.isnan(size).all():
-        print(f"   size: flagged households median {np.median(table['size']):g}, "
+        print(f"\n   size: these households median {np.median(table['size']):g}, "
               f"mean {table['size'].mean():.2f}; all units median {np.median(size):g}, "
               f"mean {size.mean():.2f}")
 
 
 def check_to_file(args: argparse.Namespace) -> tuple[Path, str]:
     """Worker: one report to ``args.report``. Never raises; a failure is written into it."""
+    torch.set_num_threads(int(os.environ.get("OMP_NUM_THREADS", "1")))
     with open(args.report, "w") as handle, contextlib.redirect_stdout(handle):
         try:
             check(args)

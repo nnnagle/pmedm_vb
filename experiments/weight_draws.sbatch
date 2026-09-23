@@ -18,10 +18,12 @@
 # <puma>_<taper>_a<alpha>.txt plus a _households.csv. For example
 #
 #   RUNS=/lustre/isaac24/proj/UTK0496/pmedm_vb_runs
-#   sbatch experiments/weight_draws.sbatch --alpha 1.0 0.1 --run $RUNS/<vb jobid>
+#   sbatch experiments/weight_draws.sbatch --alpha 1.0 0.1 --variance-floor zero \
+#       --run $RUNS/<vb jobid>
 #
 # --alpha and --run are required. --puma defaults to every assembled PUMA,
-# --taper to tract and --draws to 4000.
+# --taper to tract and --draws to 4000. --variance-floor must match the VB run
+# (default none).
 
 # -u only after conda activates; see run_map.sbatch.
 set -eo pipefail
