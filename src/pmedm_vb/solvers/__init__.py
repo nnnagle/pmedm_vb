@@ -6,7 +6,8 @@ Two are planned, sharing :mod:`~pmedm_vb.solvers.base`:
   Newton on the dual objective, replacing the trust-region solver of the
   original R/Rcpp code. numpy and scipy only.
 * :mod:`~pmedm_vb.solvers.vb` -- the variational Bayes formulation the paper is
-  about, optionally seeded from a MAP solution.
+  about: a structured Gaussian over the multipliers, started at the Laplace
+  approximation of the MAP fit and improved by stochastic gradient in torch.
 
 Once VB is implemented, importing it will pull in torch; the MAP path never
 does. :mod:`pmedm_vb` itself never does either, so code that only assembles

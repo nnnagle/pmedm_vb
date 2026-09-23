@@ -24,7 +24,8 @@ This is not production code. This is research code to write a paper. The paper w
       aggregation operators, targets, and the `Sigma` representation the
       solvers consume. One problem per PUMA: `assemble.build.build_all()`
 - [ ] write solvers (`src/pmedm_vb/solvers/`) -- MAP done (`map_dual.solve_map`);
-      VB pending, as a Gaussian over lambda
+      VB first version (`vb.solve_vb`): a Gaussian over lambda with tract-block
+      plus low-rank precision, started at Laplace. Not yet run on real data
 - [ ] write experiments (`experiments/`)
 
 ## Open research questions
