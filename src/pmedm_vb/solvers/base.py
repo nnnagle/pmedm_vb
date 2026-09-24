@@ -168,3 +168,29 @@ def dual_gradient(inputs: PMEDMInputs, lam: np.ndarray, sigma: Sigma) -> np.ndar
     costs one :meth:`ConstraintOperator.forward` and nothing else.
     """
     return dual_state(inputs, lam, sigma).gradient
+
+
+def category_pairs(inputs: PMEDMInputs) -> tuple[np.ndarray, np.ndarray]:
+    """Stacked-row indices of every (tract, block group) multiplier pair.
+
+    For each category constrained at both levels -- matched by name between
+    ``tract_constraints`` and ``bg_constraints`` -- and each block group ``b``
+    in tract ``t``: the tract row ``T`` and the block group row ``B``. A unit
+    placed in ``b`` has its logit shifted by ``-x_ik (lambda_T + lambda_B)``,
+    so the data see their sum. ``B`` rows are unique; a tract row repeats once
+    per block group in its tract. Assumes ``A_B`` is the identity, as
+    :meth:`~pmedm_vb.assemble.inputs.PMEDMInputs.zone_tracts` does.
+    """
+    n_tracts, split = inputs.Y_T.shape[0], inputs.Y_T.size
+    zone_tract = inputs.zone_tracts()
+    bg_index = {name: k for k, name in enumerate(inputs.bg_constraints)}
+    tract_rows, bg_rows = [], []
+    for kt, name in enumerate(inputs.tract_constraints):
+        kb = bg_index.get(name)
+        if kb is None:
+            continue
+        tract_rows.append(kt * n_tracts + zone_tract)
+        bg_rows.append(split + kb * inputs.n_zones + np.arange(inputs.n_zones))
+    if not tract_rows:
+        return np.zeros(0, dtype=int), np.zeros(0, dtype=int)
+    return np.concatenate(tract_rows).astype(int), np.concatenate(bg_rows).astype(int)

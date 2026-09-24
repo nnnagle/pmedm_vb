@@ -37,7 +37,7 @@ import scipy.sparse as sp
 from scipy.special import logsumexp
 
 from pmedm_vb.assemble.inputs import PMEDMInputs
-from pmedm_vb.solvers.base import ConstraintOperator
+from pmedm_vb.solvers.base import ConstraintOperator, category_pairs
 
 #: Race and ethnicity by household income band, the default cross-tabulation.
 RACE_BY_INCOME = ("B03002.", "B19001.")
@@ -199,22 +199,16 @@ def pair_comparison(inputs: PMEDMInputs, reference: np.ndarray, other: np.ndarra
     """
     from scipy.stats import skew
 
-    n_tracts, split = inputs.Y_T.shape[0], inputs.Y_T.size
-    zone_tract = inputs.zone_tracts()
-    bg_index = {name: k for k, name in enumerate(inputs.bg_constraints)}
+    iT, iB = category_pairs(inputs)
+    split = inputs.Y_T.size
     carriers = np.diff(sp.csc_matrix(inputs.X_B).indptr)
-    rows, iT, iB = [], [], []
-    for kt, name in enumerate(inputs.tract_constraints):
-        kb = bg_index.get(name)
-        if kb is None:
-            continue
-        for b in range(inputs.n_zones):
-            iT.append(kt * n_tracts + zone_tract[b])
-            iB.append(split + kb * inputs.n_zones + b)
-            rows.append({"constraint": name, "zone": inputs.zones.iloc[b, 0],
-                         "published_bg": inputs.Y_B[b, kb], "carriers": int(carriers[kb])})
-    frame = pd.DataFrame(rows, columns=["constraint", "zone", "published_bg", "carriers"])
-    iT, iB = np.array(iT, dtype=int), np.array(iB, dtype=int)
+    kb, b = np.divmod(iB - split, inputs.n_zones)
+    frame = pd.DataFrame({
+        "constraint": [inputs.bg_constraints[k] for k in kb],
+        "zone": inputs.zones.iloc[b, 0].to_numpy(),
+        "published_bg": inputs.Y_B[b, kb],
+        "carriers": carriers[kb].astype(int),
+    })
     for tag, lam in (("ref", reference), ("alt", other)):
         a, c = lam[iT], lam[iB]
         s, d = a + c, a - c

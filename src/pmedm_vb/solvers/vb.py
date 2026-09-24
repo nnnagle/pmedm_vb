@@ -60,6 +60,29 @@ so each run reports Laplace, Gaussian and skewed ELBOs. Sinh-arcsinh bends
 both tails but is not the log-gamma shape the Poisson argument predicts; how
 much of the tail it removes is for the diagnostic to say.
 
+**Sum-difference family.** On Knox, against an HMC reference, the skewed
+family's error for rare categories is where it puts the skew: a unit in block
+group ``b`` of tract ``t`` responds only to ``lambda_T + lambda_B``, and the
+posterior is skewed along that sum and not along the difference, while
+per-coordinate skew spreads into both (``experiments/compare_vb_hmc.py``,
+section 5). With ``family="sumdiff"`` two more sinh-arcsinh layers follow the
+coordinate one, each in a basis of its own:
+
+.. math::
+
+    \lambda = \mu + D^{-1} T_d\big(D\, S^{-1} T_s(S\, T_c(x))\big)
+
+where ``S`` replaces each block group row of a category constrained at both
+levels by ``lambda_T + lambda_B`` and ``D`` by ``lambda_T - lambda_B``,
+leaving every other row alone (:func:`~pmedm_vb.solvers.base.category_pairs`
+gives the rows). Sums and differences cannot all be coordinates of one basis
+-- a tract with ``k`` block groups has ``k + 1`` multipliers per category and
+``2k`` of them -- hence two layers. Both maps are unit triangular up to sign,
+so their Jacobians are constant, and the entropy is the Gaussian's plus the
+three layers' ``E[sum log T']``. Each layer's scale is the Gaussian part's sd
+in its basis. All layers start at the identity, so the family contains the
+skewed one and its fit starts from the converged Gaussian.
+
 Draws are ``lambda = mu + G'^{-1} eps``: an ``r x r`` Woodbury solve for
 ``(I + V W')^{-1}``, then one triangular solve per tract. The entropy is
 ``m/2 log(2 pi e) - sum log diag L_t - log|det(I + V'W)|``.
@@ -104,10 +127,13 @@ import torch
 from pmedm_vb.assemble.inputs import PMEDMInputs
 from pmedm_vb.assemble.sigma import Sigma
 from pmedm_vb.progress import logger
-from pmedm_vb.solvers.base import dual_state, weights_from_lambda
+from pmedm_vb.solvers.base import category_pairs, dual_state, weights_from_lambda
 from pmedm_vb.solvers.map_dual import DualHessian, MAPResult, solve_map
 
 DTYPE = torch.float64
+
+#: Skew layers of each family, in the order they apply.
+FAMILY_LAYERS = {"gaussian": (), "skewed": ("coord",), "sumdiff": ("coord", "sum", "diff")}
 
 #: Draws used to fix the skewed stage's per-coordinate scale ``s``. Any fixed
 #: positive ``s`` gives a valid family; it only needs to be about right.
@@ -134,6 +160,37 @@ def sinh_arcsinh_inverse(y, skew, log_tail):
     return np.sinh(tail * np.arcsinh(y + np.sinh(skew / tail)) - skew)
 
 
+def to_basis(x, basis: str, pair_T, pair_B):
+    """Rows of ``x`` (``(m, ...)``) in the ``"sum"`` or ``"diff"`` basis: each
+    block group row ``B`` of a pair becomes ``x_T + x_B`` or ``x_T - x_B``.
+    ``"coord"`` returns ``x``. Works on numpy arrays and torch tensors, the
+    latter without in-place writes so autograd can follow."""
+    if basis == "coord":
+        return x
+    paired = x[pair_T] + x[pair_B] if basis == "sum" else x[pair_T] - x[pair_B]
+    return _replace_rows(x, pair_B, paired)
+
+
+def from_basis(y, basis: str, pair_T, pair_B):
+    """Inverse of :func:`to_basis`: tract rows are unchanged in both bases."""
+    if basis == "coord":
+        return y
+    paired = y[pair_B] - y[pair_T] if basis == "sum" else y[pair_T] - y[pair_B]
+    return _replace_rows(y, pair_B, paired)
+
+
+def _replace_rows(x, rows, values):
+    if isinstance(x, torch.Tensor):
+        return x.index_copy(0, rows, values)
+    out = x.copy()
+    out[rows] = values
+    return out
+
+
+#: Skew layers in the order they apply, with the attribute prefix of each.
+LAYERS = (("coord", ""), ("sum", "sum_"), ("diff", "diff_"))
+
+
 @dataclass
 class StructuredGaussian:
     """``N(mean, (G G')^{-1})`` with ``G = blockdiag(blocks) (I + W V')``.
@@ -152,6 +209,10 @@ class StructuredGaussian:
         ``(m,)`` sinh-arcsinh parameters and the fixed scale ``s``, or ``None``
         for the plain Gaussian. See *Skewed family* in the module docstring;
         with them, ``mean`` is the median of each coordinate, not its mean.
+    sum_skew, sum_log_tail, sum_scale, diff_skew, diff_log_tail, diff_scale:
+        The same for the sum and difference layers of the sum-difference
+        family, applied in that order after the coordinate layer, with
+        ``pair_T`` and ``pair_B`` the rows they pair; ``None`` otherwise.
     """
 
     mean: np.ndarray
@@ -162,10 +223,44 @@ class StructuredGaussian:
     skew: np.ndarray | None = None
     log_tail: np.ndarray | None = None
     scale: np.ndarray | None = None
+    sum_skew: np.ndarray | None = None
+    sum_log_tail: np.ndarray | None = None
+    sum_scale: np.ndarray | None = None
+    diff_skew: np.ndarray | None = None
+    diff_log_tail: np.ndarray | None = None
+    diff_scale: np.ndarray | None = None
+    pair_T: np.ndarray | None = None
+    pair_B: np.ndarray | None = None
 
     @property
     def is_skewed(self) -> bool:
-        return self.skew is not None
+        return bool(self.layers())
+
+    def layers(self) -> list[tuple[str, np.ndarray, np.ndarray, np.ndarray]]:
+        """``(basis, skew, log_tail, scale)`` for each layer present, in order."""
+        return [
+            (basis, getattr(self, f"{prefix}skew"), getattr(self, f"{prefix}log_tail"),
+             getattr(self, f"{prefix}scale"))
+            for basis, prefix in LAYERS if getattr(self, f"{prefix}skew") is not None
+        ]
+
+    def skew_params(self) -> dict[str, np.ndarray]:
+        """Every skew-layer array present, by attribute name -- for saving."""
+        names = [f"{prefix}{field}" for _, prefix in LAYERS for field in ("skew", "log_tail", "scale")]
+        names += ["pair_T", "pair_B"]
+        return {name: getattr(self, name) for name in names if getattr(self, name) is not None}
+
+    def skew_forward(self, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Gaussian offsets ``x`` (``(m, k)``) through every layer, and each
+        column's summed log-derivative."""
+        log_jacobian = np.zeros(x.shape[1])
+        for basis, skew, log_tail, scale in self.layers():
+            s = scale[:, None]
+            y = to_basis(x, basis, self.pair_T, self.pair_B)
+            value, log_derivative = sinh_arcsinh(y / s, skew[:, None], log_tail[:, None])
+            log_jacobian += log_derivative.sum(0)
+            x = from_basis(s * value, basis, self.pair_T, self.pair_B)
+        return x, log_jacobian
 
     @property
     def size(self) -> int:
@@ -203,19 +298,19 @@ class StructuredGaussian:
         """``(m, size)`` draws: ``mean + G'^{-1} eps``, skewed if the family is."""
         x = self.gaussian_part(rng.standard_normal((self.size, size)))
         if self.is_skewed:
-            s = self.scale[:, None]
-            x = s * sinh_arcsinh(x / s, self.skew[:, None], self.log_tail[:, None])[0]
+            x = self.skew_forward(x)[0]
         return self.mean[:, None] + x
 
     def log_density(self, lam: np.ndarray) -> np.ndarray:
         """``log q`` at each column of ``lam`` (m x k)."""
         x = lam - self.mean[:, None]
         log_jacobian = 0.0
-        if self.is_skewed:
-            s = self.scale[:, None]
-            z = sinh_arcsinh_inverse(x / s, self.skew[:, None], self.log_tail[:, None])
-            log_jacobian = sinh_arcsinh(z, self.skew[:, None], self.log_tail[:, None])[1].sum(0)
-            x = s * z
+        for basis, skew, log_tail, scale in reversed(self.layers()):
+            s = scale[:, None]
+            y = to_basis(x, basis, self.pair_T, self.pair_B)
+            z = sinh_arcsinh_inverse(y / s, skew[:, None], log_tail[:, None])
+            log_jacobian = log_jacobian + sinh_arcsinh(z, skew[:, None], log_tail[:, None])[1].sum(0)
+            x = from_basis(s * z, basis, self.pair_T, self.pair_B)
         quadratic = np.einsum("id,id->d", x, self.precision_matvec(x))
         gaussian = -0.5 * self.size * math.log(2 * math.pi) + 0.5 * self.logdet_precision() - 0.5 * quadratic
         return gaussian - log_jacobian
@@ -281,7 +376,7 @@ class VBResult:
     alpha, taper, variance_floor:
         The ``Sigma`` the posterior is under.
     family:
-        ``"gaussian"`` or ``"skewed"``.
+        ``"gaussian"``, ``"skewed"`` or ``"sumdiff"``.
     gaussian_elbo, gaussian_elbo_se:
         The ELBO of the Gaussian fit the skewed stage started from; for the
         Gaussian family the same as ``elbo``. ``elbo`` above it by more than a
@@ -359,7 +454,7 @@ class _DualTarget:
 class _Variational(torch.nn.Module):
     """The family in whitened coordinates about a starting ``StructuredGaussian``."""
 
-    def __init__(self, start: StructuredGaussian, device: str, skewed: bool = False) -> None:
+    def __init__(self, start: StructuredGaussian, device: str, layers: tuple[str, ...] = ()) -> None:
         super().__init__()
 
         def tensor(x):
@@ -379,14 +474,26 @@ class _Variational(torch.nn.Module):
         )
         self.W = torch.nn.Parameter(tensor(start.W))
         self.V = torch.nn.Parameter(tensor(start.V))
-        self.skewed = skewed
-        if skewed:
-            # Identity at the start: the skewed family begins exactly at ``start``.
-            self.skew = torch.nn.Parameter(torch.zeros(self.m, dtype=DTYPE, device=device))
-            self.log_tail = torch.nn.Parameter(torch.zeros(self.m, dtype=DTYPE, device=device))
-            if start.scale is None:
-                raise ValueError("a skewed family needs start.scale, the Gaussian marginal sd")
-            self.scale = tensor(start.scale)
+        # Skew layers, each at the identity: the family begins exactly at ``start``.
+        prefixes = dict(LAYERS)
+        self.layers = tuple(layers)
+        self.skewed = bool(self.layers)
+        self.scales = {}
+        for basis in self.layers:
+            prefix = prefixes[basis]
+            scale = getattr(start, f"{prefix}scale")
+            if scale is None:
+                raise ValueError(f"a {basis} skew layer needs start.{prefix}scale, the Gaussian sd in its basis")
+            setattr(self, f"{prefix}skew", torch.nn.Parameter(torch.zeros(self.m, dtype=DTYPE, device=device)))
+            setattr(self, f"{prefix}log_tail", torch.nn.Parameter(torch.zeros(self.m, dtype=DTYPE, device=device)))
+            self.scales[basis] = tensor(scale)
+        self.pair_T = self.pair_B = None
+        if any(basis != "coord" for basis in self.layers):
+            if start.pair_T is None:
+                raise ValueError("sum and difference layers need start.pair_T and start.pair_B")
+            self.pair_T = torch.as_tensor(start.pair_T, device=device)
+            self.pair_B = torch.as_tensor(start.pair_B, device=device)
+        self._pairs_numpy = (start.pair_T, start.pair_B)
 
     def blocks(self) -> list[torch.Tensor]:
         return [
@@ -418,11 +525,16 @@ class _Variational(torch.nn.Module):
             eps = eps - self.V @ torch.linalg.solve(small, self.W.T @ eps)
         x = self._solve_transpose(blocks, eps)
         log_jacobian = torch.zeros(count, dtype=DTYPE, device=eps.device)
-        if self.skewed:
-            s = self.scale[:, None]
-            value, log_derivative = sinh_arcsinh(x / s, self.skew[:, None], self.log_tail[:, None])
-            x = s * value
-            log_jacobian = log_derivative.sum(0)
+        prefixes = dict(LAYERS)
+        for basis in self.layers:
+            prefix = prefixes[basis]
+            s = self.scales[basis][:, None]
+            y = to_basis(x, basis, self.pair_T, self.pair_B)
+            value, log_derivative = sinh_arcsinh(
+                y / s, getattr(self, f"{prefix}skew")[:, None], getattr(self, f"{prefix}log_tail")[:, None]
+            )
+            x = from_basis(s * value, basis, self.pair_T, self.pair_B)
+            log_jacobian = log_jacobian + log_derivative.sum(0)
         return (self.mean()[:, None] + x).T, log_jacobian
 
     def entropy(self) -> torch.Tensor:
@@ -439,12 +551,14 @@ class _Variational(torch.nn.Module):
     def export(self) -> StructuredGaussian:
         with torch.no_grad():
             skewed = {}
-            if self.skewed:
-                skewed = dict(
-                    skew=self.skew.detach().cpu().numpy(),
-                    log_tail=self.log_tail.detach().cpu().numpy(),
-                    scale=self.scale.cpu().numpy(),
-                )
+            prefixes = dict(LAYERS)
+            for basis in self.layers:
+                prefix = prefixes[basis]
+                skewed[f"{prefix}skew"] = getattr(self, f"{prefix}skew").detach().cpu().numpy()
+                skewed[f"{prefix}log_tail"] = getattr(self, f"{prefix}log_tail").detach().cpu().numpy()
+                skewed[f"{prefix}scale"] = self.scales[basis].cpu().numpy()
+            if self.pair_T is not None:
+                skewed["pair_T"], skewed["pair_B"] = self._pairs_numpy
             return StructuredGaussian(
                 mean=self.mean().cpu().numpy(),
                 rows=[r.cpu().numpy() for r in self.rows],
@@ -474,9 +588,12 @@ def _parameter_groups(model: "_Variational", learning_rate: float) -> list[dict]
     ]
     for block in model.lower:
         groups.append({"params": [block], "lr": learning_rate / block.shape[0]})
-    if model.skewed:
-        # One pair per coordinate, each acting on a unit-scale argument.
-        groups.append({"params": [model.skew, model.log_tail], "lr": learning_rate})
+    prefixes = dict(LAYERS)
+    for basis in model.layers:
+        # One pair per coordinate of the layer's basis, each on a unit-scale argument.
+        prefix = prefixes[basis]
+        groups.append({"params": [getattr(model, f"{prefix}skew"), getattr(model, f"{prefix}log_tail")],
+                       "lr": learning_rate})
     return groups
 
 
@@ -539,15 +656,17 @@ def solve_vb(
     family:
         ``"gaussian"``, or ``"skewed"`` to add a second stage fitting a
         sinh-arcsinh skew per coordinate on top of the converged Gaussian (see
-        *Skewed family*). ``max_iter`` applies to each stage.
+        *Skewed family*), or ``"sumdiff"`` for that stage with sum and
+        difference layers as well (see *Sum-difference family*). ``max_iter``
+        applies to each stage.
     final_draws:
         Draws for the reported ELBOs of the fit, the Gaussian stage and the
         Laplace start.
     device:
         A torch device, e.g. ``"cuda"``.
     """
-    if family not in ("gaussian", "skewed"):
-        raise ValueError(f"family must be 'gaussian' or 'skewed', got {family!r}")
+    if family not in FAMILY_LAYERS:
+        raise ValueError(f"family must be one of {sorted(FAMILY_LAYERS)}, got {family!r}")
     if init is None:
         init = solve_map(inputs, alpha=alpha, taper=taper, variance_floor=variance_floor)
     if (init.alpha, init.taper, init.variance_floor) != (alpha, taper, variance_floor):
@@ -578,13 +697,17 @@ def solve_vb(
         "converged" if converged else "NOT converged", n_iter, gaussian_elbo, gaussian_se,
     )
 
-    if family == "skewed":
+    if FAMILY_LAYERS[family]:
         start = model.export()
         rng = np.random.default_rng(seed)
-        start.scale = start.gaussian_part(rng.standard_normal((model.m, SCALE_DRAWS))).std(
-            axis=1, ddof=1
-        )
-        model = _Variational(start, device, skewed=True)
+        offsets = start.gaussian_part(rng.standard_normal((model.m, SCALE_DRAWS)))
+        start.scale = offsets.std(axis=1, ddof=1)
+        if family == "sumdiff":
+            start.pair_T, start.pair_B = category_pairs(inputs)
+            for basis, prefix in LAYERS[1:]:
+                setattr(start, f"{prefix}scale",
+                        to_basis(offsets, basis, start.pair_T, start.pair_B).std(axis=1, ddof=1))
+        model = _Variational(start, device, layers=FAMILY_LAYERS[family])
         skew_trace, skew_iter, skew_converged = _optimise(model, target, n, **settings)
         trace += skew_trace
         n_iter += skew_iter
@@ -603,9 +726,7 @@ def solve_vb(
         elbo_value, elbo_se, gaussian_elbo, gaussian_se, laplace_elbo, laplace_se,
         time.perf_counter() - started,
     )
-    params = {"mean": q.mean, "W": q.W, "V": q.V}
-    if q.is_skewed:
-        params.update(skew=q.skew, log_tail=q.log_tail, scale=q.scale)
+    params = {"mean": q.mean, "W": q.W, "V": q.V, **q.skew_params()}
     return VBResult(
         q=q,
         params=params,

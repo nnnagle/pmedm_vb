@@ -104,8 +104,9 @@ def parse_args() -> argparse.Namespace:
              "variance; a number floors at that value; 'none' (default) leaves them",
     )
     parser.add_argument(
-        "--family", choices=["gaussian", "skewed"], default="gaussian",
-        help="vb: 'skewed' adds a second stage fitting a per-coordinate skew",
+        "--family", choices=["gaussian", "skewed", "sumdiff"], default="gaussian",
+        help="vb: 'skewed' adds a second stage fitting a per-coordinate skew; 'sumdiff' "
+             "adds skew layers on tract+block group sums and differences as well",
     )
     parser.add_argument("--max-iter", type=int, default=1000, help="vb: iteration cap (per stage)")
     parser.add_argument("--draws", type=int, default=8, help="vb: Monte Carlo draws per step")
@@ -370,8 +371,7 @@ def vb_one(path: Path, taper: str | None, alpha: float, out: Path, options: dict
             elbo_trace=fit.elbo_trace,
             **{f"rows_{i}": rows for i, rows in enumerate(fit.q.rows)},
             **{f"block_{i}": block for i, block in enumerate(fit.q.blocks)},
-            **({"skew": fit.q.skew, "log_tail": fit.q.log_tail, "scale": fit.q.scale}
-               if fit.q.is_skewed else {}),
+            **fit.q.skew_params(),
             **{key: np.asarray(value) for key, value in row.items()},
         )
     except Exception as error:
