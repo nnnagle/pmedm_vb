@@ -23,10 +23,18 @@ This is not production code. This is research code to write a paper. The paper w
 - [x] write assembly (`src/pmedm_vb/assemble/`) -- attribute matrices,
       aggregation operators, targets, and the `Sigma` representation the
       solvers consume. One problem per PUMA: `assemble.build.build_all()`
-- [x] write solvers (`src/pmedm_vb/solvers/`) -- MAP (`map_dual.solve_map`)
-      and VB (`vb.solve_vb`, Gaussian or skewed family). Both work as
-      algorithms; the VB fit is not yet usable as a simulator. Status,
-      findings and the open decision: `solvers_synopsis.md`
+- [x] write solvers (`src/pmedm_vb/solvers/`) -- MAP (`map_dual.solve_map`),
+      VB (`vb.solve_vb`: Gaussian, skewed or sum-difference family) and an
+      HMC reference (`mcmc.HMC`). VB alone is not yet usable as a simulator;
+      VB followed by a short HMC run is the proposed method. Status and
+      findings: `solvers_synopsis.md`
+- [ ] VB as a simulator -- continue another day. VB's bulk is nearly right
+      but its joint tail and its rare-group intervals are not (synopsis
+      findings 10 and 12). Open leads: the over-skewed zero-count race cells
+      under `sumdiff`, the joint household-direction walls, a more
+      zero-forcing divergence, HMC through VB's full transform. The
+      synopsis's "Left to do" has the list.
+- [ ] end-to-end comparison of the methods across alpha -- `HANDOFF.md`
 - [ ] write experiments (`experiments/`)
 
 ## Open research questions
