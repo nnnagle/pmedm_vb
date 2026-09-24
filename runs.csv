@@ -1,1 +1,3 @@
 job_id,step,puma,alpha,method,family,seed,commit,partition,out_dir,status,notes
+6276291,assemble,all,,,,,6d912a5,campus,$PMEDM_VB_DATA/processed/inputs/knox-2024-5yr,submitted,--rebuild
+6276293,heldout,all,,,,,6d912a5,campus,$PMEDM_VB_DATA/processed/inputs/knox-2024-5yr/<puma>/heldout,submitted,afterok:6276291
