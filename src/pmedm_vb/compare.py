@@ -182,3 +182,50 @@ def psis_khat(log_ratio: np.ndarray) -> float:
 
     _, khat = az.psislw(np.asarray(log_ratio, dtype=float))
     return float(khat)
+
+
+def pair_comparison(inputs: PMEDMInputs, reference: np.ndarray, other: np.ndarray) -> pd.DataFrame:
+    """Tract and block group multipliers of the same category, under two samplers.
+
+    For every category constrained at both levels and every block group ``b``
+    in tract ``t``, a unit placed in ``b`` has its logit shifted by
+    ``-x_ik (lambda_T[t,k] + lambda_B[b,k])``: the data see the **sum**, and
+    the one-sided walls lie along it. The **difference** is what separates the
+    two levels. Per pair and per sampler (columns ``_ref`` and ``_alt`` of the
+    ``(m, draws)`` inputs): the correlation of the two multipliers, the sd of
+    each, of the sum and of the difference, the skewness of sum and
+    difference, and the sum's 0.1% and 99.9% quantiles. ``published_bg`` and
+    ``carriers`` -- units with a nonzero loading -- say how rare the category is.
+    """
+    from scipy.stats import skew
+
+    n_tracts, split = inputs.Y_T.shape[0], inputs.Y_T.size
+    zone_tract = inputs.zone_tracts()
+    bg_index = {name: k for k, name in enumerate(inputs.bg_constraints)}
+    carriers = np.diff(sp.csc_matrix(inputs.X_B).indptr)
+    rows, iT, iB = [], [], []
+    for kt, name in enumerate(inputs.tract_constraints):
+        kb = bg_index.get(name)
+        if kb is None:
+            continue
+        for b in range(inputs.n_zones):
+            iT.append(kt * n_tracts + zone_tract[b])
+            iB.append(split + kb * inputs.n_zones + b)
+            rows.append({"constraint": name, "zone": inputs.zones.iloc[b, 0],
+                         "published_bg": inputs.Y_B[b, kb], "carriers": int(carriers[kb])})
+    frame = pd.DataFrame(rows, columns=["constraint", "zone", "published_bg", "carriers"])
+    iT, iB = np.array(iT, dtype=int), np.array(iB, dtype=int)
+    for tag, lam in (("ref", reference), ("alt", other)):
+        a, c = lam[iT], lam[iB]
+        s, d = a + c, a - c
+        ac = ((a - a.mean(1, keepdims=True)) * (c - c.mean(1, keepdims=True))).mean(1)
+        lo, hi = np.quantile(s, [0.001, 0.999], axis=1)
+        frame[f"corr_{tag}"] = ac / (a.std(1) * c.std(1))
+        frame[f"sd_T_{tag}"], frame[f"sd_B_{tag}"] = a.std(1, ddof=1), c.std(1, ddof=1)
+        frame[f"sd_sum_{tag}"], frame[f"sd_diff_{tag}"] = s.std(1, ddof=1), d.std(1, ddof=1)
+        frame[f"skew_sum_{tag}"], frame[f"skew_diff_{tag}"] = skew(s, axis=1), skew(d, axis=1)
+        frame[f"sum_q001_{tag}"], frame[f"sum_q999_{tag}"] = lo, hi
+    return frame.assign(
+        sd_sum_ratio=frame["sd_sum_alt"] / frame["sd_sum_ref"],
+        sd_diff_ratio=frame["sd_diff_alt"] / frame["sd_diff_ref"],
+    )
