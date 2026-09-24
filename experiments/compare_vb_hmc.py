@@ -25,7 +25,8 @@ draws of an HMC run on the same problem (``run_mcmc.py sample``), draws
    whose block group count is published at ``--rare-count`` or less.
 
 Writes ``<out>/<name>_compare.txt`` and three CSVs beside it: ``_outcomes``,
-``_coordinates``, ``_walls``, ``_pairs``. ``--out`` defaults to ``<mcmc>/compare``.
+``_coordinates``, ``_walls``, ``_pairs``. ``--out`` defaults to ``<mcmc>/compare_vb<jobid>`` (or
+``compare_hmc<jobid>`` with ``--alt-mcmc``), named after the compared run.
 With ``--alt-mcmc DIR`` the sampler compared is a second HMC run instead of
 VB -- a short run against the long reference, say. The whitening is still
 VB's Gaussian part, section 1 is skipped (it needs VB's density), and the
@@ -101,7 +102,9 @@ def main() -> None:
 
     args = parse_args()
     name = f"{args.puma}_{args.taper}_a{args.alpha:g}"
-    out = args.out or (args.mcmc / "compare")
+    # One folder per compared run, so comparing another fit does not overwrite this one.
+    tag = f"hmc{args.alt_mcmc.parent.name}" if args.alt_mcmc else f"vb{args.vb_run.name}"
+    out = args.out or (args.mcmc / f"compare_{tag}")
     out.mkdir(parents=True, exist_ok=True)
     record_run(out, args)
     rng = np.random.default_rng(args.seed)
