@@ -1,3 +1,10 @@
 job_id,step,puma,alpha,method,family,seed,commit,partition,out_dir,status,notes
 6276291,assemble,all,,,,,6d912a5,campus,$PMEDM_VB_DATA/processed/inputs/knox-2024-5yr,submitted,--rebuild
 6276293,heldout,all,,,,,6d912a5,campus,$PMEDM_VB_DATA/processed/inputs/knox-2024-5yr/<puma>/heldout,submitted,afterok:6276291
+6276605,solve,4701501,0.01,map,,,run_args.jsonl,campus,$RUNS/6276605,submitted,timing test k=2; 8 cores
+6276606,rake,4701501,,ipf,,,run_args.jsonl,campus,$RUNS/6276606,submitted,timing test; 8 cores
+6276607,rake,4701501,,sinkhorn,,,run_args.jsonl,campus,$RUNS/6276607,submitted,timing test; floor zero; 8 cores
+6276608,vb,4701501,0.01,,gaussian,3002,run_args.jsonl,campus,$RUNS/6276608,submitted,timing test; 64 draws; 8 cores
+6276609,vb,4701501,0.01,,skewed,3002,run_args.jsonl,campus,$RUNS/6276609,submitted,timing test; 64 draws; 8 cores
+6276610,vb,4701501,0.01,,sumdiff,3002,run_args.jsonl,campus,$RUNS/6276610,submitted,timing test; 64 draws; 8 cores
+6276611,hmc_short,4701501,0.01,,skewed-whitened,2002,run_args.jsonl,campus-gpu,$RUNS/6276611/mcmc,submitted,200+1000 traj 3.0; whitened by 6276609; afterok:6276609
