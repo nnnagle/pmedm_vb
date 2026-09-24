@@ -23,7 +23,10 @@ its index; every ``--thin``-th sampling iteration also keeps ``lambda``. Every
 ``--checkpoint`` iterations the state and records are written to
 ``<out>/<name>_state.npz`` and ``<name>_trace.npz``, and a job started with
 an ``--out`` that holds them resumes where they stopped -- so a run that hits
-its time limit is resubmitted, not restarted. The settings must match.
+its time limit is resubmitted, not restarted. The settings must match. The
+trace also carries ``seconds``, the sampler's wall time summed over every job
+that contributed, and ``warmup_seconds``, the part spent in warmup, so that a
+resubmitted run still reports its total.
 
 **report** writes ``<out>/<name>_report.txt``:
 
@@ -150,6 +153,7 @@ def sample(args: argparse.Namespace) -> None:
 
     trace = {key: [] for key in TRACE_KEYS}
     step_sizes, leapfrogs, draws = [], [], []
+    earlier_seconds, warmup_seconds = 0.0, float("nan")
     if state_path.exists() and trace_path.exists():
         with np.load(state_path) as state:
             sampler.load_state_dict(dict(state))
@@ -157,6 +161,9 @@ def sample(args: argparse.Namespace) -> None:
             trace = {key: list(saved[key]) for key in TRACE_KEYS}
             step_sizes, leapfrogs = list(saved["step_size"]), list(saved["n_leapfrog"])
             draws = list(saved["lam"]) if "lam" in saved.files else []
+            earlier_seconds = float(saved["seconds"]) if "seconds" in saved.files else 0.0
+            if "warmup_seconds" in saved.files:
+                warmup_seconds = float(saved["warmup_seconds"])
         if sampler.chains != args.chains:
             raise SystemExit(f"{state_path} has {sampler.chains} chains, not {args.chains}")
         logger.info("resuming %s at iteration %d", name, sampler.iteration)
@@ -176,6 +183,8 @@ def sample(args: argparse.Namespace) -> None:
             **{key: np.asarray(value) for key, value in trace.items()},
             step_size=np.asarray(step_sizes), n_leapfrog=np.asarray(leapfrogs),
             warmup=args.warmup, thin=args.thin, n_zones=inputs.n_zones, n_units=inputs.n_units,
+            seconds=earlier_seconds + time.perf_counter() - started,
+            warmup_seconds=warmup_seconds,
             **({"lam": np.asarray(draws)} if draws else {}),
         )
 
@@ -184,6 +193,7 @@ def sample(args: argparse.Namespace) -> None:
         stats = sampler.step(adapt=warming)
         if sampler.iteration == args.warmup:
             sampler.end_warmup()
+            warmup_seconds = earlier_seconds + time.perf_counter() - started
             logger.info("warmup done: step size fixed at %.4g", sampler.step_size)
         share, cell = sampler.largest_cell()
         for key in TRACE_KEYS[:4]:
