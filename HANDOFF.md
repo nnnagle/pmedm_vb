@@ -50,21 +50,44 @@ a T4, about 30x slower for this float64 code. The recent VB and HMC runs all
 used `--variance-floor zero`; confirm with the user whether the comparison
 keeps it.
 
+## Clean slate: rerun everything
+
+Every result in the comparison is produced fresh in this task, even where an
+earlier run exists: assembly, MAP, all three VB families, the short HMC runs
+and the HMC references, for every (PUMA, alpha). The earlier runs (below and
+in the synopsis) are history -- use them to cross-check that the fresh
+results agree with what was found, never as inputs. So:
+
+- One commit for the whole grid. Record it; `run_args.jsonl` in every results
+  folder records each job's commit, settings and job id.
+- Rebuild the assembled inputs first (`run_map.py assemble --rebuild`).
+- Refit MAP and VB for every family at every alpha, with the same settings
+  across the grid (64 draws per step was the last setting used; confirm).
+- HMC on `campus-gpu` (V100) only, a distinct `--seed` per run, and the short
+  runs whitened by the fresh VB fits, not the old ones. Reference runs must
+  finish: set `--time` from a timing test, and resubmit with `--out` if one
+  stops (the sampler checkpoints).
+- Keep a table of job ids -> (step, PUMA, alpha, family, seed) as jobs are
+  submitted, in the repository, so no result is untraceable.
+
 ## The task
 
 An end-to-end comparison of seven methods, crossed with alpha in {1, 0.1,
 0.01}, on the four Knox PUMAs, evaluated on **timing** and on **usability for
 inference tasks and for simulation tasks**.
 
-| # | Method | What exists | What is missing |
+| # | Method | Code that exists | Code still to write |
 |---|---|---|---|
 | 0 | Raking (IPF) | nothing | everything; feasibility is an open question (below) |
 | 1 | MAP | `run_map.py solve` | Laplace draws for simulation (`StructuredGaussian.laplace` exists; nothing saves or scores it) |
-| 2 | VB Gaussian | `run_map.py vb --family gaussian` | alpha 0.01 runs |
-| 3 | VB skewed | `--family skewed` | alpha 0.01 runs |
-| 4 | VB sumdiff | `--family sumdiff` | alpha 0.1 and 0.01 runs; only 4701502 scored |
-| 5 | VB skew + short HMC | `run_mcmc.py`, 200 + 1,000 | runs beyond 4701502 at alpha 1 |
-| 6 | HMC reference | `run_mcmc.py`, long | clean full-length runs per PUMA and alpha, distinct seeds |
+| 2 | VB Gaussian | `run_map.py vb --family gaussian` | -- |
+| 3 | VB skewed | `--family skewed` | -- |
+| 4 | VB sumdiff | `--family sumdiff` | -- |
+| 5 | VB skew + short HMC | `run_mcmc.py --warmup 200 --samples 1000` | -- |
+| 6 | HMC reference | `run_mcmc.py`, full length | -- |
+
+Every row is run afresh for every (PUMA, alpha); none has been run at alpha
+0.01 before, and only 4701502 at alpha 1 has an HMC reference so far.
 
 **Raking may not be feasible, and finding out is part of the job.** The
 constraints are published estimates at two levels that do not agree -- a
@@ -120,17 +143,18 @@ in the comparison, not something the comparison selects.
 - `run_map.py` fits every PUMA in one sweep; `run_mcmc.py` does one (PUMA,
   alpha) per job. 4701501 is the largest problem (8,577 multipliers; the dense
   whitening matrix is ~590 MB).
-- A clean reference is needed per (PUMA, alpha): full length on a V100,
-  distinct seeds (`--seed`), with the short runs using different seeds again.
+- `run_map.sbatch` runs on the `short` partition, capped at one hour; VB at
+  64 draws per step took 11-19 minutes per fit on the largest problems, so
+  plan the sweep (or a longer partition) around that.
 - The code added since synopsis finding 8 (statewide support, HMC,
   comparison, `sumdiff`) is checked by scratch scripts only, not by tests in
   `tests/`. The user asked for no test scripts unless requested; ask before
   relying on it for the paper.
 
-## Key runs
+## Earlier runs -- history only, for cross-checking
 
 Under `/lustre/isaac24/proj/UTK0496/pmedm_vb_runs/` (details in the
-synopsis's "Runs referenced"):
+synopsis's "Runs referenced"). Do not use these as inputs to the comparison:
 
 - `6272357` -- VB skewed, 64 draws per step, alpha 1, all four PUMAs; the
   whitening for the HMC runs so far.
@@ -150,4 +174,6 @@ no PR unless asked. Record each job's id and settings as results arrive
 (`run_args.jsonl` does the settings); this session lost track of one.
 
 **First step:** read the files above, then put the evaluation definitions,
-the raking question and the alpha 0.01 plan to the user before writing code.
+the raking question, the alpha 0.01 plan and the run plan for the clean
+grid (settings, seeds, partitions, time limits) to the user before writing
+code or submitting jobs.
