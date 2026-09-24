@@ -1033,3 +1033,355 @@ def required_variables(tables: Sequence[ConstraintTable]) -> dict[str, tuple[str
     for table in tables:
         needed[table.universe].update(table.variables)
     return {universe: tuple(sorted(columns)) for universe, columns in needed.items()}
+
+
+# --------------------------------------------------------------------------
+# Held-out tables
+#
+# Published at both tract and block group, never in f: a fit predicts them,
+# and the published estimate and MOE score the prediction. Codes were read
+# from the 2020-2024 data dictionary and the cells from cell_labels(), as for
+# the constraints. B25034 (year built) was considered and dropped: its
+# universe is all housing units, vacant ones included, which the model does
+# not carry.
+# --------------------------------------------------------------------------
+
+#: ``VEH`` codes per ``B25044`` vehicle cell, as offsets from the tenure
+#: subtotal. The table stops at "5 or more", so ``VEH`` 5 and 6 share a cell.
+B25044_VEHICLES = {
+    "none": (("0",), 1),
+    "one": (("1",), 2),
+    "two": (("2",), 3),
+    "three": (("3",), 4),
+    "four": (("4",), 5),
+    "five_plus": (("5", "6"), 6),
+}
+
+#: Cell ``ORDER`` of each tenure subtotal in ``B25044``.
+B25044_TENURE_CELLS = {"owner": 2, "renter": 9}
+
+
+def tenure_by_vehicles(geography: str = "block group") -> ConstraintTable:
+    """``B25044``: tenure by vehicles available, over occupied housing units.
+
+    Tenure is grouped as in :func:`tenure` (``TEN`` 4 with renters). ``VEH`` is
+    blank for group quarters and vacant units, outside the universe.
+    """
+    categories = []
+    for tenure_label, first in B25044_TENURE_CELLS.items():
+        for label, (codes, offset) in B25044_VEHICLES.items():
+
+            def select(h, ten=TEN_TO_TENURE[tenure_label], veh=codes):
+                return h["TEN"].isin(ten) & h["VEH"].isin(veh)
+
+            categories.append(Category(
+                name=f"{tenure_label}_{label}", select=select,
+                published=(f"B25044_{first + offset:03d}",),
+            ))
+    return ConstraintTable(
+        table="B25044",
+        variables=("TEN", "VEH"),
+        universe="household",
+        geography=geography,
+        categories=tuple(categories),
+        waived=("B25044_001", "B25044_002", "B25044_009"),
+    )
+
+
+#: ``C17002``'s ratio bands as ``(cell, lower, upper)`` in ``POVPIP`` units
+#: (percent of the poverty line), read from the cell titles: "1.85 to 1.99" is
+#: 185 to 200.
+C17002_BANDS = (
+    ("C17002_002", 0, 50),
+    ("C17002_003", 50, 100),
+    ("C17002_004", 100, 125),
+    ("C17002_005", 125, 150),
+    ("C17002_006", 150, 185),
+    ("C17002_007", 185, 200),
+    ("C17002_008", 200, None),
+)
+
+
+def poverty_ratio(geography: str = "block group") -> ConstraintTable:
+    """``C17002``: ratio of income to poverty level, over persons.
+
+    As in :func:`poverty_by_age`, a blank ``POVPIP`` -- poverty status not
+    determined -- is exactly the universe exclusion and fails every band.
+    """
+    high = float("inf")
+    categories = []
+    for cell, low, upper in C17002_BANDS:
+
+        def select(persons, lo=low, hi=high if upper is None else upper):
+            ratio = pd.to_numeric(persons["POVPIP"], errors="coerce")
+            return (ratio >= lo) & (ratio < hi)
+
+        name = f"{low}_to_{upper}" if upper is not None else f"ge_{low}"
+        categories.append(Category(name=name, select=select, published=(cell,)))
+    return ConstraintTable(
+        table="C17002",
+        variables=("POVPIP",),
+        universe="person",
+        geography=geography,
+        categories=tuple(categories),
+        waived=("C17002_001",),
+    )
+
+
+#: ``INDP`` label prefix to the ``C24030`` male-block cell it lands in. Where
+#: one prefix spans two published sectors (finance and real estate;
+#: professional, management and administrative) the published subtotal is
+#: used and its children waived. The prefixes are those expected in the
+#: dictionary labels; :func:`industry_crosswalk` raises on any other, so an
+#: unexpected one is caught rather than dropped.
+INDP_TO_C24030_CELL = {
+    "AGR": 4,
+    "EXT": 5,
+    "CON": 6,
+    "MFG": 7,
+    "WHL": 8,
+    "RET": 9,
+    "TRN": 11,
+    "UTL": 12,
+    "INF": 13,
+    "FIN": 14,
+    "PRF": 17,
+    "EDU": 22,
+    "MED": 23,
+    "SCA": 23,
+    "ENT": 24,
+    "SRV": 27,
+    "ADM": 28,
+}
+
+#: Outside ``C24030``'s civilian universe; excluded by
+#: :data:`ESR_CIVILIAN_EMPLOYED` as well.
+INDP_EXCLUDED_PREFIXES = ("MIL",)
+
+#: Female cells sit 27 orders after the matching male cell.
+C24030_FEMALE_OFFSET = 27
+
+#: Number of cells ``C24030`` publishes.
+C24030_CELLS = 55
+
+#: Human-readable name of each male-block cell used.
+C24030_CELL_NAMES = {
+    4: "agriculture", 5: "mining", 6: "construction", 7: "manufacturing",
+    8: "wholesale", 9: "retail", 11: "transportation_warehousing", 12: "utilities",
+    13: "information", 14: "finance_real_estate", 17: "professional_admin",
+    22: "education", 23: "health_social", 24: "arts_accommodation_food",
+    27: "other_services", 28: "public_administration",
+}
+
+
+def industry_crosswalk(area: StudyArea) -> pd.Series:
+    """``INDP`` code to ``C24030`` male-block cell ``ORDER``, from the dictionary.
+
+    Derived from the label prefixes at run time, as
+    :func:`occupation_crosswalk` does for ``OCCP``.
+
+    Raises
+    ------
+    ValueError
+        If a prefix appears that is neither mapped nor excluded.
+    """
+    labels = variable_labels(area, "INDP")
+    prefixes = labels["label"].str.extract(r"^([A-Z]{3})-")[0]
+    unknown = sorted(
+        set(prefixes.dropna()) - set(INDP_TO_C24030_CELL) - set(INDP_EXCLUDED_PREFIXES)
+    )
+    if unknown:
+        raise ValueError(
+            f"unmapped INDP prefixes {unknown} -- assign them to a C24030 cell in "
+            f"INDP_TO_C24030_CELL, or to INDP_EXCLUDED_PREFIXES"
+        )
+    crosswalk = pd.Series(
+        prefixes.map(INDP_TO_C24030_CELL).to_numpy(),
+        index=pd.Index(labels["lo"].to_numpy(), name="indp"),
+        name="cell",
+    )
+    return crosswalk.dropna().astype(int)
+
+
+def sex_by_industry(area: StudyArea, geography: str = "block group") -> ConstraintTable:
+    """``C24030``: industry by sex, over the civilian employed 16 and over.
+
+    Sixteen sectors per sex. The universe filter is the same as
+    :func:`sex_by_occupation`'s, for the same reason: ``INDP`` is populated for
+    anyone who worked in the last five years.
+    """
+    crosswalk = industry_crosswalk(area)
+    categories, claimed = [], []
+    for sex, offset in (("male", 0), ("female", C24030_FEMALE_OFFSET)):
+        for order, label in C24030_CELL_NAMES.items():
+            cell = f"C24030_{order + offset:03d}"
+            codes = tuple(crosswalk.index[crosswalk == order])
+
+            def select(persons, code=SEX_CODES[sex], codes=codes):
+                return (
+                    persons["ESR"].isin(ESR_CIVILIAN_EMPLOYED)
+                    & (persons["SEX"] == code)
+                    & persons["INDP"].isin(codes)
+                )
+
+            categories.append(Category(name=f"{sex}_{label}", select=select, published=(cell,)))
+            claimed.append(cell)
+    every = [f"C24030_{order:03d}" for order in range(1, C24030_CELLS + 1)]
+    return ConstraintTable(
+        table="C24030",
+        variables=("ESR", "SEX", "INDP"),
+        universe="person",
+        geography=geography,
+        categories=tuple(categories),
+        waived=tuple(cell for cell in every if cell not in claimed),
+    )
+
+
+#: ``MSP`` code per ``B12001`` leaf cell, as offsets from the sex subtotal.
+#: ``MSP`` is blank under 15, which is the table's universe exclusion.
+B12001_STATUS = {
+    "never_married": ("6", 1),
+    "married_spouse_present": ("1", 3),
+    "separated": ("5", 5),
+    "married_spouse_absent_other": ("2", 6),
+    "widowed": ("3", 7),
+    "divorced": ("4", 8),
+}
+
+#: Cell ``ORDER`` of each sex subtotal in ``B12001``.
+B12001_SEX_CELLS = {"male": 2, "female": 11}
+
+
+def marital_status(geography: str = "block group") -> ConstraintTable:
+    """``B12001``: sex by marital status, over persons 15 and over."""
+    categories, claimed = [], []
+    for sex, first in B12001_SEX_CELLS.items():
+        for label, (code, offset) in B12001_STATUS.items():
+            cell = f"B12001_{first + offset:03d}"
+
+            def select(persons, sex_code=SEX_CODES[sex], msp=code):
+                return (persons["SEX"] == sex_code) & (persons["MSP"] == msp)
+
+            categories.append(Category(name=f"{sex}_{label}", select=select, published=(cell,)))
+            claimed.append(cell)
+    every = [f"B12001_{order:03d}" for order in range(1, 20)]
+    return ConstraintTable(
+        table="B12001",
+        variables=("SEX", "MSP"),
+        universe="person",
+        geography=geography,
+        categories=tuple(categories),
+        waived=tuple(cell for cell in every if cell not in claimed),
+    )
+
+
+#: ``SCHL`` codes per ``B15002`` cell, as offsets from the sex subtotal.
+#: Nursery to 4th grade is nursery, kindergarten and grades 1-4; high school
+#: graduate includes the GED.
+B15002_ATTAINMENT = {
+    "no_schooling": (("01",), 1),
+    "nursery_to_grade4": (("02", "03", "04", "05", "06", "07"), 2),
+    "grade5_6": (("08", "09"), 3),
+    "grade7_8": (("10", "11"), 4),
+    "grade9": (("12",), 5),
+    "grade10": (("13",), 6),
+    "grade11": (("14",), 7),
+    "grade12_no_diploma": (("15",), 8),
+    "high_school_graduate": (("16", "17"), 9),
+    "college_under_1yr": (("18",), 10),
+    "college_1yr_no_degree": (("19",), 11),
+    "associate": (("20",), 12),
+    "bachelor": (("21",), 13),
+    "master": (("22",), 14),
+    "professional": (("23",), 15),
+    "doctorate": (("24",), 16),
+}
+
+#: Cell ``ORDER`` of each sex subtotal in ``B15002``.
+B15002_SEX_CELLS = {"male": 2, "female": 19}
+
+
+def educational_attainment(geography: str = "block group") -> ConstraintTable:
+    """``B15002``: sex by educational attainment, over persons 25 and over.
+
+    ``SCHL`` is defined from age 3, so the age filter is explicit.
+    """
+    categories, claimed = [], []
+    for sex, first in B15002_SEX_CELLS.items():
+        for label, (codes, offset) in B15002_ATTAINMENT.items():
+            cell = f"B15002_{first + offset:03d}"
+
+            def select(persons, sex_code=SEX_CODES[sex], schl=codes):
+                age = pd.to_numeric(persons["AGEP"], errors="coerce")
+                return (age >= 25) & (persons["SEX"] == sex_code) & persons["SCHL"].isin(schl)
+
+            categories.append(Category(name=f"{sex}_{label}", select=select, published=(cell,)))
+            claimed.append(cell)
+    every = [f"B15002_{order:03d}" for order in range(1, 36)]
+    return ConstraintTable(
+        table="B15002",
+        variables=("AGEP", "SEX", "SCHL"),
+        universe="person",
+        geography=geography,
+        categories=tuple(categories),
+        waived=tuple(cell for cell in every if cell not in claimed),
+    )
+
+
+#: ``HFL`` code per ``B25040`` cell; one to one.
+HFL_TO_CELL = {
+    "utility_gas": ("1", "B25040_002"),
+    "bottled_gas": ("2", "B25040_003"),
+    "electricity": ("3", "B25040_004"),
+    "fuel_oil": ("4", "B25040_005"),
+    "coal": ("5", "B25040_006"),
+    "wood": ("6", "B25040_007"),
+    "solar": ("7", "B25040_008"),
+    "other_fuel": ("8", "B25040_009"),
+    "no_fuel": ("9", "B25040_010"),
+}
+
+
+def heating_fuel(geography: str = "block group") -> ConstraintTable:
+    """``B25040``: house heating fuel, over occupied housing units.
+
+    ``HFL`` is blank for group quarters and vacant units, outside the universe.
+    """
+    return ConstraintTable(
+        table="B25040",
+        variables=("HFL",),
+        universe="household",
+        geography=geography,
+        categories=tuple(
+            Category(
+                name=label,
+                select=(lambda c: lambda h: h["HFL"] == c)(code),
+                published=(cell,),
+            )
+            for label, (code, cell) in HFL_TO_CELL.items()
+        ),
+        waived=("B25040_001",),
+    )
+
+
+#: Held-out tables by how closely they relate to the constrained variables.
+HELDOUT_RELATION = {
+    "B25044": "related",
+    "C17002": "related",
+    "C24030": "related",
+    "B12001": "related",
+    "B15002": "related",
+    "B25040": "less_related",
+}
+
+
+def heldout_tables(area: StudyArea, geography: str) -> list[ConstraintTable]:
+    """The held-out tables at one geography; see :data:`HELDOUT_RELATION`."""
+    return [
+        tenure_by_vehicles(geography=geography),
+        poverty_ratio(geography=geography),
+        sex_by_industry(area, geography=geography),
+        marital_status(geography=geography),
+        educational_attainment(geography=geography),
+        heating_fuel(geography=geography),
+    ]
