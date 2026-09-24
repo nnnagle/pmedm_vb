@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=pmedm-map
 #SBATCH --account=acf-utk0011
-#SBATCH --partition=short
-#SBATCH --qos=short
+#SBATCH --partition=campus
+#SBATCH --qos=campus
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=64G
-#SBATCH --time=01:00:00
+#SBATCH --time=04:00:00
 #SBATCH --output=/lustre/isaac24/proj/UTK0496/pmedm_vb_runs/slurm-%j.log
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=nnagle@utk.edu
@@ -26,11 +26,22 @@
 #   sbatch experiments/run_map.sbatch            # MAP (the solve step)
 #   sbatch experiments/run_map.sbatch vb         # VB, each fit started from MAP
 #
-# short/short caps a job at one hour. That is enough for the solves (about a
-# minute each, run in parallel), but first-time assembly is still untimed. If a
-# job runs out of time, resubmit: PUMAs already assembled are saved and skipped.
-# A PUMA whose assembly alone takes over an hour needs a longer partition.
-# Resources can be overridden at submission, e.g. sbatch --cpus-per-task=48.
+# campus/campus is the standard CPU partition. The four-hour limit here is a
+# placeholder until the timing test sets it; override at submission with
+# sbatch --time=HH:MM:SS. Resources too, e.g. sbatch --cpus-per-task=48.
+#
+# The first argument picks the step: assemble, heldout, solve (MAP, the
+# default), vb or rake. assemble and heldout run only when asked for, so fit
+# jobs never race to build the same inputs; run them once, first:
+#
+#   sbatch experiments/run_map.sbatch assemble --rebuild
+#   sbatch experiments/run_map.sbatch heldout
+#
+# One fit per job, for clean timing (see run_map.py):
+#
+#   sbatch experiments/run_map.sbatch vb --puma 4701501 --alpha 0.01 --taper tract \
+#       --family skewed --draws 64 --variance-floor zero --seed 3000
+#   sbatch experiments/run_map.sbatch rake --puma 4701501 --method ipf
 # Arguments after the optional step are passed to it, e.g.
 #
 #   sbatch experiments/run_map.sbatch --alpha 1.0 0.9 0.8 0.7 0.5
@@ -48,7 +59,7 @@
 #   sbatch experiments/run_map.sbatch --epsilon 0.01 --alpha 1.0 --taper tract
 #
 # Assembled problems are reused across jobs; after changing the constraint
-# tables or assembly code, run assemble with --rebuild (edit ASSEMBLE_ARGS).
+# tables or assembly code, run the assemble step with --rebuild.
 
 # -u (unset variables are errors) is switched on only after conda activates:
 # the environment's activate.d hooks read variables such as
@@ -58,17 +69,14 @@ set -eo pipefail
 REPO=/lustre/isaac24/proj/UTK0496/pmedm_vb
 RUNS=/lustre/isaac24/proj/UTK0496/pmedm_vb_runs
 OUT=$RUNS/${SLURM_JOB_ID}
-ASSEMBLE_ARGS=""
 STEP=solve
 case "${1:-}" in
-    solve|vb) STEP=$1; shift ;;
+    assemble|heldout|solve|vb|rake) STEP=$1; shift ;;
 esac
-# An --out among the arguments (resuming an earlier sweep) replaces the default;
-# an --epsilon (statewide support) goes to the assemble step as well.
+# An --out among the arguments (resuming an earlier sweep) replaces the default.
 args=("$@")
 for ((i = 0; i < ${#args[@]} - 1; i++)); do
     [ "${args[i]}" = "--out" ] && OUT=${args[i + 1]}
-    [ "${args[i]}" = "--epsilon" ] && ASSEMBLE_ARGS="$ASSEMBLE_ARGS --epsilon ${args[i + 1]}"
 done
 
 module purge
@@ -99,8 +107,13 @@ echo "node $(hostname), ${SLURM_CPUS_PER_TASK} cores, commit $(git rev-parse --s
 echo "step $STEP, results -> $OUT"
 
 # -u: unbuffered, so the log shows progress as it happens.
-$PY -u experiments/run_map.py assemble $ASSEMBLE_ARGS
-$PY -u experiments/run_map.py "$STEP" --out "$OUT" "$@"
-
-cp "$OUT/summary.csv" "$RUNS/summary-${STEP}-${SLURM_JOB_ID}.csv"
+case "$STEP" in
+    assemble|heldout)
+        $PY -u experiments/run_map.py "$STEP" "$@"
+        ;;
+    *)
+        $PY -u experiments/run_map.py "$STEP" --out "$OUT" "$@"
+        cp "$OUT/summary.csv" "$RUNS/summary-${STEP}-${SLURM_JOB_ID}.csv"
+        ;;
+esac
 echo "done $(date)"

@@ -9,6 +9,8 @@ Separate steps, because ISAAC's compute nodes cannot reach census.gov::
     $CONDA_PREFIX/bin/python experiments/run_map.py assemble
     $CONDA_PREFIX/bin/python experiments/run_map.py solve --out DIR   # MAP
     $CONDA_PREFIX/bin/python experiments/run_map.py vb --out DIR      # VB
+    $CONDA_PREFIX/bin/python experiments/run_map.py heldout           # held-out tables
+    $CONDA_PREFIX/bin/python experiments/run_map.py rake --method ipf --out DIR
 
 **assemble** builds each PUMA in its own process and saves it with
 :meth:`~pmedm_vb.assemble.inputs.PMEDMInputs.save` under
@@ -27,6 +29,22 @@ each when there are at least as many solves as cores. Every solve writes
 keeps what finished. Fits whose ``.npz`` already exists in ``--out`` are
 skipped, so re-submitting with the same ``--out`` resumes. A fit that raises
 is recorded in ``summary.csv`` with its error and does not stop the others.
+
+**heldout** builds each assembled PUMA's held-out tables
+(:mod:`pmedm_vb.assemble.heldout`) into ``<inputs>/<puma>/heldout``, apart
+from the problem itself, so no solver sees them. Skipped where they exist
+unless ``--rebuild``. PUMA-only problems only.
+
+**rake** fits the raking baselines (:mod:`pmedm_vb.rake`), ``--method ipf``
+(hard, block group margins) or ``sinkhorn`` (KL-penalised, both levels), one
+per PUMA: ``<puma>_<method>.npz`` holds ``W``, the residuals and the trace.
+Neither uses ``Sigma``, so ``--alpha`` and ``--taper`` are ignored; Sinkhorn's
+penalties use ``--variance-floor``.
+
+**One fit per job.** ``--puma`` restricts any step to the PUMAs named, so a
+grid can be submitted as one job per (PUMA, alpha) for clean timing. ``vb``
+rows record ``map_seconds``, the MAP solve each VB fit starts from, so that
+``seconds - map_seconds`` is VB's own time; ``--seed`` seeds VB's draws.
 
 **Statewide support.** ``--epsilon E`` (all steps but prefetch) builds and
 solves the problems whose support is every record in the state, the PUMA's own
@@ -75,7 +93,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("step", choices=["prefetch", "assemble", "solve", "vb"])
+    parser.add_argument("step", choices=["prefetch", "assemble", "heldout", "solve", "vb", "rake"])
     parser.add_argument("--name", default="knox")
     parser.add_argument("--state", default="47", help="state FIPS")
     parser.add_argument(
@@ -88,7 +106,10 @@ def parse_args() -> argparse.Namespace:
         "--cores", type=int, default=None,
         help="cores to use (default: $SLURM_CPUS_PER_TASK, else all)",
     )
-    parser.add_argument("--rebuild", action="store_true", help="assemble: rebuild saved PUMAs")
+    parser.add_argument("--rebuild", action="store_true",
+                        help="assemble, heldout: rebuild saved PUMAs")
+    parser.add_argument("--puma", nargs="+", default=None,
+                        help="assemble, heldout, solve, vb, rake: only these PUMAs (default: all)")
     parser.add_argument(
         "--alpha", type=float, nargs="+", default=[1.0, 0.7, 0.5, 0.3, 0.1],
         help="solve: shrinkage values to sweep",
@@ -111,6 +132,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-iter", type=int, default=1000, help="vb: iteration cap (per stage)")
     parser.add_argument("--draws", type=int, default=8, help="vb: Monte Carlo draws per step")
     parser.add_argument("--learning-rate", type=float, default=0.02, help="vb: Adam step")
+    parser.add_argument("--seed", type=int, default=0, help="vb: seed for the Monte Carlo draws")
+    parser.add_argument("--method", choices=["ipf", "sinkhorn"], default="ipf",
+                        help="rake: hard IPF to block group margins, or KL-penalised Sinkhorn")
+    parser.add_argument("--tol", type=float, default=None,
+                        help="rake: convergence tolerance (default: 1e-3 ipf, 1e-6 sinkhorn)")
+    parser.add_argument("--max-sweeps", type=int, default=None,
+                        help="rake: sweep cap (default: 2000 ipf, 5000 sinkhorn)")
     parser.add_argument(
         "--epsilon", type=float, default=None,
         help="assemble, solve, vb: statewide support with this prior share off the "
@@ -182,10 +210,11 @@ def pool(workers: int, threads: int) -> ProcessPoolExecutor:
 
 
 def run_prefetch(area: StudyArea) -> None:
-    from pmedm_vb.assemble.constraints import default_tables
+    from pmedm_vb.assemble.constraints import default_tables, heldout_tables
     from pmedm_vb.data.prefetch import prefetch
 
-    prefetch(area, default_tables(area))
+    heldout = [*heldout_tables(area, "tract"), *heldout_tables(area, "block group")]
+    prefetch(area, [*default_tables(area), *heldout])
 
 
 # -- assemble ----------------------------------------------------------------
@@ -213,6 +242,8 @@ def run_assemble(
     from pmedm_vb.data.geography import puma_crosswalk_whole
 
     pumas = sorted(str(p) for p in puma_crosswalk_whole(area)["puma_geoid"].unique())
+    if args.puma:
+        pumas = [p for p in pumas if p in set(args.puma)]
     root = inputs_root(area, epsilon)
     record_run(root, args)
     todo = [p for p in pumas if rebuild or not (root / p / "manifest.json").exists()]
@@ -261,6 +292,59 @@ def write_support_summary(root: Path, pumas: list[str], epsilon: float | None) -
     frame.to_csv(root / "support_summary.csv", index=False)
     logger.info("support (epsilon=%g), also in %s:\n%s",
                 epsilon, root / "support_summary.csv", frame.to_string(index=False))
+
+
+# -- heldout -----------------------------------------------------------------
+
+
+def heldout_one(area: StudyArea, path: Path) -> tuple[str, float]:
+    """Worker: build and save one PUMA's held-out tables."""
+    from pmedm_vb.assemble.constraints import heldout_tables
+    from pmedm_vb.assemble.heldout import build_heldout
+    from pmedm_vb.assemble.inputs import PMEDMInputs
+
+    log_to_file(path.parent / "logs" / f"heldout_{path.name}.log")
+    start = time.perf_counter()
+    tables = [*heldout_tables(area, "tract"), *heldout_tables(area, "block group")]
+    build_heldout(area, PMEDMInputs.load(path), tables).save(path)
+    return path.name, time.perf_counter() - start
+
+
+def run_heldout(args: argparse.Namespace, area: StudyArea, cores: int) -> None:
+    from pmedm_vb.assemble.heldout import HeldOut
+
+    root = inputs_root(area)
+    record_run(root, args)
+    pumas = assembled_pumas(root, args.puma)
+    todo = [p for p in pumas if args.rebuild or not HeldOut.exists(p)]
+    logger.info("heldout %s: %d PUMAs, %d to build", area.slug, len(pumas), len(todo))
+    failed = []
+    if todo:
+        workers = min(cores, len(todo))
+        with pool(workers, max(1, cores // workers)) as executor:
+            futures = {executor.submit(heldout_one, area, p): p for p in todo}
+            for future in as_completed(futures):
+                try:
+                    puma, seconds = future.result()
+                    logger.info("held-out tables for PUMA %s in %.0fs", puma, seconds)
+                except Exception:
+                    path = futures[future]
+                    failed.append(path.name)
+                    logger.error("PUMA %s failed; see %s\n%s", path.name,
+                                 root / "logs" / f"heldout_{path.name}.log", traceback.format_exc())
+    if failed:
+        raise SystemExit(f"held-out tables failed for PUMA(s) {failed}")
+
+
+def assembled_pumas(root: Path, only: list[str] | None) -> list[Path]:
+    """Assembled PUMA directories under ``root``, restricted to ``only`` if given."""
+    pumas = sorted(p for p in root.glob("*") if (p / "manifest.json").exists())
+    if only:
+        missing = set(only) - {p.name for p in pumas}
+        if missing:
+            raise SystemExit(f"PUMA(s) {sorted(missing)} not assembled under {root}")
+        pumas = [p for p in pumas if p.name in set(only)]
+    return pumas
 
 
 # -- solve -------------------------------------------------------------------
@@ -345,6 +429,7 @@ def vb_one(path: Path, taper: str | None, alpha: float, out: Path, options: dict
     try:
         inputs = PMEDMInputs.load(path)
         start_map = solve_map(inputs, alpha=alpha, taper=taper, variance_floor=floor)
+        map_seconds = time.perf_counter() - start
         fit = solve_vb(inputs, alpha=alpha, taper=taper, variance_floor=floor,
                        init=start_map, **vb_options)
         row.update(
@@ -359,6 +444,8 @@ def vb_one(path: Path, taper: str | None, alpha: float, out: Path, options: dict
             gaussian_elbo=fit.gaussian_elbo,
             gaussian_elbo_se=fit.gaussian_elbo_se,
             gain=fit.elbo - fit.laplace_elbo,
+            seed=vb_options["seed"],
+            map_seconds=map_seconds,
             seconds=time.perf_counter() - start,
             error="",
         )
@@ -380,6 +467,46 @@ def vb_one(path: Path, taper: str | None, alpha: float, out: Path, options: dict
     return row
 
 
+def rake_one(path: Path, taper: str | None, alpha: float, out: Path, options: dict) -> dict:
+    """Worker: rake one PUMA and save. Never raises. ``taper`` and ``alpha``
+    are ignored; they are in the signature to share the sweep's dispatch."""
+    from pmedm_vb.assemble.inputs import PMEDMInputs
+    from pmedm_vb.rake import rake_ipf, rake_sinkhorn
+
+    puma, method = path.name, options["method"]
+    log_to_file(out / "logs" / f"{puma}_{method}.log")
+    floor = options["variance_floor"]
+    row = {"puma": puma, "method": method,
+           "variance_floor": "none" if floor is None else str(floor)}
+    settings = {k: options[k] for k in ("tol", "max_sweeps") if options[k] is not None}
+    start = time.perf_counter()
+    try:
+        inputs = PMEDMInputs.load(path)
+        result = (rake_ipf(inputs, **settings) if method == "ipf"
+                  else rake_sinkhorn(inputs, variance_floor=floor, **settings))
+        row.update(
+            n_constraints=inputs.n_constraints,
+            converged=result.converged,
+            n_sweeps=result.n_sweeps,
+            max_residual=float(result.trace[-1]),
+            n_infeasible=int(result.infeasible.size),
+            total=float(result.W.sum()),
+            N=float(inputs.N),
+            seconds=time.perf_counter() - start,
+            error="",
+        )
+        np.savez(
+            out / f"{puma}_{method}.npz",
+            W=result.W, residual=result.residual, trace=result.trace,
+            infeasible=result.infeasible, theta=result.theta,
+            **{key: np.asarray(value) for key, value in row.items()},
+        )
+    except Exception as error:
+        row.update(seconds=time.perf_counter() - start, error=repr(error))
+        logger.error("failed:\n%s", traceback.format_exc())
+    return row
+
+
 #: Summary columns per step, in order; read back from a saved result on resume.
 SUMMARY_KEYS = {
     "solve": ["puma", "taper", "alpha", "variance_floor", "n_constraints", "converged", "n_iter",
@@ -387,7 +514,9 @@ SUMMARY_KEYS = {
               "log_evidence", "seconds", "error"],
     "vb": ["puma", "taper", "alpha", "variance_floor", "family", "n_constraints", "converged",
            "n_iter", "elbo", "elbo_se", "gaussian_elbo", "gaussian_elbo_se", "laplace_elbo",
-           "laplace_elbo_se", "gain", "seconds", "error"],
+           "laplace_elbo_se", "gain", "seed", "map_seconds", "seconds", "error"],
+    "rake": ["puma", "method", "variance_floor", "n_constraints", "converged", "n_sweeps",
+             "max_residual", "n_infeasible", "total", "N", "seconds", "error"],
 }
 
 
@@ -413,7 +542,7 @@ def run_sweep(
     import json
 
     root = inputs_root(area, options.pop("epsilon", None))
-    pumas = sorted(p for p in root.glob("*") if (p / "manifest.json").exists())
+    pumas = assembled_pumas(root, args.puma)
     if not pumas:
         raise SystemExit(f"no assembled problems under {root}; run the assemble step first")
     out = out or processed_dir() / "runs" / time.strftime("%Y%m%d-%H%M%S")
@@ -423,6 +552,13 @@ def run_sweep(
     rows, tasks = [], []
     for path in pumas:
         manifest = json.loads((path / "manifest.json").read_text())
+        if step == "rake":  # one fit per PUMA: no Sigma, so no taper or alpha
+            done = out / f"{path.name}_{options['method']}.npz"
+            if done.exists():
+                rows.append(saved_row(done, step))
+            else:
+                tasks.append((estimated_cost(manifest, "tract"), path, None, float("nan")))
+            continue
         for taper in (None if t == "none" else t for t in tapers):
             for alpha in alphas:
                 done = out / f"{result_name(path.name, taper, alpha)}.npz"
@@ -441,21 +577,23 @@ def run_sweep(
         threads = max(1, cores // workers)
         logger.info("%d workers x %d BLAS thread(s), largest problems first", workers, threads)
         with pool(workers, threads) as executor:
+            worker = {"solve": solve_one, "vb": vb_one, "rake": rake_one}[step]
             futures = [
-                executor.submit(solve_one, path, taper, alpha, out, options) if step == "solve"
-                else executor.submit(vb_one, path, taper, alpha, out, options)
+                executor.submit(worker, path, taper, alpha, out, options)
                 for _, path, taper, alpha in tasks
             ]
             for count, future in enumerate(as_completed(futures), start=1):
                 row = future.result()
                 rows.append(row)
+                label = (f"{row['puma']}_{row['method']}" if step == "rake"
+                         else result_name(row["puma"], row["taper"], row["alpha"]))
                 logger.info(
-                    "%d of %d done: %s %s a=%g %s",
-                    count, len(tasks), row["puma"], row["taper"], row["alpha"],
-                    f"FAILED {row['error']} -- see "
-                    f"{out / 'logs' / (result_name(row['puma'], row['taper'], row['alpha']) + '.log')}"
+                    "%d of %d done: %s %s", count, len(tasks), label,
+                    f"FAILED {row['error']} -- see {out / 'logs' / (label + '.log')}"
                     if row["error"] else
-                    f"converged={row['converged']} iters={row['n_iter']} {row['seconds']:.0f}s",
+                    f"converged={row['converged']} "
+                    f"{'sweeps' if step == 'rake' else 'iters'}="
+                    f"{row['n_sweeps' if step == 'rake' else 'n_iter']} {row['seconds']:.0f}s",
                 )
                 write_summary(rows, out)
     write_summary(rows, out)
@@ -464,7 +602,9 @@ def run_sweep(
 
 
 def write_summary(rows: list[dict], out: Path) -> None:
-    frame = pd.DataFrame(rows).sort_values(["puma", "taper", "alpha"], ascending=[True, True, False])
+    frame = pd.DataFrame(rows)
+    keys = [k for k in ("puma", "method", "taper", "alpha") if k in frame]
+    frame = frame.sort_values(keys, ascending=[k != "alpha" for k in keys])
     frame.to_csv(out / "summary.csv", index=False)
 
 
@@ -476,11 +616,15 @@ def main() -> None:
         run_prefetch(area)
     elif args.step == "assemble":
         run_assemble(args, area, cores, args.rebuild, args.epsilon)
+    elif args.step == "heldout":
+        run_heldout(args, area, cores)
     else:
         options = {"max_iter": args.max_iter, "draws": args.draws,
                    "learning_rate": args.learning_rate, "variance_floor": args.variance_floor,
                    "epsilon": args.epsilon,
-                   **({"family": args.family} if args.step == "vb" else {})}
+                   **({"family": args.family, "seed": args.seed} if args.step == "vb" else {}),
+                   **({"method": args.method, "tol": args.tol, "max_sweeps": args.max_sweeps}
+                      if args.step == "rake" else {})}
         run_sweep(args, args.step, area, cores, args.alpha, args.taper, args.out, options)
 
 

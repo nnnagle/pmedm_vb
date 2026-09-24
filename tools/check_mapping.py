@@ -36,7 +36,11 @@ screen for finding a broken mapping, not a hypothesis test.
 
 Usage::
 
-    $CONDA_PREFIX/bin/python tools/check_mapping.py [PUMA] [STATE] [COUNTY]
+    $CONDA_PREFIX/bin/python tools/check_mapping.py [--heldout] [PUMA] [STATE] [COUNTY]
+
+``--heldout`` checks the held-out tables (``heldout_tables``) instead of the
+constraints, after validating each one's cell claims against the published
+cell list.
 """
 
 from __future__ import annotations
@@ -46,7 +50,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-from pmedm_vb.assemble.constraints import default_tables
+from pmedm_vb.assemble.constraints import default_tables, heldout_tables
 from pmedm_vb.assemble.households import build_units, person_counts
 from pmedm_vb.assemble.targets import build_targets
 from pmedm_vb.config import StudyArea
@@ -54,9 +58,11 @@ from pmedm_vb.data.geography import puma_crosswalk_whole
 from pmedm_vb.data.variance import SDR_FACTOR
 
 
-def check(area: StudyArea, puma: str, geography: str = "tract") -> pd.DataFrame:
+def check(
+    area: StudyArea, puma: str, geography: str = "tract", heldout: bool = False
+) -> pd.DataFrame:
     """Per-constraint PUMS total, published total, standard error and ``z``."""
-    tables = default_tables(area)
+    tables = heldout_tables(area, geography) if heldout else default_tables(area)
     at_level = [t for t in tables if t.geography == geography]
 
     units = build_units(area, puma, tables)
@@ -93,12 +99,18 @@ def check(area: StudyArea, puma: str, geography: str = "tract") -> pd.DataFrame:
 
 
 def main() -> int:
-    puma = sys.argv[1] if len(sys.argv) > 1 else "4701501"
-    state = sys.argv[2] if len(sys.argv) > 2 else "47"
-    county = sys.argv[3] if len(sys.argv) > 3 else "093"
+    heldout = "--heldout" in sys.argv
+    argv = [a for a in sys.argv if a != "--heldout"]
+    puma = argv[1] if len(argv) > 1 else "4701501"
+    state = argv[2] if len(argv) > 2 else "47"
+    county = argv[3] if len(argv) > 3 else "093"
     area = StudyArea(name="check", state=state, year=2024, counties=(county,))
 
-    frame = check(area, puma)
+    if heldout:
+        for table in heldout_tables(area, "tract"):
+            table.validate(area)
+        print("held-out tables: every published cell claimed or waived exactly once\n")
+    frame = check(area, puma, heldout=heldout)
     worst = frame.reindex(frame["z"].abs().sort_values(ascending=False).index)
     print(f"PUMA {puma}: largest standardised gaps\n")
     print(

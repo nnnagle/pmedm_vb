@@ -137,6 +137,11 @@ def _solve_step(
     derivative at least 1 in size. Returns ``delta`` and the log margins
     before the step.
     """
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        return _newton(log_w, x, groups, n_groups, log_target, theta, inv_rho, iters, tol)
+
+
+def _newton(log_w, x, groups, n_groups, log_target, theta, inv_rho, iters, tol):
     log_x = np.log(x)
     delta = np.zeros(n_groups)
     start = None
@@ -185,9 +190,10 @@ def _fit(
             delta, log_m = _solve_step(block, x, areas, n_areas, log_targets[rows],
                                        theta[rows], inv_rho[rows])
             infeasible.update(rows[~np.isfinite(log_m) & ~zero].tolist())
-            residual[rows] = np.where(
-                zero, np.nan, log_m - log_targets[rows] - theta[rows] * inv_rho[rows]
-            )
+            with np.errstate(invalid="ignore"):
+                residual[rows] = np.where(
+                    zero, np.nan, log_m - log_targets[rows] - theta[rows] * inv_rho[rows]
+                )
             theta[rows] += delta
             log_W[:, carriers] = block - delta[areas][:, None] * x
         if fix_total:
