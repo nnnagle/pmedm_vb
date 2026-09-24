@@ -85,7 +85,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--samples", type=int, default=2000)
     parser.add_argument("--thin", type=int, default=10, help="keep lambda every this many iterations")
     parser.add_argument("--step-size", type=float, default=0.1)
-    parser.add_argument("--trajectory", type=float, default=1.5)
+    parser.add_argument("--trajectory", type=float, default=3.0,
+                        help="nominal integration time; 3.0 mixed rare directions far better than 1.5")
     parser.add_argument("--target-accept", type=float, default=0.8)
     parser.add_argument("--max-leapfrog", type=int, default=1000)
     parser.add_argument("--init-max-share", type=float, default=0.01,

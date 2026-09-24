@@ -65,8 +65,11 @@ This is not production code. This is research code to write a paper. The paper w
   of a PUMA's units sit on one household record in one block group, and the
   posterior rejects those draws (`log pi - log q` hundreds to thousands of
   nats below typical). More draws per step halve the tail; a statewide
-  support makes it worse. Next: an MCMC reference posterior for one PUMA.
-  `solvers_synopsis.md` has the evidence and the options.
+  support makes it worse. Against an HMC reference for one PUMA, VB's bulk
+  is nearly right but its tail and its rare-group intervals are not; a short
+  HMC run in VB's whitened coordinates reproduces the reference in minutes,
+  and is the proposed simulator pending the other PUMAs and alpha 0.1.
+  `solvers_synopsis.md` has the evidence, the method and what is left.
 - **Group quarters.** A PUMS shortfall the fit cannot place; see the open
   questions in `census_data_sources.md`.
 

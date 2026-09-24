@@ -24,6 +24,10 @@
 # checkpoints, so a job that hits its time limit is finished by resubmitting
 # with --out pointing at the first job's directory and the same settings.
 #
+# Keep the campus-gpu partition and QoS: they give a V100. Submitted to another
+# partition (short, say) the job can land on a T4, which runs this float64
+# sampler about 30x slower (runs 6273419 and 6275306).
+#
 # One GPU of any size will do: at 32 chains the largest tensor is tens of MB and
 # the dense whitening matrix under 1 GB, so the 16 GB cards are fine.
 

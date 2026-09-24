@@ -128,7 +128,7 @@ class HMCSettings:
     """
 
     step_size: float = 0.1
-    trajectory: float = 1.5
+    trajectory: float = 3.0
     target_accept: float = 0.8
     max_leapfrog: int = 1000
     divergence: float = 1000.0
