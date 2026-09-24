@@ -74,9 +74,14 @@ from scipy.special import logsumexp
 import pmedm_vb
 from pmedm_vb.assemble.inputs import PMEDMInputs
 from pmedm_vb.config import processed_dir
+from pmedm_vb.progress import record_run
 from pmedm_vb.solvers.base import ConstraintOperator, dual_state
 from pmedm_vb.solvers.map_dual import DualHessian, solve_map
-from pmedm_vb.solvers.vb import StructuredGaussian, _DualTarget
+from pmedm_vb.solvers.vb import LAYERS, StructuredGaussian, _DualTarget
+
+#: Skew-layer arrays a saved VB result may carry (see StructuredGaussian.skew_params).
+SKEW_KEYS = tuple(f"{prefix}{field}" for _, prefix in LAYERS
+                  for field in ("skew", "log_tail", "scale")) + ("pair_T", "pair_B")
 
 
 def parse_args() -> argparse.Namespace:
@@ -149,7 +154,7 @@ def load_vb(path: Path) -> tuple[StructuredGaussian, float, float]:
     """The fitted VB family and its ELBO, from a run_map.py vb result."""
     with np.load(path) as saved:
         count = sum(1 for key in saved.files if key.startswith("block_"))
-        skewed = {key: saved[key] for key in ("skew", "log_tail", "scale") if key in saved.files}
+        skewed = {key: saved[key] for key in SKEW_KEYS if key in saved.files}
         return StructuredGaussian(
             mean=saved["mean"],
             rows=[saved[f"rows_{i}"] for i in range(count)],
@@ -367,6 +372,7 @@ def main() -> None:
     pumas = args.puma or sorted(p.name for p in root.glob("*") if (p / "manifest.json").exists())
     out = args.out or ((args.run / "diagnostics") if args.run else Path("diagnostics"))
     out.mkdir(parents=True, exist_ok=True)
+    record_run(out, args)
     jobs = [
         (argparse.Namespace(**{**vars(args), "puma": puma, "taper": taper, "alpha": alpha}),
          out / f"{puma}_{taper}_a{alpha:g}.txt")

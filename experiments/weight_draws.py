@@ -57,6 +57,7 @@ from scipy.special import logsumexp
 import pmedm_vb
 from pmedm_vb.assemble.inputs import PMEDMInputs
 from pmedm_vb.config import processed_dir
+from pmedm_vb.progress import record_run
 from pmedm_vb.solvers.base import ConstraintOperator
 
 from laplace_diagnostic import batched_f, load_vb, quantiles
@@ -245,6 +246,7 @@ def main() -> None:
     pumas = args.puma or sorted(p.name for p in root.glob("*") if (p / "manifest.json").exists())
     out = args.out or (args.run / "weight_draws")
     out.mkdir(parents=True, exist_ok=True)
+    record_run(out, args)
     jobs = [
         argparse.Namespace(**{**vars(args), "puma": puma, "taper": taper, "alpha": alpha,
                               "report": out / f"{puma}_{taper}_a{alpha:g}.txt"})

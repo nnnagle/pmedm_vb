@@ -146,3 +146,79 @@ def design_weights(
         shares = shares / shares.sum()
 
     return np.outer(shares, unit / total)
+
+
+def support_weights(weights: pd.Series, in_puma: np.ndarray, epsilon: float) -> np.ndarray:
+    """Design weights over a statewide support, still summing to the PUMA's ``N``.
+
+    ``weights`` are every state record's own sample weight, ``d_state``, and
+    ``in_puma`` marks the PUMA's records, whose weights ``d_puma`` sum to ``N``.
+    The PUMA's records keep ``(1 - epsilon) d_puma``, and every state record,
+    the PUMA's own included, adds ``epsilon d_state N / sum(d_state)``, so
+
+    .. math::
+
+        \\sum d = (1 - \\epsilon) N + \\epsilon N = N .
+
+    A PUMA record therefore carries both terms, and a record elsewhere only the
+    second. ``epsilon = 0`` gives the PUMA's own weights back, zeros elsewhere.
+    """
+    if not 0 <= epsilon < 1:
+        raise ValueError(f"epsilon must be in [0, 1), got {epsilon}")
+    d_state = pd.to_numeric(weights, errors="coerce").to_numpy(dtype=float)
+    in_puma = np.asarray(in_puma, dtype=bool)
+    if not np.all(np.isfinite(d_state)) or np.any(d_state < 0):
+        raise ValueError("unit weights must be finite and non-negative")
+    N = d_state[in_puma].sum()
+    if N <= 0:
+        raise ValueError("the PUMA's own weights sum to zero")
+    return np.where(in_puma, (1 - epsilon) * d_state, 0.0) + epsilon * d_state * N / d_state.sum()
+
+
+def collapse_units(
+    X_T: sp.spmatrix,
+    X_B: sp.spmatrix,
+    is_group_quarters: np.ndarray,
+    weights: np.ndarray,
+) -> tuple[sp.csr_matrix, sp.csr_matrix, np.ndarray, np.ndarray]:
+    """Merge units with identical attribute rows, summing their design weights.
+
+    Two units are merged when their ``X_T`` and ``X_B`` rows are equal and both
+    are households or both group-quarters persons. ``f(lambda)`` depends on the
+    units only through ``q`` and ``X``, and ``q' e^{-X lambda}`` sums over units,
+    so merging identical rows and adding their ``q`` leaves it exactly
+    unchanged. So does ``p``, merged: a merged row's weight splits back over
+    its records in proportion to their design weights.
+
+    Rows are ordered by first appearance, so input without duplicates comes
+    back in its own order. Rows whose total weight is zero are dropped; they
+    can receive no weight in any zone.
+
+    Returns
+    -------
+    X_T, X_B:
+        The merged attribute matrices.
+    weights:
+        ``(n_rows,)`` summed design weights.
+    row:
+        ``(n_units,)`` the merged row each input unit went to, or ``-1`` for
+        a unit in a dropped row.
+    """
+    X_T, X_B = sp.csr_matrix(X_T), sp.csr_matrix(X_B)
+    weights = np.asarray(weights, dtype=float)
+    gq = np.asarray(is_group_quarters, dtype=float)[:, None]
+    key = np.hstack([X_T.toarray(), X_B.toarray(), gq])
+    _, first, inverse = np.unique(key, axis=0, return_index=True, return_inverse=True)
+    inverse = inverse.reshape(-1)
+    # np.unique sorts; renumber by first appearance.
+    order = np.argsort(first)
+    rank = np.empty_like(order)
+    rank[order] = np.arange(order.size)
+    row = rank[inverse]
+
+    summed = np.bincount(row, weights=weights, minlength=order.size)
+    keep = summed > 0
+    renumber = np.full(order.size, -1)
+    renumber[keep] = np.arange(int(keep.sum()))
+    representative = first[order][keep]
+    return X_T[representative], X_B[representative], summed[keep], renumber[row]

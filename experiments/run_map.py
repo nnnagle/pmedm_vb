@@ -28,6 +28,16 @@ keeps what finished. Fits whose ``.npz`` already exists in ``--out`` are
 skipped, so re-submitting with the same ``--out`` resumes. A fit that raises
 is recorded in ``summary.csv`` with its error and does not stop the others.
 
+**Statewide support.** ``--epsilon E`` (all steps but prefetch) builds and
+solves the problems whose support is every record in the state, the PUMA's own
+keeping ``1 - E`` of the prior (see :mod:`pmedm_vb.assemble.build`). They live
+in their own inputs directory, ``<area>-state-e<E>``, so the PUMA-only inputs
+are untouched; pass that name as ``--area`` to the diagnostics. Assembly writes
+``support_summary.csv`` there, one row per PUMA: records and merged rows, how
+many rows are new to the support and the share of the prior on them. Each
+PUMA's directory also gets ``support_columns.parquet``, the rows and records
+carrying each constraint category with and without the wider support.
+
 **Logs.** Each worker task writes its progress -- every Newton or VB iteration --
 to its own file, ``<out>/logs/<puma>_<taper>_a<alpha>.log`` for a fit and
 ``<inputs>/logs/assemble_<puma>.log`` for assembly, rather than interleaving
@@ -50,7 +60,7 @@ import numpy as np
 import pandas as pd
 
 from pmedm_vb.config import StudyArea, processed_dir
-from pmedm_vb.progress import logger
+from pmedm_vb.progress import logger, record_run
 
 #: Environment variables that set BLAS/OpenMP thread counts in a fresh process.
 THREAD_VARIABLES = (
@@ -94,12 +104,18 @@ def parse_args() -> argparse.Namespace:
              "variance; a number floors at that value; 'none' (default) leaves them",
     )
     parser.add_argument(
-        "--family", choices=["gaussian", "skewed"], default="gaussian",
-        help="vb: 'skewed' adds a second stage fitting a per-coordinate skew",
+        "--family", choices=["gaussian", "skewed", "sumdiff"], default="gaussian",
+        help="vb: 'skewed' adds a second stage fitting a per-coordinate skew; 'sumdiff' "
+             "adds skew layers on tract+block group sums and differences as well",
     )
     parser.add_argument("--max-iter", type=int, default=1000, help="vb: iteration cap (per stage)")
     parser.add_argument("--draws", type=int, default=8, help="vb: Monte Carlo draws per step")
     parser.add_argument("--learning-rate", type=float, default=0.02, help="vb: Adam step")
+    parser.add_argument(
+        "--epsilon", type=float, default=None,
+        help="assemble, solve, vb: statewide support with this prior share off the "
+             "PUMA's own records (default: the PUMA's records only)",
+    )
     return parser.parse_args()
 
 
@@ -122,8 +138,9 @@ def study_area(args: argparse.Namespace) -> StudyArea:
     )
 
 
-def inputs_root(area: StudyArea) -> Path:
-    return processed_dir() / "inputs" / area.slug
+def inputs_root(area: StudyArea, epsilon: float | None = None) -> Path:
+    name = area.slug if epsilon is None else f"{area.slug}-state-e{epsilon:g}"
+    return processed_dir() / "inputs" / name
 
 
 def available_cores(requested: int | None) -> int:
@@ -174,7 +191,9 @@ def run_prefetch(area: StudyArea) -> None:
 # -- assemble ----------------------------------------------------------------
 
 
-def assemble_one(area: StudyArea, puma: str, path: Path) -> tuple[str, float]:
+def assemble_one(
+    area: StudyArea, puma: str, path: Path, epsilon: float | None = None
+) -> tuple[str, float]:
     """Worker: build and save one PUMA's problem."""
     from pmedm_vb.assemble.build import build_puma
     from pmedm_vb.assemble.constraints import default_tables
@@ -183,25 +202,30 @@ def assemble_one(area: StudyArea, puma: str, path: Path) -> tuple[str, float]:
     log_to_file(path.parent / "logs" / f"assemble_{puma}.log")
     start = time.perf_counter()
     zones = puma_crosswalk_whole(area)
-    build_puma(area, puma, default_tables(area), zones=zones).save(path)
+    build_puma(area, puma, default_tables(area), zones=zones, epsilon=epsilon).save(path)
     return puma, time.perf_counter() - start
 
 
-def run_assemble(area: StudyArea, cores: int, rebuild: bool) -> None:
+def run_assemble(
+    args: argparse.Namespace,
+    area: StudyArea, cores: int, rebuild: bool, epsilon: float | None = None
+) -> None:
     from pmedm_vb.data.geography import puma_crosswalk_whole
 
     pumas = sorted(str(p) for p in puma_crosswalk_whole(area)["puma_geoid"].unique())
-    root = inputs_root(area)
+    root = inputs_root(area, epsilon)
+    record_run(root, args)
     todo = [p for p in pumas if rebuild or not (root / p / "manifest.json").exists()]
     logger.info(
         "assemble %s: %d PUMAs, %d to build, into %s", area.slug, len(pumas), len(todo), root
     )
     if not todo:
+        write_support_summary(root, pumas, epsilon)
         return
     workers = min(cores, len(todo))
     failed = []
     with pool(workers, max(1, cores // workers)) as executor:
-        futures = {executor.submit(assemble_one, area, p, root / p): p for p in todo}
+        futures = {executor.submit(assemble_one, area, p, root / p, epsilon): p for p in todo}
         for future in as_completed(futures):
             try:
                 puma, seconds = future.result()
@@ -213,8 +237,30 @@ def run_assemble(area: StudyArea, cores: int, rebuild: bool) -> None:
                     "PUMA %s failed; see %s\n%s", puma,
                     root / "logs" / f"assemble_{puma}.log", traceback.format_exc(),
                 )
+    write_support_summary(root, pumas, epsilon)
     if failed:
         raise SystemExit(f"assembly failed for PUMA(s) {failed}")
+
+
+def write_support_summary(root: Path, pumas: list[str], epsilon: float | None) -> None:
+    """Collect each PUMA's support counts into ``<root>/support_summary.csv`` and log them."""
+    import json
+
+    if epsilon is None:
+        return
+    rows = []
+    for puma in pumas:
+        manifest = root / puma / "manifest.json"
+        if manifest.exists():
+            support = json.loads(manifest.read_text()).get("support")
+            if support:
+                rows.append({"puma": puma, **support})
+    if not rows:
+        return
+    frame = pd.DataFrame(rows)
+    frame.to_csv(root / "support_summary.csv", index=False)
+    logger.info("support (epsilon=%g), also in %s:\n%s",
+                epsilon, root / "support_summary.csv", frame.to_string(index=False))
 
 
 # -- solve -------------------------------------------------------------------
@@ -325,8 +371,7 @@ def vb_one(path: Path, taper: str | None, alpha: float, out: Path, options: dict
             elbo_trace=fit.elbo_trace,
             **{f"rows_{i}": rows for i, rows in enumerate(fit.q.rows)},
             **{f"block_{i}": block for i, block in enumerate(fit.q.blocks)},
-            **({"skew": fit.q.skew, "log_tail": fit.q.log_tail, "scale": fit.q.scale}
-               if fit.q.is_skewed else {}),
+            **fit.q.skew_params(),
             **{key: np.asarray(value) for key, value in row.items()},
         )
     except Exception as error:
@@ -355,6 +400,7 @@ def saved_row(path: Path, step: str) -> dict:
 
 
 def run_sweep(
+    args: argparse.Namespace,
     step: str,
     area: StudyArea,
     cores: int,
@@ -366,12 +412,13 @@ def run_sweep(
     """Run ``solve`` or ``vb`` over every (PUMA, taper, alpha) not already in ``out``."""
     import json
 
-    root = inputs_root(area)
+    root = inputs_root(area, options.pop("epsilon", None))
     pumas = sorted(p for p in root.glob("*") if (p / "manifest.json").exists())
     if not pumas:
         raise SystemExit(f"no assembled problems under {root}; run the assemble step first")
     out = out or processed_dir() / "runs" / time.strftime("%Y%m%d-%H%M%S")
     out.mkdir(parents=True, exist_ok=True)
+    record_run(out, args)
 
     rows, tasks = [], []
     for path in pumas:
@@ -428,12 +475,13 @@ def main() -> None:
     if args.step == "prefetch":
         run_prefetch(area)
     elif args.step == "assemble":
-        run_assemble(area, cores, args.rebuild)
+        run_assemble(args, area, cores, args.rebuild, args.epsilon)
     else:
         options = {"max_iter": args.max_iter, "draws": args.draws,
                    "learning_rate": args.learning_rate, "variance_floor": args.variance_floor,
+                   "epsilon": args.epsilon,
                    **({"family": args.family} if args.step == "vb" else {})}
-        run_sweep(args.step, area, cores, args.alpha, args.taper, args.out, options)
+        run_sweep(args, args.step, area, cores, args.alpha, args.taper, args.out, options)
 
 
 if __name__ == "__main__":

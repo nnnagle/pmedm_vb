@@ -64,3 +64,39 @@ def stage(message: str) -> Iterator[SimpleNamespace]:
         raise
     suffix = f" ({note.detail})" if note.detail else ""
     logger.info("%s: done in %.1fs%s", message, time.perf_counter() - start, suffix)
+
+
+def record_run(directory, args) -> None:
+    """Append this invocation to ``<directory>/run_args.jsonl``.
+
+    One JSON line per call: time, command line, every parsed argument (defaults
+    included), git commit, Slurm job id and host -- so a results directory says
+    how it was made. Appending keeps a resumed job's history rather than
+    overwriting the first record.
+    """
+    import json
+    import os
+    import socket
+    import subprocess
+    from pathlib import Path
+
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10,
+            cwd=Path(__file__).resolve().parent,
+        ).stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        commit = None
+    record = {
+        "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "argv": sys.argv,
+        "args": {key: (str(value) if isinstance(value, Path) else value)
+                 for key, value in vars(args).items()},
+        "commit": commit,
+        "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
+        "host": socket.gethostname(),
+    }
+    path = Path(directory) / "run_args.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        handle.write(json.dumps(record, default=str) + "\n")

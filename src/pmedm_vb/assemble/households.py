@@ -119,10 +119,14 @@ class Units:
 
 def build_units(
     area: StudyArea,
-    puma: str,
+    puma: str | None,
     tables: Sequence[ConstraintTable],
 ) -> Units:
     """Assemble one PUMA's unit frame from the PUMS files.
+
+    ``puma=None`` keeps every record in the state file instead, for the
+    statewide support of :func:`~pmedm_vb.assemble.build.build_puma`; the
+    frame's ``puma`` is then ``"state"``.
 
     Columns are taken from what the constraint specifications declare, plus
     :data:`STRUCTURAL_COLUMNS`. The PUMS replicate weights are not read: PMEDM
@@ -151,8 +155,10 @@ def build_units(
         replicate_weights=False,
     )
 
-    housing = housing[housing["puma_geoid"] == puma]
-    persons = persons[persons["puma_geoid"] == puma]
+    if puma is not None:
+        housing = housing[housing["puma_geoid"] == puma]
+        persons = persons[persons["puma_geoid"] == puma]
+    label = "the state" if puma is None else f"PUMA {puma!r}"
 
     is_gq = housing["TYPEHUGQ"].isin(TYPEHUGQ_GROUP_QUARTERS)
     # Occupied means a housing unit with a tenure. Testing TEN alone would keep
@@ -161,7 +167,7 @@ def build_units(
 
     units = housing[is_gq | occupied].copy()
     if units.empty:
-        raise ValueError(f"PUMA {puma!r} has no occupied or group-quarters records")
+        raise ValueError(f"{label} has no occupied or group-quarters records")
     units = units.set_index("SERIALNO")
     units["is_group_quarters"] = units["TYPEHUGQ"].isin(TYPEHUGQ_GROUP_QUARTERS)
 
@@ -176,7 +182,7 @@ def build_units(
     counts = occupants.groupby("SERIALNO").size()
     if len(counts) != len(gq_index) or not (counts == 1).all():
         raise ValueError(
-            f"{(counts != 1).sum()} group-quarters record(s) in PUMA {puma} do not "
+            f"{(counts != 1).sum()} group-quarters record(s) in {label} do not "
             f"hold exactly one person, and {len(gq_index) - len(counts)} hold none; "
             f"PWGTP is then not the unit's weight"
         )
@@ -189,7 +195,7 @@ def build_units(
     )
 
     frame = Units(
-        units=units, persons=persons, puma=str(puma), dropped_persons=dropped
+        units=units, persons=persons, puma="state" if puma is None else str(puma), dropped_persons=dropped
     )
     frame.validate()
     return frame

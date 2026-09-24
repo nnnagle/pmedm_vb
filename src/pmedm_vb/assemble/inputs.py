@@ -46,6 +46,8 @@ _DENSE = ("q", "Y_T", "Y_B", "sigma_v")
 #: Written only when present; ``None`` is the exactly-diagonal case.
 _OPTIONAL_DENSE = ("sigma_l",)
 _FRAMES = ("units", "zones", "tracts", "block_groups")
+#: Frames written only when present: the statewide support's bookkeeping.
+_OPTIONAL_FRAMES = ("unit_members", "support_columns")
 
 
 @dataclass
@@ -95,6 +97,15 @@ class PMEDMInputs:
         total-population tables stay matchable.
     tract_constraints, bg_constraints:
         Column labels for ``X_T``/``Y_T`` and ``X_B``/``Y_B``.
+    unit_members, support, support_columns:
+        ``None`` for a problem over the PUMA's own records. With a statewide
+        support (``build_puma(..., epsilon=...)``) a unit is a merged row of
+        identical records, and ``unit_members`` has one row per record:
+        ``SERIALNO``, ``row`` (its unit), ``weight`` (its design weight) and
+        ``in_puma``. ``n`` and ``N`` still count the PUMA's own records.
+        ``support`` holds ``epsilon`` and the row counts, and
+        ``support_columns`` per-constraint counts of the rows carrying each
+        category; see :func:`~pmedm_vb.assemble.build.support_report`.
     """
 
     q: np.ndarray
@@ -115,6 +126,9 @@ class PMEDMInputs:
     block_groups: pd.DataFrame
     tract_constraints: list[str]
     bg_constraints: list[str]
+    unit_members: pd.DataFrame | None = None
+    support: dict | None = None
+    support_columns: pd.DataFrame | None = None
 
     # -- shape accessors -------------------------------------------------
 
@@ -306,6 +320,19 @@ class PMEDMInputs:
             (len(self.zones) == self.n_zones,
              "zones frame does not match the height of q"),
         ]
+        if self.unit_members is not None:
+            members = self.unit_members
+            kept = members[members["row"] >= 0]
+            summed = kept.groupby("row")["weight"].sum().reindex(range(self.n_units))
+            checks += [
+                (int(members["in_puma"].sum()) == self.n,
+                 f"unit_members has {int(members['in_puma'].sum())} PUMA records, "
+                 f"expected n = {self.n}"),
+                (bool(np.allclose(summed.to_numpy(), self.units["weight"].to_numpy())),
+                 "unit_members' weights do not sum to each unit's weight"),
+                (bool(np.isclose(self.units["weight"].sum(), self.N)),
+                 f"unit weights sum to {self.units['weight'].sum():,.1f}, expected N = {self.N:,.1f}"),
+            ]
         checks.append(
             (self.sigma_v.shape == (self.n_constraints,),
              f"sigma_v is {self.sigma_v.shape}, expected {(self.n_constraints,)}")
@@ -348,6 +375,10 @@ class PMEDMInputs:
             sp.save_npz(path / f"{name}.npz", getattr(self, name).tocsr())
         for name in _FRAMES:
             getattr(self, name).to_parquet(path / f"{name}.parquet")
+        for name in _OPTIONAL_FRAMES:
+            value = getattr(self, name)
+            if value is not None:
+                value.to_parquet(path / f"{name}.parquet")
 
         manifest = {
             "pmedm_vb_version": __version__,
@@ -365,6 +396,8 @@ class PMEDMInputs:
                 "n_constraints": int(self.n_constraints),
             },
         }
+        if self.support is not None:
+            manifest["support"] = self.support
         (path / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         return path
 
@@ -387,6 +420,13 @@ class PMEDMInputs:
         )
         fields.update({name: sp.load_npz(path / f"{name}.npz") for name in _SPARSE})
         fields.update({name: pd.read_parquet(path / f"{name}.parquet") for name in _FRAMES})
+        fields.update(
+            {
+                name: pd.read_parquet(path / f"{name}.parquet")
+                for name in _OPTIONAL_FRAMES
+                if (path / f"{name}.parquet").exists()
+            }
+        )
 
         return cls(
             puma=manifest["puma"],
@@ -394,5 +434,6 @@ class PMEDMInputs:
             N=manifest["N"],
             tract_constraints=manifest["tract_constraints"],
             bg_constraints=manifest["bg_constraints"],
+            support=manifest.get("support"),
             **fields,
         )

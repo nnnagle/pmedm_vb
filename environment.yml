@@ -41,6 +41,9 @@ dependencies:
   - pyarrow
   - requests
   - pytest
+  # R-hat, ESS and E-BFMI for the MCMC report. Pinned below 1.0, whose
+  # refactor changes the API.
+  - arviz<1
   # Required. Conda's `python` package does not pull pip in, and without it a
   # bare `pip` falls through PATH to the module's base Anaconda pip -- which
   # writes to the wrong site-packages and is too old for PEP 660 editable
