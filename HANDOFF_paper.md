@@ -30,12 +30,15 @@ computed (`HANDOFF.md` is the running task that produces them).
   contribution it claims. The records below support a framing but do not fix
   one.
 - Notation. `pmedm_derivation.md` and the code use `p, q, X, lambda, Sigma,
-  n, N, W`; confirm before building on it. Three weights appear, and they are
-  easy to conflate: the code's `W = N p` is the expected *population* count
-  per (block group, unit) cell, summing to `N` -- the `w` of Nagle et al.
-  (2013). `pmedm_derivation.md` writes that one `w'`, and uses lowercase
-  `w = n p`, the expected *sample* count, for its likelihood; its first
-  paragraph notes the difference from Nagle et al.
+  n, N, W`; confirm the rest before building on it. **Settled by the author:
+  the paper's weights sum to `N`.** They are sample weights in the survey
+  sense -- a record's weight in a block group is the number of population
+  units it represents there, so weighted sums of records are population
+  counts. That is the code's `W = N p` and the `w` of Nagle et al. (2013).
+  `pmedm_derivation.md` writes it `w'`, and uses lowercase `w = n p` (the
+  expected *sample* count) only to build the multinomial likelihood; in the
+  paper's notation that step becomes `n p = (n/N) W`, which is where the
+  `n/N` on the entropy term comes from.
 
 ## Read first, in order
 
