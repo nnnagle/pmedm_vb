@@ -168,9 +168,9 @@ def main() -> None:
     hmc = frame[frame.method.str.startswith("hmc")]
     if len(hmc):
         lines += ["HMC detail:",
-                  hmc[["method", "puma", "alpha", "seconds", "warmup_seconds", "iterations",
+                  hmc[["method", "puma", "alpha_label", "seconds", "warmup_seconds", "iterations",
                        "divergent", "ess_bulk_min", "ess_bulk_median", "seconds_per_1000_ess_min"]]
-                  .sort_values(["method", "alpha", "puma"])
+                  .sort_values(["method", "alpha_label", "puma"])
                   .to_string(index=False, float_format=lambda v: f"{v:,.1f}"), ""]
     lines += ["All fits:", frame.drop(columns=["alpha_label"]).sort_values(["method", "alpha", "puma"])
               .to_string(index=False, float_format=lambda v: f"{v:,.1f}")]
