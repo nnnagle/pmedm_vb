@@ -60,8 +60,8 @@ while read -r out rest; do
     case "$out" in \#*) continue ;; esac
     mkdir -p "$out"
     echo "=== $(date +%T) run -> $out"
-    if $PY -u experiments/run_mcmc.py sample $rest --out "$out" \
-        && $PY -u experiments/run_mcmc.py report $rest --out "$out" > /dev/null; then
+    if $PY -u experiments/run_mcmc.py sample $rest --out "$out" < /dev/null \
+        && $PY -u experiments/run_mcmc.py report $rest --out "$out" < /dev/null > /dev/null; then
         echo "=== $(date +%T) done $out"
     else
         echo "=== $(date +%T) FAILED $out"; failed=$((failed + 1))
