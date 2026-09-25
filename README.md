@@ -36,6 +36,11 @@ This is not production code. This is research code to write a paper. The paper w
       synopsis's "Left to do" has the list.
 - [ ] end-to-end comparison of the methods across alpha -- `HANDOFF.md`
 - [ ] write experiments (`experiments/`)
+- [ ] before publishing: check `pmedm_derivation.md` against the paper's
+      notation. The paper's weights sum to `N` (survey-style sample weights,
+      the code's `W = N p`); the derivation builds its likelihood in
+      `w = n p`, the expected sample count, and writes `N p` as `w'`.
+      Rewrite it in the paper's notation, or confirm the two agree.
 
 ## Open research questions
 
