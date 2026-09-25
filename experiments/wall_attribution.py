@@ -41,8 +41,17 @@ Writes to ``--out``:
   carriers can reach large weights through a rare one they also carry;
   ``events_led`` says which category drove an event, and ``vb_max_w_led``
   is the largest weight among the events a category led;
+- ``curvature.csv``: for every distinct event cell and for ``--random-cells``
+  cells drawn at random (with ``q > 0``), the curvature of ``-log pi`` at the
+  MAP along the cell's wall normal ``a`` -- its column of the constraint
+  operator, so that its logit is ``log q - a' lambda``. It splits into a data
+  part, ``n a' Cov_p*(X) a`` (the variance under ``p*`` of every cell's
+  loading on ``a``), and a prior part, ``(n^2 / N^2) a' Sigma(alpha) a``. A
+  wall is a direction where both are small. Both are also given per unit
+  length (divided by ``a'a``);
 - ``summary.txt``: per (PUMA, alpha) event counts and the leading categories,
-  and implicated against not-implicated categories' features.
+  the event and random cells' curvature, and implicated against
+  not-implicated categories' features.
 
 Several fits in one call, each ``--fit PUMA ALPHA VB_RUN_DIR``::
 
@@ -88,6 +97,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch", type=int, default=500, help="draws formed at once")
     parser.add_argument("--threshold", type=float, default=0.01, help="share of N")
     parser.add_argument("--top", type=int, default=5, help="constraints kept per event")
+    parser.add_argument("--random-cells", type=int, default=500,
+                        help="random cells whose curvature is the baseline for the event cells'")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path, required=True)
     return parser.parse_args()
@@ -186,6 +197,29 @@ def row_labels(inputs: PMEDMInputs) -> pd.DataFrame:
     })
 
 
+def wall_normal(inputs: PMEDMInputs, zone: int, unit: int) -> np.ndarray:
+    """The cell's column of the stacked constraint operator: its logit is
+    ``log q - a' lambda``."""
+    a = np.zeros(inputs.n_constraints)
+    index, loading = cell_loadings(inputs, zone, unit)
+    np.add.at(a, index, loading)
+    return a
+
+
+def curvature(inputs: PMEDMInputs, op: ConstraintOperator, sigma, p_star: np.ndarray,
+              zone: int, unit: int) -> dict:
+    """Data and prior curvature of ``-log pi`` at the MAP along one cell's wall normal."""
+    a = wall_normal(inputs, zone, unit)
+    v = op.adjoint(a)  # every cell's loading on a
+    mean = float((p_star * v).sum())
+    data = inputs.n * float((p_star * v * v).sum() - mean**2)
+    prior = (inputs.n / inputs.N) ** 2 * float(a @ sigma.matvec(a))
+    norm2 = float(a @ a)
+    return {"data_curv": data, "prior_curv": prior, "norm2": norm2,
+            "data_curv_unit": data / norm2, "prior_curv_unit": prior / norm2,
+            "prior_share": prior / (data + prior)}
+
+
 def find_events(args, puma: str, alpha: float, vb_run: Path, rng) -> tuple[list[dict], list[dict], int]:
     inputs = PMEDMInputs.load(processed_dir() / "inputs" / args.area / puma)
     name = f"{puma}_{args.taper}_a{alpha:g}"
@@ -244,9 +278,28 @@ def find_events(args, puma: str, alpha: float, vb_run: Path, rng) -> tuple[list[
                         "contribution": float(contribution[i]),
                         "share_of_positive": float(contribution[i] / positive) if positive > 0 else np.nan,
                     })
+    sigma = inputs.sigma(alpha, None if args.taper == "none" else args.taper,
+                         floor_spec(args.variance_floor))
+    p_star = map_w / inputs.N
+    zone_index = {z: k for k, z in enumerate(zones)}
+    unit_index = {u: k for k, u in enumerate(serials)}
+    counts = pd.DataFrame(events).groupby(["block_group", "serialno"]).size() if events else {}
+    cells = [("event", zone_index[b], unit_index[u], int(c)) for (b, u), c in
+             (counts.items() if len(counts) else [])]
+    # Cells of units that load on nothing have no wall normal, and cannot be walls.
+    loads = np.asarray(abs(sp.csr_matrix(inputs.X_T)).sum(1)).ravel() + np.asarray(abs(X_B).sum(1)).ravel()
+    live = np.argwhere((inputs.q > 0) & (loads > 0)[None, :])
+    for k in rng.choice(len(live), size=min(args.random_cells, len(live)), replace=False):
+        cells.append(("random", int(live[k][0]), int(live[k][1]), 0))
+    curvatures = []
+    for kind, zone, unit, n_events in cells:
+        curvatures.append({"puma": puma, "alpha": alpha, "kind": kind, "block_group": zones[zone],
+                           "serialno": serials[unit], "events": n_events,
+                           "household_size": float(household_size[unit]),
+                           **curvature(inputs, op, sigma, p_star, zone, unit)})
     logger.info("%s a=%g: %d events in %d draws (%.0fs)", puma, alpha, len(events), args.draws,
                 time.perf_counter() - started)
-    return events, contributions, inputs, unit_max_map, unit_max_vb
+    return events, contributions, inputs, unit_max_map, unit_max_vb, curvatures
 
 
 # -- summary ------------------------------------------------------------------
@@ -302,6 +355,24 @@ def summarise(events: pd.DataFrame, parts: pd.DataFrame, features: pd.DataFrame,
     return "\n".join(lines) + "\n"
 
 
+def curvature_summary(curv: pd.DataFrame) -> str:
+    """Median curvature per unit length, event cells against random ones, by (PUMA, alpha)."""
+    if not len(curv):
+        return ""
+    lines = ["", "== Curvature of -log pi at the MAP along each cell's wall normal, per unit "
+                 "length: medians [quartiles]", "   (a wall = small data and small prior curvature; "
+                 "prior share = prior / (data + prior))"]
+    def cell(x):
+        q1, q2, q3 = np.quantile(x, [0.25, 0.5, 0.75])
+        return f"{q2:.3g} [{q1:.3g}, {q3:.3g}]"
+    for (puma, alpha), group in curv.groupby(["puma", "alpha"], sort=False):
+        lines.append(f"   {puma} alpha {alpha:g}:")
+        for kind, g in group.groupby("kind"):
+            lines.append(f"     {kind:<7} n={len(g):4d}  data {cell(g.data_curv_unit):<30} "
+                         f"prior {cell(g.prior_curv_unit):<30} prior share {cell(g.prior_share)}")
+    return "\n".join(lines) + "\n"
+
+
 def main() -> None:
     args = parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -309,11 +380,13 @@ def main() -> None:
     rng = np.random.default_rng(args.seed)
     floor = floor_spec(args.variance_floor)
 
-    all_events, all_parts, features, fits, maxima = [], [], {}, [], {}
+    all_events, all_parts, features, fits, maxima, all_curv = [], [], {}, [], {}, []
     for puma, alpha, vb_run in args.fit:
         alpha = float(alpha)
         fits.append((puma, alpha))
-        events, parts, inputs, unit_map, unit_vb = find_events(args, puma, alpha, Path(vb_run), rng)
+        events, parts, inputs, unit_map, unit_vb, curv = find_events(
+            args, puma, alpha, Path(vb_run), rng)
+        all_curv += curv
         all_events += events
         all_parts += parts
         if puma not in features:
@@ -366,8 +439,10 @@ def main() -> None:
 
     events.to_csv(args.out / "events.csv", index=False)
     parts.to_csv(args.out / "event_constraints.csv", index=False)
+    curv = pd.DataFrame(all_curv)
+    curv.to_csv(args.out / "curvature.csv", index=False)
     frame.to_csv(args.out / "constraint_features.csv", index=False)
-    text = summarise(events, parts, frame, fits, args.draws)
+    text = summarise(events, parts, frame, fits, args.draws) + curvature_summary(curv)
     (args.out / "summary.txt").write_text(text)
     print(text)
     print(f"written to {args.out}")
