@@ -43,6 +43,14 @@ directory (``<name>_refsummary.npz``) and reused.
 - ``joint``: PSIS k-hat (Laplace and VB, which have a density), and with
   ``--whiten`` and ``--reference`` the whitened-coordinate sd ratio and the
   tract/block group pair statistics.
+- With ``--by-table``, a second long CSV, one row per ``(method, puma,
+  alpha, subset, table, cells, metric, stat)``: the outcome metrics against
+  the published values (``z``, ``abs_z``, ``covers_published``,
+  ``halfwidth_over_moe`` and ``sd_over_se``, the draws' sd over the published
+  SE) per ACS table, over all its cells (``cells = all``) and over the
+  ``sampled`` ones only -- a nonzero estimate whose variance is a sampling
+  variance, not a zero cell's modelled one and not below the zero-count
+  floor (see :func:`outcome_sets`).
 - ``timing``: seconds -- fit, MAP part, drawing -- and for HMC the sampler's
   seconds, its warmup part and seconds per 1,000 bulk ESS (minimum and median
   over coordinates of the kept ``lambda``).
@@ -68,6 +76,7 @@ from pmedm_vb import compare
 from pmedm_vb.assemble.heldout import HeldOut
 from pmedm_vb.assemble.inputs import PMEDMInputs
 from pmedm_vb.config import processed_dir
+from pmedm_vb.data.variance import SDR_FACTOR
 from pmedm_vb.progress import logger, record_run
 from pmedm_vb.solvers.base import ConstraintOperator
 
@@ -94,6 +103,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--whiten", type=Path, default=None,
                         help="skewed VB results directory whose Gaussian part whitened HMC")
     parser.add_argument("--out", type=Path, required=True, help="long CSV to append to")
+    parser.add_argument("--by-table", type=Path, default=None,
+                        help="also append per-table summaries to this CSV (see module docstring)")
     parser.add_argument("--area", default="knox-2024-5yr")
     parser.add_argument("--variance-floor", default="zero")
     parser.add_argument("--draws", type=int, default=4000)
@@ -183,25 +194,41 @@ def method_draws(args, inputs: PMEDMInputs, rng) -> tuple[dict, dict]:
 
 
 def outcome_sets(inputs: PMEDMInputs, heldout: HeldOut | None) -> list[dict]:
-    """Every scored cell set: loadings, level, published values and SEs."""
+    """Every scored cell set: loadings, level, published values and SEs.
+
+    Sets with published values also carry ``names`` (``"{table}.{category}"``
+    per column) and ``sampled``, the cells whose published variance is a
+    sampling variance: a nonzero estimate, a variance at or above its area's
+    zero-count floor (:meth:`PMEDMInputs.zero_cell_variances`, so the floor
+    would not bind), and, for constrained cells, a nonzero replicate spread.
+    Held-out tables carry no replicates, so their test is the first two.
+    """
+    split = inputs.Y_T.size
+    floor = inputs.zero_cell_variances()
+    replicate = SDR_FACTOR * np.square(inputs.sigma_l).sum(axis=1)
     sets = []
-    for level, X, Y, v, names in (
-        ("tract", inputs.X_T, inputs.Y_T, None, inputs.tract_constraints),
-        ("block group", inputs.X_B, inputs.Y_B, None, inputs.bg_constraints),
+    for level, rows, Y, names in (
+        ("tract", slice(0, split), inputs.Y_T, inputs.tract_constraints),
+        ("block group", slice(split, None), inputs.Y_B, inputs.bg_constraints),
     ):
-        split = inputs.Y_T.size
-        flat_v = inputs.sigma_v[:split] if level == "tract" else inputs.sigma_v[split:]
+        v, fl, s = (a[rows].reshape(Y.shape, order="F") for a in (inputs.sigma_v, floor, replicate))
         sets.append(dict(subset=f"constrained_{level.replace(' ', '_')}", level=level,
-                         X=sp.csc_matrix(X), Y=Y, se=np.sqrt(flat_v.reshape(Y.shape, order="F"))))
+                         X=sp.csc_matrix(inputs.X_T if level == "tract" else inputs.X_B),
+                         Y=Y, se=np.sqrt(v), names=list(names),
+                         sampled=(Y > 0) & (s > 0) & (v >= fl)))
     if heldout is not None:
-        for level in ("tract", "block group"):
+        for level, rows, n_areas in (("tract", slice(0, split), inputs.Y_T.shape[0]),
+                                     ("block group", slice(split, None), inputs.Y_B.shape[0])):
+            area_floor = floor[rows][:n_areas]  # the floor is per area: any column's copy
             relation = np.array(heldout.relation(level))
             for kind in ("related", "less_related"):
                 cols = np.flatnonzero(relation == kind)
+                Y, v = heldout.Y[level][:, cols], heldout.v[level][:, cols]
                 sets.append(dict(
                     subset=f"heldout_{kind}_{level.replace(' ', '_')}", level=level,
-                    X=sp.csc_matrix(heldout.X[level])[:, cols],
-                    Y=heldout.Y[level][:, cols], se=np.sqrt(heldout.v[level][:, cols]),
+                    X=sp.csc_matrix(heldout.X[level])[:, cols], Y=Y, se=np.sqrt(v),
+                    names=[heldout.names[level][c] for c in cols],
+                    sampled=(Y > 0) & (v > 0) & (v >= area_floor[:, None]),
                 ))
     matrix, meta = compare.outcome_matrix(inputs)
     cross = np.flatnonzero(meta["kind"].to_numpy() == "crosstab")
@@ -350,6 +377,28 @@ def rows_for(base: dict, subset: str, metric: str, values: np.ndarray, stats) ->
     return out
 
 
+#: Metrics against the published values that ``--by-table`` breaks down.
+TABLE_METRICS = ("z", "abs_z", "covers_published", "halfwidth_over_moe", "sd_over_se")
+
+
+def by_table_rows(base: dict, s: dict, metrics: dict[str, np.ndarray]) -> list[dict]:
+    """Per-table summaries of one subset's per-cell metrics, all and sampled cells."""
+    k = len(s["names"])
+    table = np.array([n.split(".")[0] for n in s["names"]])[np.tile(np.arange(k), s["Y"].shape[0])]
+    sampled = s["sampled"].ravel()
+    per_cell = dict(metrics)
+    if "sd" in per_cell:
+        per_cell["sd_over_se"] = per_cell["sd"] / np.maximum(s["se"], 1e-9).ravel()
+    out = []
+    for name in np.unique(table):
+        for cells, mask in (("all", table == name), ("sampled", (table == name) & sampled)):
+            row_base = dict(base, table=name, cells=cells)
+            for metric in TABLE_METRICS:
+                if metric in per_cell:
+                    out += rows_for(row_base, s["subset"], metric, per_cell[metric][mask], CELL_STATS)
+    return out
+
+
 def main() -> None:
     args = parse_args()
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -375,10 +424,13 @@ def main() -> None:
     rows = [dict(base, subset="timing", metric=k, stat="value", value=float(v))
             for k, v in timing.items()]
 
+    table_rows = []
     for i, s in enumerate(sets):
         metrics = outcome_metrics(acc.draws(i), s, ref_summaries[i] if ref_summaries else None)
         for metric, values in metrics.items():
             rows += rows_for(base, s["subset"], metric, values, CELL_STATS)
+        if args.by_table is not None and s["Y"] is not None:
+            table_rows += by_table_rows(base, s, metrics)
 
     p = pd.DataFrame(acc.p_rows)
     for column in p.columns:
@@ -423,6 +475,10 @@ def main() -> None:
     frame = pd.DataFrame(rows)[["method", "puma", "alpha", "n_draws", "subset", "metric",
                                 "stat", "value"]]
     frame.to_csv(args.out, mode="a", header=not args.out.exists(), index=False)
+    if args.by_table is not None:
+        tables = pd.DataFrame(table_rows)[["method", "puma", "alpha", "n_draws", "subset", "table",
+                                          "cells", "metric", "stat", "value"]]
+        tables.to_csv(args.by_table, mode="a", header=not args.by_table.exists(), index=False)
     logger.info("%s %s a=%g: %d rows appended to %s", args.method, args.puma, args.alpha,
                 len(frame), args.out)
 

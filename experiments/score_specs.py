@@ -43,6 +43,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--extra-hmc", nargs="*", default=[])
     parser.add_argument("--specs", type=Path, required=True, help="directory for the spec files")
     parser.add_argument("--scores", type=Path, required=True, help="directory for the CSVs")
+    parser.add_argument("--by-table", action="store_true",
+                        help="also write per-table CSVs, <scores>/<puma>_a<alpha>_tables.csv")
     parser.add_argument("--pumas", nargs="+",
                         default=["4701501", "4701502", "4701503", "4701504"])
     return parser.parse_args()
@@ -97,6 +99,8 @@ def main() -> None:
                 missing.append(f"{puma} a{alpha:g}: HMC reference (cell skipped)")
                 continue
             common = f"--puma {puma} --alpha {alpha:g} --reference {reference} --out {out}"
+            if args.by_table:
+                common += f" --by-table {args.scores / f'{puma}_a{alpha:g}_tables.csv'}"
             calls = []
             for kind in ("ref", "short"):
                 run = hmc.get((kind, puma, alpha))
