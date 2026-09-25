@@ -3,7 +3,7 @@
 #SBATCH --account=acf-utk0011
 #SBATCH --partition=campus-gpu
 #SBATCH --qos=campus-gpu
-#SBATCH --gpus=1
+#SBATCH --gpus=v100s:1
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -24,9 +24,10 @@
 # checkpoints, so a job that hits its time limit is finished by resubmitting
 # with --out pointing at the first job's directory and the same settings.
 #
-# Keep the campus-gpu partition and QoS: they give a V100. Submitted to another
-# partition (short, say) the job can land on a T4, which runs this float64
-# sampler about 30x slower (runs 6273419 and 6275306).
+# The job asks for a V100 by type (--gpus=v100s:1). The campus-gpu partition
+# alone does not guarantee one: it also holds a node of T4s (clrt1151), which
+# run this float64 sampler about 30x slower (runs 6273419 and 6275306; the
+# grid bundles 6278596-8 landed there before this pin).
 #
 # One GPU of any size will do: at 32 chains the largest tensor is tens of MB and
 # the dense whitening matrix under 1 GB, so the 16 GB cards are fine.

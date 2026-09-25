@@ -3,7 +3,7 @@
 #SBATCH --account=acf-utk0011
 #SBATCH --partition=campus-gpu
 #SBATCH --qos=campus-gpu
-#SBATCH --gpus=1
+#SBATCH --gpus=v100s:1
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
