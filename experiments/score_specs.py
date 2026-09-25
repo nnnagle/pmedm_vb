@@ -25,6 +25,7 @@ left out of the spec and listed on stdout::
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -70,12 +71,10 @@ def cpu_fits(args) -> dict:
 
 def hmc_runs(args) -> dict:
     runs = {}
-    for puma in args.pumas:
-        for alpha in ALPHAS:
-            for kind in ("ref", "short"):
-                directory = args.hmc / f"{puma}_a{alpha:g}_{kind}"
-                if directory.exists():
-                    runs[(kind, puma, alpha)] = directory
+    for directory in args.hmc.glob("*_a*_*"):  # alpha written as 1, 1.0, 0.1, ...
+        match = re.match(r"(\d+)_a([\d.]+)_(short|ref)$", directory.name)
+        if match and directory.is_dir():
+            runs[(match.group(3), match.group(1), float(match.group(2)))] = directory
     for spec in args.extra_hmc:
         puma, alpha, kind, directory = spec.split(":", 3)
         runs[(kind, puma, float(alpha))] = Path(directory)
