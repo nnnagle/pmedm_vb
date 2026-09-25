@@ -31,7 +31,18 @@ cells that actually had events in ``wall_attribution.py``'s draws
 AUC (event cells against the rest), and the share of distinct event cells
 and of events captured by the top ``K`` cells for each ``--top``.
 
+Also per fit: the median marginal sd ``sqrt(a' C a)`` along the wall normals
+of event and of other cells, under Laplace and under VB -- how far draws
+spread along a wall, which is what matters, as against the curvature along
+it, which ``wall_attribution.py`` reports; the VB score's *calibration*,
+``--draws`` times the summed per-cell probabilities against the events
+observed; and how *concentrated* that predicted risk is, the number of cells
+holding 50% and 90% of it -- roughly how many cells a wall-aware family would
+have to cover.
+
 Writes ``<out>/prediction.csv`` (one row per fit, score and K),
+``<out>/fit_stats.csv`` (one row per fit: the spread, calibration and
+concentration figures),
 ``<out>/top_cells.csv`` (each score's top ``max(--top)`` cells per fit, with
 all three scores and the observed events) and ``<out>/summary.txt``::
 
@@ -77,6 +88,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--variance-floor", default="zero")
     parser.add_argument("--threshold", type=float, default=0.01, help="share of N, as in the events")
     parser.add_argument("--top", type=int, nargs="+", default=[100, 300, 1000, 3000])
+    parser.add_argument("--draws", type=int, default=4000,
+                        help="draws behind --events, for the calibration check")
     parser.add_argument("--out", type=Path, required=True)
     return parser.parse_args()
 
@@ -152,7 +165,7 @@ def main() -> None:
     record_run(args.out, args)
     floor = floor_spec(args.variance_floor)
     events = pd.read_csv(args.events, dtype={"block_group": str, "serialno": str, "puma": str})
-    rows, tops, lines = [], [], []
+    rows, tops, lines, stats = [], [], [], []
     for puma, alpha, vb_run in args.fit:
         alpha = float(alpha)
         started = time.perf_counter()
@@ -195,6 +208,33 @@ def main() -> None:
                      f"{int(label.sum())} event cells, {int(weight.sum())} events "
                      f"({time.perf_counter() - started:.0f}s)")
         flat_zone, flat_unit = np.nonzero(live)
+        risk = np.exp(scores["vb"][live])
+        order_risk = np.sort(risk)[::-1]
+        cum = np.cumsum(order_risk) / order_risk.sum()
+        stat = {
+            "puma": puma, "alpha": alpha, "cells": int(live.sum()), "event_cells": int(label.sum()),
+            "events_observed": int(weight.sum()),
+            "events_expected_vb": float(args.draws * risk.sum()),
+            "cells_for_50pct_risk": int(np.searchsorted(cum, 0.5) + 1),
+            "cells_for_90pct_risk": int(np.searchsorted(cum, 0.9) + 1),
+        }
+        for tag, sd in (("laplace", sd_l), ("vb", sd_v)):
+            values = sd[live]
+            stat[f"sd_{tag}_event"] = float(np.median(values[label])) if label.any() else np.nan
+            stat[f"sd_{tag}_other"] = float(np.median(values[~label]))
+        ratio = sd_v[live] / np.where(sd_l[live] > 0, sd_l[live], np.nan)
+        stat["sd_vb_over_laplace_event"] = float(np.nanmedian(ratio[label])) if label.any() else np.nan
+        stat["sd_vb_over_laplace_other"] = float(np.nanmedian(ratio[~label]))
+        stats.append(stat)
+        lines.append(
+            f"   marginal sd along the wall normal, median, event / other cells: "
+            f"Laplace {stat['sd_laplace_event']:.3g} / {stat['sd_laplace_other']:.3g}, "
+            f"VB {stat['sd_vb_event']:.3g} / {stat['sd_vb_other']:.3g}; "
+            f"VB/Laplace {stat['sd_vb_over_laplace_event']:.3g} / {stat['sd_vb_over_laplace_other']:.3g}")
+        lines.append(
+            f"   VB score calibration: {stat['events_expected_vb']:,.0f} events expected in "
+            f"{args.draws:,} draws, {stat['events_observed']:,} observed; predicted risk: 50% in "
+            f"{stat['cells_for_50pct_risk']:,} cells, 90% in {stat['cells_for_90pct_risk']:,}")
         for score_name in SCORES:
             s = scores[score_name][live]
             order = np.argsort(-s, kind="stable")
@@ -217,6 +257,7 @@ def main() -> None:
         logger.info("%s a=%g scored in %.0fs", puma, alpha, time.perf_counter() - started)
 
     pd.DataFrame(rows).to_csv(args.out / "prediction.csv", index=False)
+    pd.DataFrame(stats).to_csv(args.out / "fit_stats.csv", index=False)
     pd.DataFrame(tops).to_csv(args.out / "top_cells.csv", index=False)
     text = ("Wall prediction: share of observed event cells (and events) captured by each score's "
             "top K cells\n\n" + "\n".join(lines) + "\n")
