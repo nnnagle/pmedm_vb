@@ -30,9 +30,12 @@ computed (`HANDOFF.md` is the running task that produces them).
   contribution it claims. The records below support a framing but do not fix
   one.
 - Notation. `pmedm_derivation.md` and the code use `p, q, X, lambda, Sigma,
-  n, N, W`; confirm before building on it. Note `w_ij` there is the expected
-  *sample* count, which differs from Nagle et al. (2013), where it is the
-  expected population.
+  n, N, W`; confirm before building on it. Three weights appear, and they are
+  easy to conflate: the code's `W = N p` is the expected *population* count
+  per (block group, unit) cell, summing to `N` -- the `w` of Nagle et al.
+  (2013). `pmedm_derivation.md` writes that one `w'`, and uses lowercase
+  `w = n p`, the expected *sample* count, for its likelihood; its first
+  paragraph notes the difference from Nagle et al.
 
 ## Read first, in order
 
