@@ -93,13 +93,27 @@ def cpu_rows(args) -> list[dict]:
     return rows
 
 
-def ess_from_report(directory: Path) -> tuple[float, float]:
-    """Lambda bulk ESS (min, median) from a run_mcmc.py report, if present."""
+def ess_from_report(directory: Path) -> dict:
+    """Bulk ESS from a run_mcmc.py report, if present.
+
+    Lambda ESS (min, median) comes from the thinned kept draws, so thinning
+    caps it; the log pi and largest-cell share ESS use every iteration.
+    """
+    ess = {"ess_bulk_min": np.nan, "ess_bulk_median": np.nan,
+           "ess_log_pi": np.nan, "ess_max_share": np.nan}
     for report in directory.glob("*_report.txt"):
-        match = re.search(r"ESS bulk min ([\d,]+), median ([\d,]+)", report.read_text())
+        text = report.read_text()
+        match = re.search(r"ESS bulk min ([\d,]+), median ([\d,]+)", text)
         if match:
-            return tuple(float(g.replace(",", "")) for g in match.groups())
-    return np.nan, np.nan
+            ess["ess_bulk_min"], ess["ess_bulk_median"] = (
+                float(g.replace(",", "")) for g in match.groups())
+        for key, label in (("ess_log_pi", "log pi"), ("ess_max_share", "largest-cell share")):
+            match = re.search(rf"^\s*{label}\s+R-hat \S+\s+ESS bulk ([\d,]+)", text, re.M)
+            if match:
+                ess[key] = float(match.group(1).replace(",", ""))
+        if ess["ess_log_pi"] == ess["ess_log_pi"]:
+            break
+    return ess
 
 
 def hmc_row(puma: str, alpha: float, kind: str, directory: Path) -> dict | None:
@@ -113,12 +127,13 @@ def hmc_row(puma: str, alpha: float, kind: str, directory: Path) -> dict | None:
         warmup = int(saved["warmup"])
         chains = int(saved["log_pi"].shape[1])
         divergent = int(saved["divergent"][warmup:].sum())
-    ess_min, ess_median = ess_from_report(directory)
+    ess = ess_from_report(directory)
     return {
         "method": f"hmc_{kind}", "puma": puma, "alpha": alpha, "seconds": seconds,
         "warmup_seconds": warmup_seconds, "iterations": iterations, "chains": chains,
-        "divergent": divergent, "ess_bulk_min": ess_min, "ess_bulk_median": ess_median,
-        "seconds_per_1000_ess_min": 1000 * seconds / ess_min if ess_min == ess_min else np.nan,
+        "divergent": divergent, **ess,
+        "seconds_per_1000_ess_min": 1000 * seconds / ess["ess_bulk_min"],
+        "seconds_per_1000_ess_log_pi": 1000 * seconds / ess["ess_log_pi"],
         "hardware": "GPU V100", "directory": str(directory),
     }
 
@@ -169,7 +184,9 @@ def main() -> None:
     if len(hmc):
         lines += ["HMC detail:",
                   hmc[["method", "puma", "alpha_label", "seconds", "warmup_seconds", "iterations",
-                       "divergent", "ess_bulk_min", "ess_bulk_median", "seconds_per_1000_ess_min"]]
+                       "divergent", "ess_bulk_min", "ess_bulk_median", "ess_log_pi",
+                       "ess_max_share", "seconds_per_1000_ess_min",
+                       "seconds_per_1000_ess_log_pi"]]
                   .sort_values(["method", "alpha_label", "puma"])
                   .to_string(index=False, float_format=lambda v: f"{v:,.1f}"), ""]
     lines += ["All fits:", frame.drop(columns=["alpha_label"]).sort_values(["method", "alpha", "puma"])
