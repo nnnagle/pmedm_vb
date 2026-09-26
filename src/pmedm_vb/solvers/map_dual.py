@@ -107,7 +107,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import scipy.sparse as sp
-from scipy.linalg import cho_factor, cho_solve, lu_factor, lu_solve
+from scipy.linalg import block_diag, cho_factor, cho_solve, lu_factor, lu_solve
 
 from pmedm_vb.assemble.inputs import PMEDMInputs
 from pmedm_vb.assemble.sigma import Sigma
@@ -154,6 +154,11 @@ class MAPResult:
         docstring for what it approximates and where it has been checked.
         Not a basis for choosing ``alpha``: it grows without bound as
         ``alpha -> 0`` (see *It cannot choose alpha* in the module docstring).
+    hierarchy, xi:
+        The hierarchy level (:mod:`pmedm_vb.assemble.hierarchy`) and, for a
+        level other than ``"none"``, the solver's coordinates ``xi`` at the
+        optimum; ``lam`` is then ``lambda_data``, the multipliers in today's
+        layout, so everything downstream reads it unchanged.
     trace:
         Per iteration: ``objective``, ``decrement``, ``step`` (the line-search
         length taken, 0 on the final row) and ``max_abs_z`` (the largest
@@ -185,13 +190,18 @@ class MAPResult:
     log_evidence: float
     trace: dict[str, np.ndarray] = field(default_factory=dict)
     variance_floor: str | float | None = None
+    hierarchy: str = "none"
+    xi: np.ndarray | None = None
 
 
 class DualHessian:
     """The dual Hessian at one ``lambda``, factored and never materialised.
 
     Offers :meth:`matvec`, :meth:`solve` and :meth:`logdet`, the same interface
-    as :class:`~pmedm_vb.assemble.sigma.Sigma`.
+    as :class:`~pmedm_vb.assemble.sigma.Sigma`. The Hessian is held as
+    ``K + W J W'``: ``K`` block diagonal (``rows``/``blocks``), ``W`` a few
+    dense columns and ``J`` a small symmetric matrix (``signs`` is its diagonal
+    when it is diagonal, as it is without a hierarchy).
 
     Parameters
     ----------
@@ -201,35 +211,87 @@ class DualHessian:
         The dual evaluated at the ``lambda`` to take the Hessian at.
     sigma:
         The covariance the dual was evaluated under.
+    hierarchy:
+        A :class:`~pmedm_vb.assemble.hierarchy.Hierarchy`; the Hessian is then
+        that of ``f~`` in ``xi``. Its block group projection acts inside the
+        tract blocks; its tract projection and the PUMA rows couple tracts and
+        enter as extra columns of ``W`` (see the hierarchy module):
+
+        - data: ``J' S J`` for ``J = L + U R``, ``L = [M_B, 0]``, ``U`` the
+          tract-group basis and ``R = [-U', sqrt(T) I]``: columns ``F = L'SU``
+          and ``R'`` with ``J = [[0, I], [I, U'SU]]``;
+        - ``Sigma``: ``c Z'Sigma Z`` for ``Z = Z_B - U U'``: columns
+          ``Z_B'Sigma_b U`` and ``U`` with ``c [[0, -I], [-I, U'Sigma_b U]]``,
+          plus ``sqrt(c) Z'B`` for an untapered global factor;
+        - the ridge: ``U`` with ``kappa I``, and ``kappa Q_B`` inside the
+          blocks;
+        - the downdate: ``-(J'u)(J'u)'``.
     """
 
-    def __init__(self, inputs: PMEDMInputs, state: DualState, sigma: Sigma) -> None:
+    def __init__(self, inputs: PMEDMInputs, state: DualState, sigma: Sigma, hierarchy=None) -> None:
         c = penalty_scale(inputs)
-        self.size = inputs.n_constraints
+        h = None if hierarchy is None or hierarchy.is_trivial else hierarchy
+        self.size = inputs.n_constraints if h is None else h.size
         self.rows: list[np.ndarray] = []
         self.blocks: list[np.ndarray] = []
         self.factors = []
+        U = None if h is None or not h.n_puma else h.tract_group_basis()
+        s_u = None if U is None else np.zeros_like(U)
+        sigma_u = None if U is None else np.zeros_like(U)
         for rows, s_block in _tract_blocks(inputs, state.p):
-            block = s_block + c * sigma.block_dense(rows)
-            try:
-                factor = cho_factor(block, lower=True)
-            except np.linalg.LinAlgError as error:
-                raise ValueError(
-                    "a tract block of S + c*Sigma is not positive definite, "
-                    "which D > 0 should rule out; check sigma_v and sigma_l"
-                ) from error
-            self.rows.append(rows)
-            self.blocks.append(block)
-            self.factors.append(factor)
+            sigma_block = sigma.block_dense(rows)
+            block = s_block + c * sigma_block
+            if U is not None:
+                s_u[rows] = s_block @ U[rows]
+                sigma_u[rows] = sigma_block @ U[rows]
+            if h is not None:
+                Q = h.local_projector(rows)
+                if Q.any():
+                    M = np.eye(rows.size) - Q
+                    block = M @ block @ M + h.kappa * Q
+            self._add_block(rows, block)
+        if h is not None and h.n_puma:
+            puma_rows = np.arange(h.m, h.size)
+            self._add_block(puma_rows, c * sigma.block_dense(puma_rows))
 
+        columns, pieces = [], []
         b = sigma.global_factor
-        columns = [state.u[:, None]] if b is None else [np.sqrt(c) * b, state.u[:, None]]
+        if b is not None:
+            columns.append(np.sqrt(c) * (b if h is None else h.zeta_T(b)))
+            pieces.append(np.eye(b.shape[1]))
+        if U is not None:
+            k, T = h.n_puma, h.n_tracts
+            eye = np.eye(k)
+            F = np.vstack([h.project(s_u[: h.m], which="bg"), np.zeros((k, k))])
+            R_t = np.vstack([-U[: h.m], np.sqrt(T) * eye])
+            columns += [F, R_t]
+            pieces.append(np.block([[np.zeros((k, k)), eye], [eye, U.T @ s_u]]))
+            G = np.vstack([h.project(sigma_u[: h.m], which="bg"), np.zeros((k, k))])
+            columns += [G, U]
+            pieces.append(c * np.block([[np.zeros((k, k)), -eye], [-eye, U.T @ sigma_u]]))
+            columns.append(U)
+            pieces.append(h.kappa * eye)
+        u = state.u if h is None else h.lambda_data_T(state.u)
+        columns.append(u[:, None])
+        pieces.append(-np.ones((1, 1)))
         self.w = np.hstack(columns)
-        self.signs = np.ones(self.w.shape[1])
-        self.signs[-1] = -1.0
+        self.J = block_diag(*pieces)
+        self.signs = np.diag(self.J).copy()
         self.k_inv_w = self._k_solve(self.w)
-        capacitance = np.diag(self.signs) + self.w.T @ self.k_inv_w
+        capacitance = np.linalg.inv(self.J) + self.w.T @ self.k_inv_w
         self.capacitance = lu_factor(capacitance)
+
+    def _add_block(self, rows: np.ndarray, block: np.ndarray) -> None:
+        try:
+            factor = cho_factor(block, lower=True)
+        except np.linalg.LinAlgError as error:
+            raise ValueError(
+                "a tract block of S + c*Sigma is not positive definite, "
+                "which D > 0 should rule out; check sigma_v and sigma_l"
+            ) from error
+        self.rows.append(rows)
+        self.blocks.append(block)
+        self.factors.append(factor)
 
     def _k_solve(self, x: np.ndarray) -> np.ndarray:
         out = np.empty_like(x, dtype=float)
@@ -242,8 +304,7 @@ class DualHessian:
         out = np.empty_like(x, dtype=float)
         for rows, block in zip(self.rows, self.blocks):
             out[rows] = block @ x[rows]
-        wx = self.w.T @ x
-        return out + self.w @ (self.signs[:, None] * wx if x.ndim == 2 else self.signs * wx)
+        return out + self.w @ (self.J @ (self.w.T @ x))
 
     def solve(self, x: np.ndarray) -> np.ndarray:
         """``H^-1 @ x`` by Woodbury against the per-tract factors."""
@@ -253,18 +314,18 @@ class DualHessian:
     def logdet(self) -> float:
         """``log det H`` by the matrix determinant lemma.
 
-        ``det(K + WJW') = det(K) det(J) det(J + W'K^{-1}W)``, using
-        ``J^{-1} = J``. ``H`` is positive definite, so the last two factors
-        must have the same sign, which is checked.
+        ``det(K + WJW') = det(K) det(J) det(J^{-1} + W'K^{-1}W)``. ``H`` is
+        positive definite, so the last two factors must have the same sign,
+        which is checked.
         """
         k_part = sum(2.0 * float(np.log(np.diag(f[0])).sum()) for f in self.factors)
         lu, _ = self.capacitance
         diagonal = np.diag(lu)
         sign_c = np.prod(np.sign(diagonal)) * _permutation_sign(self.capacitance[1])
-        sign_j = np.prod(self.signs)
+        sign_j, logdet_j = np.linalg.slogdet(self.J)
         if sign_c * sign_j <= 0:
             raise ValueError("Hessian determinant is not positive; H is not definite")
-        return k_part + float(np.log(np.abs(diagonal)).sum())
+        return k_part + float(logdet_j) + float(np.log(np.abs(diagonal)).sum())
 
 
 def solve_map(
@@ -277,6 +338,7 @@ def solve_map(
     max_iter: int = 100,
     tol: float = 1e-10,
     device: str = "cpu",
+    hierarchy: str = "none",
 ) -> MAPResult:
     """Fit the MAP / penalised MaxEnt solution.
 
@@ -293,15 +355,23 @@ def solve_map(
     device:
         Only ``"cpu"``: this solver is numpy and scipy. The argument exists for
         symmetry with :func:`~pmedm_vb.solvers.vb.solve_vb`.
+    hierarchy:
+        ``"none"``, ``"tract"`` or ``"puma"``: the sum-to-zero constraints and
+        PUMA rows of :mod:`pmedm_vb.assemble.hierarchy`. Newton then runs in
+        ``xi``; ``init``, if given, is ``xi``. The saddlepoint evidence is
+        reported as NaN, since it is not comparable across constraint sets.
     """
     if device != "cpu":
         raise ValueError(f"solve_map runs on numpy/scipy only; got device={device!r}")
-    sigma = inputs.sigma(alpha, taper, variance_floor)
+    from pmedm_vb.assemble.hierarchy import Hierarchy
+
+    h = Hierarchy.build(inputs, hierarchy)
+    sigma = h.sigma(inputs, alpha, taper, variance_floor)
     op = ConstraintOperator(inputs)
-    lam = np.zeros(inputs.n_constraints) if init is None else np.asarray(init, float)
-    state = dual_state(inputs, lam, sigma, op)
-    scale = np.sqrt(inputs.sigma_v)
-    targets = inputs.targets()
+    lam = np.zeros(h.size) if init is None else np.asarray(init, float)
+    state = dual_state(inputs, lam, sigma, op, h)
+    scale = np.sqrt(np.concatenate([inputs.sigma_v, h.v_P]))
+    targets = np.concatenate([inputs.targets(), h.Y_P])
 
     trace: dict[str, list[float]] = {
         "objective": [], "decrement": [], "step": [], "max_abs_z": [], "mahalanobis": [],
@@ -311,12 +381,12 @@ def solve_map(
     n_iter = 0
     started = time.perf_counter()
     logger.info(
-        "solve_map PUMA %s: %s constraints, alpha=%s, taper=%s",
-        inputs.puma, f"{inputs.n_constraints:,}", alpha, taper,
+        "solve_map PUMA %s: %s constraints, alpha=%s, taper=%s, hierarchy=%s",
+        inputs.puma, f"{h.size:,}", alpha, taper, hierarchy,
     )
     for n_iter in range(max_iter + 1):
         tick = time.perf_counter()
-        hessian = DualHessian(inputs, state, sigma)
+        hessian = DualHessian(inputs, state, sigma, h)
         direction = -hessian.solve(state.gradient)
         slope = float(state.gradient @ direction)
         if slope >= 0:
@@ -327,7 +397,7 @@ def solve_map(
         decrement = -0.5 * slope
         trace["objective"].append(state.objective)
         trace["decrement"].append(decrement)
-        residual = inputs.N * state.u - targets
+        residual = h.extend(inputs.N * state.u) - targets
         trace["max_abs_z"].append(float(np.abs(residual / scale).max()))
         trace["mahalanobis"].append(float(residual @ sigma.solve(residual)) / residual.size)
         if decrement <= tol:
@@ -340,7 +410,7 @@ def solve_map(
 
         step = 1.0
         for _ in range(MAX_HALVINGS):
-            candidate = dual_state(inputs, state.lam + step * direction, sigma, op)
+            candidate = dual_state(inputs, state.lam + step * direction, sigma, op, h)
             if candidate.objective <= state.objective + ARMIJO * step * slope:
                 break
             step *= BACKTRACK
@@ -361,7 +431,8 @@ def solve_map(
         state = candidate
 
     # The loop always ends having built the Hessian at the final state.
-    log_evidence = saddlepoint_log_evidence(inputs, state.objective, hessian)
+    log_evidence = (saddlepoint_log_evidence(inputs, state.objective, hessian)
+                    if h.is_trivial else float("nan"))
     logger.info(
         "solve_map PUMA %s: %s after %d iterations, decrement %.2e, "
         "e'S^-1e/m %.4f, log evidence %.2f, %.1fs",
@@ -370,7 +441,7 @@ def solve_map(
         time.perf_counter() - started,
     )
     return MAPResult(
-        lam=state.lam,
+        lam=state.lam_data,
         W=inputs.N * state.p,
         objective=state.objective,
         n_iter=n_iter,
@@ -381,6 +452,8 @@ def solve_map(
         log_evidence=log_evidence,
         variance_floor=variance_floor,
         trace={key: np.asarray(value) for key, value in trace.items()},
+        hierarchy=hierarchy,
+        xi=None if h.is_trivial else state.lam,
     )
 
 
@@ -413,9 +486,13 @@ def laplace_precision(inputs: PMEDMInputs, result: MAPResult) -> DualHessian:
     Still open, and deliberately not decided here: how this is scaled (the
     ``n^{-1}``) and mapped into the posterior precision the VB comparison uses.
     """
-    sigma = inputs.sigma(result.alpha, result.taper, result.variance_floor)
-    state = dual_state(inputs, result.lam, sigma)
-    return DualHessian(inputs, state, sigma)
+    from pmedm_vb.assemble.hierarchy import Hierarchy
+
+    h = Hierarchy.build(inputs, result.hierarchy)
+    sigma = h.sigma(inputs, result.alpha, result.taper, result.variance_floor)
+    xi = result.lam if result.xi is None else result.xi
+    state = dual_state(inputs, xi, sigma, hierarchy=h)
+    return DualHessian(inputs, state, sigma, h)
 
 
 def _tract_blocks(inputs: PMEDMInputs, p: np.ndarray):

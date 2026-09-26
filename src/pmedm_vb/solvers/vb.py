@@ -328,20 +328,28 @@ class StructuredGaussian:
 
     @classmethod
     def laplace(cls, inputs: PMEDMInputs, result: MAPResult) -> "StructuredGaussian":
-        """``N(lambda*, (n H)^{-1})`` written in this family."""
-        sigma = inputs.sigma(result.alpha, result.taper, result.variance_floor)
-        hessian = DualHessian(inputs, dual_state(inputs, result.lam, sigma), sigma)
+        """``N(lambda*, (n H)^{-1})`` written in this family.
+
+        With a hierarchy (``result.hierarchy``) the family is over ``xi``, centred
+        at ``result.xi``, and ``H`` is the Hessian of ``f~``.
+        """
+        from pmedm_vb.assemble.hierarchy import Hierarchy
+
+        h = Hierarchy.build(inputs, getattr(result, "hierarchy", "none"))
+        sigma = h.sigma(inputs, result.alpha, result.taper, result.variance_floor)
+        centre = result.lam if getattr(result, "xi", None) is None else result.xi
+        hessian = DualHessian(inputs, dual_state(inputs, centre, sigma, hierarchy=h), sigma, h)
         n = inputs.n
         blocks = [np.linalg.cholesky(n * block) for block in hessian.blocks]
-        family = cls(result.lam.copy(), hessian.rows, blocks,
-                     np.zeros((result.lam.size, 0)), np.zeros((result.lam.size, 0)))
+        family = cls(centre.copy(), hessian.rows, blocks,
+                     np.zeros((centre.size, 0)), np.zeros((centre.size, 0)))
         # I + Z J Z' with Z = L^{-1} w sqrt(n); its symmetric square root is
         # I + Q E diag(sqrt(1 + Lambda) - 1) E' Q' for Z = Q R, R J R' = E Lambda E'.
         z = np.empty_like(hessian.w)
         for rows, block in zip(hessian.rows, blocks):
             z[rows] = np.linalg.solve(block, np.sqrt(n) * hessian.w[rows])
         q_basis, r_factor = np.linalg.qr(z)
-        eigenvalues, vectors = np.linalg.eigh(r_factor @ np.diag(hessian.signs) @ r_factor.T)
+        eigenvalues, vectors = np.linalg.eigh(r_factor @ hessian.J @ r_factor.T)
         if eigenvalues.min() <= -1:
             raise ValueError("n H is not positive definite at the MAP solution")
         family.W = q_basis @ vectors
@@ -377,6 +385,10 @@ class VBResult:
         The ``Sigma`` the posterior is under.
     family:
         ``"gaussian"``, ``"skewed"`` or ``"sumdiff"``.
+    hierarchy:
+        The hierarchy level; unless ``"none"``, ``q`` is over ``xi`` and a draw
+        maps to multipliers through
+        :meth:`~pmedm_vb.assemble.hierarchy.Hierarchy.lambda_data`.
     gaussian_elbo, gaussian_elbo_se:
         The ELBO of the Gaussian fit the skewed stage started from; for the
         Gaussian family the same as ``elbo``. ``elbo`` above it by more than a
@@ -399,12 +411,18 @@ class VBResult:
     family: str = "gaussian"
     gaussian_elbo: float | None = None
     gaussian_elbo_se: float | None = None
+    hierarchy: str = "none"
 
 
 class _DualTarget:
-    """``f(lambda)`` for a batch of multipliers, in torch."""
+    """``f(lambda)`` for a batch of multipliers, in torch.
 
-    def __init__(self, inputs: PMEDMInputs, sigma: Sigma, device: str) -> None:
+    With a non-trivial ``hierarchy`` it is ``f~(xi)`` of
+    :mod:`pmedm_vb.assemble.hierarchy`, and ``sigma`` must be
+    ``hierarchy.sigma(...)``.
+    """
+
+    def __init__(self, inputs: PMEDMInputs, sigma: Sigma, device: str, hierarchy=None) -> None:
         def tensor(x):
             return torch.as_tensor(np.asarray(x), dtype=DTYPE, device=device)
 
@@ -416,14 +434,15 @@ class _DualTarget:
         self.X_T = tensor(inputs.X_T.toarray())
         self.X_B = tensor(inputs.X_B.toarray())
         self.A_T = tensor(inputs.A_T.toarray())
-        self.y = tensor(inputs.targets() / inputs.N)
+        self.h = None if hierarchy is None or hierarchy.is_trivial else hierarchy.torch_maps(device)
+        self.y = tensor(inputs.targets() / inputs.N if self.h is None else hierarchy.y_ext)
         self.c = inputs.n / inputs.N**2
         self.split = inputs.Y_T.size
         self.shape_T = inputs.Y_T.shape
         self.shape_B = inputs.Y_B.shape
         self.d = tensor(sigma.d)
         self.b = None if sigma.b is None else tensor(sigma.b)
-        groups = np.zeros(inputs.n_constraints, int) if sigma.groups is None else sigma.groups
+        groups = np.zeros(sigma.v.size, int) if sigma.groups is None else sigma.groups
         _, inverse = np.unique(groups, return_inverse=True)
         self.groups = torch.as_tensor(inverse, device=device)
         self.n_groups = int(inverse.max()) + 1
@@ -445,10 +464,22 @@ class _DualTarget:
         sums = sums.index_add(1, self.groups, self.b[None] * lam[:, :, None])
         return out + (self.b[None] * sums[:, self.groups, :]).sum(-1)
 
+    def data_lambda(self, lam: torch.Tensor) -> torch.Tensor:
+        """The multipliers the data see: ``lam`` itself, or ``lambda_data(xi)``."""
+        return lam if self.h is None else self.h.lambda_data(lam)
+
+    def logits(self, lam: torch.Tensor) -> torch.Tensor:
+        """``log q - X lambda_data`` as ``(batch, n_zones, n_units)``."""
+        return self.log_q[None] - self.adjoint(self.data_lambda(lam))
+
     def __call__(self, lam: torch.Tensor) -> torch.Tensor:
-        logits = self.log_q[None] - self.adjoint(lam)
+        logits = self.logits(lam)
         log_z = torch.logsumexp(logits.reshape(lam.shape[0], -1), dim=1)
-        return lam @ self.y + log_z + 0.5 * self.c * (lam * self.sigma_matvec(lam)).sum(1)
+        if self.h is None:
+            return lam @ self.y + log_z + 0.5 * self.c * (lam * self.sigma_matvec(lam)).sum(1)
+        zeta = self.h.zeta(lam)
+        return (zeta @ self.y + log_z + 0.5 * self.c * (zeta * self.sigma_matvec(zeta)).sum(1)
+                + self.h.ridge(lam))
 
 
 class _Variational(torch.nn.Module):
@@ -633,6 +664,7 @@ def solve_vb(
     final_draws: int = 400,
     seed: int = 0,
     device: str = "cpu",
+    hierarchy: str = "none",
 ) -> VBResult:
     """Fit the variational posterior.
 
@@ -664,20 +696,30 @@ def solve_vb(
         Laplace start.
     device:
         A torch device, e.g. ``"cuda"``.
+    hierarchy:
+        ``"none"``, ``"tract"`` or ``"puma"``
+        (:mod:`pmedm_vb.assemble.hierarchy`); the family is then over ``xi``.
+        ``init`` must have been fitted at the same level.
     """
+    from pmedm_vb.assemble.hierarchy import Hierarchy
+
     if family not in FAMILY_LAYERS:
         raise ValueError(f"family must be one of {sorted(FAMILY_LAYERS)}, got {family!r}")
     if init is None:
-        init = solve_map(inputs, alpha=alpha, taper=taper, variance_floor=variance_floor)
-    if (init.alpha, init.taper, init.variance_floor) != (alpha, taper, variance_floor):
+        init = solve_map(inputs, alpha=alpha, taper=taper, variance_floor=variance_floor,
+                         hierarchy=hierarchy)
+    if (init.alpha, init.taper, init.variance_floor, init.hierarchy) != (
+            alpha, taper, variance_floor, hierarchy):
         raise ValueError(
             f"init was fitted at alpha={init.alpha}, taper={init.taper}, "
-            f"variance_floor={init.variance_floor}, not alpha={alpha}, "
-            f"taper={taper}, variance_floor={variance_floor}"
+            f"variance_floor={init.variance_floor}, hierarchy={init.hierarchy}, not "
+            f"alpha={alpha}, taper={taper}, variance_floor={variance_floor}, "
+            f"hierarchy={hierarchy}"
         )
     torch.manual_seed(seed)
     started = time.perf_counter()
-    target = _DualTarget(inputs, inputs.sigma(alpha, taper, variance_floor), device)
+    h = Hierarchy.build(inputs, hierarchy)
+    target = _DualTarget(inputs, h.sigma(inputs, alpha, taper, variance_floor), device, h)
     model = _Variational(StructuredGaussian.laplace(inputs, init), device)
     n = inputs.n
 
@@ -744,6 +786,7 @@ def solve_vb(
         family=family,
         gaussian_elbo=gaussian_elbo,
         gaussian_elbo_se=gaussian_se,
+        hierarchy=hierarchy,
     )
 
 
@@ -830,6 +873,9 @@ def posterior_weights(
     numpy.ndarray
         ``(n_draws, n_zones, n_units)``, each summing to ``N``.
     """
+    from pmedm_vb.assemble.hierarchy import Hierarchy
+
     rng = rng or np.random.default_rng()
-    lams = result.q.sample(rng, n_draws)
+    h = Hierarchy.build(inputs, result.hierarchy)
+    lams = h.lambda_data(result.q.sample(rng, n_draws)) if not h.is_trivial else result.q.sample(rng, n_draws)
     return np.stack([inputs.N * weights_from_lambda(inputs, lam) for lam in lams.T])

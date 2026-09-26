@@ -33,6 +33,14 @@ directory (``<name>_refsummary.npz``) and reused.
   with ``--reference``, the median and mean difference in reference sds (sd
   floored at ``compare.SD_FLOOR``), the sd ratio and the 90% width ratio. Each
   is summarised as p1/p10/p50/p90/p99 over the subset's cells (``mean`` too).
+- ``constrained_puma``: the PUMA total of each tract category against the
+  tract estimates summed, with the SDR SE of the summed tract replicates --
+  scored for every method, so how loosely each holds the PUMA totals shows.
+- With ``--hierarchy tract|puma`` the MAP, VB and HMC results are the
+  ``_h<level>`` fits of :mod:`pmedm_vb.assemble.hierarchy`: draws are in the
+  solver's coordinates ``xi``, W comes from ``lambda_data(xi)``, and PSIS and
+  the whitened comparison use ``xi``. The reference must be fitted at the same
+  level. Raking ignores the option.
 - ``p``: per draw, over every (block group, record) cell --
   ``p/q > R`` for ``R`` in ``--ratio``; ``W`` over a share of its block
   group's total weight in that draw, for shares in ``--bg-share``; ``W`` over
@@ -107,6 +115,9 @@ def parse_args() -> argparse.Namespace:
                         help="also append per-table summaries to this CSV (see module docstring)")
     parser.add_argument("--area", default="knox-2024-5yr")
     parser.add_argument("--variance-floor", default="zero")
+    parser.add_argument("--hierarchy", choices=["none", "tract", "puma"], default="none",
+                        help="the fits' hierarchy level (pmedm_vb.assemble.hierarchy): selects "
+                             "the _h<level> results and scores lambda_data; raking ignores it")
     parser.add_argument("--draws", type=int, default=4000)
     parser.add_argument("--ratio", type=float, nargs="+", default=[10.0, 100.0])
     parser.add_argument("--bg-share", type=float, nargs="+", default=[0.05, 0.25])
@@ -118,23 +129,40 @@ def floor_spec(text: str):
     return None if text == "none" else "zero" if text == "zero" else float(text)
 
 
-def fit_name(puma: str, alpha: float) -> str:
-    return f"{puma}_tract_a{alpha:g}"
+def fit_name(puma: str, alpha: float, hierarchy: str = "none") -> str:
+    suffix = "" if hierarchy == "none" else f"_h{hierarchy}"
+    return f"{puma}_tract_a{alpha:g}{suffix}"
 
 
-def thinned(kept: np.ndarray, draws: int) -> np.ndarray:
+def thinned(kept: np.ndarray | None, draws: int) -> np.ndarray | None:
     """``(m, <= draws)`` evenly spaced draws from a ``(kept, chains, m)`` trace."""
+    if kept is None:
+        return None
     flat = kept.reshape(-1, kept.shape[-1])
     return flat[np.unique(np.linspace(0, len(flat) - 1, min(draws, len(flat))).astype(int))].T
+
+
+def with_lambda(h, xi: np.ndarray, q) -> dict:
+    """A draw source from draws in the solver's coordinates: ``lam`` in today's
+    layout for W, and ``xi`` for densities and whitening."""
+    return {"lam": xi if h.is_trivial else h.lambda_data(xi), "xi": xi, "q": q}
+
+
+def check_level(path: Path, saved, level: str) -> None:
+    found = str(saved["hierarchy"]) if "hierarchy" in saved.files else "none"
+    if found != level:
+        raise SystemExit(f"{path} was fitted with hierarchy={found}, not {level}")
 
 
 # -- draws --------------------------------------------------------------------
 
 
-def method_draws(args, inputs: PMEDMInputs, rng) -> tuple[dict, dict]:
-    """``{"W": (zones, units)}`` or ``{"lam": (m, draws), "q": density or None}``,
-    and the method's timing and settings."""
-    name = fit_name(args.puma, args.alpha)
+def method_draws(args, inputs: PMEDMInputs, rng, h) -> tuple[dict, dict]:
+    """``{"W": (zones, units)}`` or ``{"lam": (m, draws), "xi": ..., "q": density
+    or None}``, and the method's timing and settings. ``lam`` is always in
+    today's layout; ``xi`` is the solver's coordinates (the same without a
+    hierarchy)."""
+    name = fit_name(args.puma, args.alpha, args.hierarchy)
     timing: dict[str, float] = {}
     if args.method in ("ipf", "sinkhorn"):
         with np.load(args.run / f"{args.puma}_{args.method}.npz") as saved:
@@ -147,21 +175,25 @@ def method_draws(args, inputs: PMEDMInputs, rng) -> tuple[dict, dict]:
         from pmedm_vb.solvers.vb import StructuredGaussian
 
         with np.load(args.run / f"{name}.npz") as saved:
+            check_level(args.run / f"{name}.npz", saved, args.hierarchy)
             lam = saved["lam"]
+            xi = saved["xi"] if "xi" in saved.files else None
             timing["fit_seconds"] = float(saved["seconds"])
         start = time.perf_counter()
         result = SimpleNamespace(lam=lam, alpha=args.alpha, taper="tract",
-                                 variance_floor=floor_spec(args.variance_floor))
+                                 variance_floor=floor_spec(args.variance_floor),
+                                 hierarchy=args.hierarchy, xi=xi)
         q = StructuredGaussian.laplace(inputs, result)
         timing["laplace_seconds"] = time.perf_counter() - start
         start = time.perf_counter()
         draws = q.sample(rng, args.draws)
         timing["draw_seconds"] = time.perf_counter() - start
-        return {"lam": draws, "q": q}, timing
+        return with_lambda(h, draws, q), timing
     if args.method.startswith("vb_"):
         path = args.run / f"{name}.npz"
         q, _, _ = load_vb(path)
         with np.load(path) as saved:
+            check_level(path, saved, args.hierarchy)
             timing["fit_seconds"] = float(saved["seconds"])
             if "map_seconds" in saved.files:
                 timing["map_seconds"] = float(saved["map_seconds"])
@@ -170,12 +202,13 @@ def method_draws(args, inputs: PMEDMInputs, rng) -> tuple[dict, dict]:
         start = time.perf_counter()
         draws = q.sample(rng, args.draws)
         timing["draw_seconds"] = time.perf_counter() - start
-        return {"lam": draws, "q": q}, timing
+        return with_lambda(h, draws, q), timing
     # HMC
     import arviz as az
 
     with np.load(args.run / f"{name}_trace.npz") as saved:
         kept = saved["lam"]
+        kept_xi = saved["xi"] if "xi" in saved.files else None
         for key in ("seconds", "warmup_seconds"):
             if key in saved.files:
                 timing[f"hmc_{key}"] = float(saved[key])
@@ -187,7 +220,9 @@ def method_draws(args, inputs: PMEDMInputs, rng) -> tuple[dict, dict]:
     if "hmc_seconds" in timing:
         timing["seconds_per_1000_ess_min"] = 1000 * timing["hmc_seconds"] / ess.min()
         timing["seconds_per_1000_ess_median"] = 1000 * timing["hmc_seconds"] / np.median(ess)
-    return {"lam": thinned(kept, args.draws), "q": None}, timing
+    lam = thinned(kept, args.draws)
+    return {"lam": lam, "xi": lam if kept_xi is None else thinned(kept_xi, args.draws),
+            "q": None}, timing
 
 
 # -- outcomes -----------------------------------------------------------------
@@ -234,6 +269,15 @@ def outcome_sets(inputs: PMEDMInputs, heldout: HeldOut | None) -> list[dict]:
     cross = np.flatnonzero(meta["kind"].to_numpy() == "crosstab")
     sets.append(dict(subset="crosstab_block_group", level="block group",
                      X=sp.csc_matrix(matrix)[:, cross], Y=None, se=None))
+    # PUMA totals of each tract category: the tract estimates and replicates summed.
+    n_tracts, c_t = inputs.Y_T.shape
+    summed = np.stack([inputs.sigma_l[k * n_tracts + np.arange(n_tracts)].sum(axis=0)
+                       for k in range(c_t)])
+    s_p = SDR_FACTOR * np.square(summed).sum(axis=1)
+    Y_p = inputs.Y_T.sum(axis=0)[None, :]
+    sets.append(dict(subset="constrained_puma", level="puma", X=sp.csc_matrix(inputs.X_T),
+                     Y=Y_p, se=np.sqrt(s_p)[None, :], names=list(inputs.tract_constraints),
+                     sampled=(Y_p > 0) & (s_p[None, :] > 0)))
     return sets
 
 
@@ -263,8 +307,11 @@ class Accumulator:
         by_zone = np.asarray((self.X_all.T @ W.T).T)
         for i, s in enumerate(self.sets):
             block = by_zone[:, self.bounds[i]:self.bounds[i + 1]]
-            self.outcomes[i].append(
-                (self.A_T @ block if s["level"] == "tract" else block).astype(np.float32))
+            if s["level"] == "tract":
+                block = self.A_T @ block
+            elif s["level"] == "puma":
+                block = block.sum(axis=0, keepdims=True)
+            self.outcomes[i].append(block.astype(np.float32))
         log_pq = log_p - self.log_q
         finite = np.isfinite(log_pq)
         row = {}
@@ -342,24 +389,27 @@ def outcome_metrics(draws: np.ndarray, s: dict, ref: dict | None) -> dict[str, n
 # -- reference ----------------------------------------------------------------
 
 
-def reference_summaries(args, inputs, sets) -> tuple[list[dict], np.ndarray, np.ndarray]:
+def reference_summaries(args, inputs, sets):
     """The reference's per-subset cell summaries, its per-cell max ``log p``, and
-    its thinned ``lambda`` draws; cached beside the reference trace."""
-    name = fit_name(args.puma, args.alpha)
+    its thinned ``lambda`` and ``xi`` draws; cached beside the reference trace
+    (and recomputed if the cache predates a scored subset)."""
+    name = fit_name(args.puma, args.alpha, args.hierarchy)
     cache = args.reference / f"{name}_refsummary.npz"
     with np.load(args.reference / f"{name}_trace.npz") as saved:
         lam = thinned(saved["lam"], args.draws)
+        xi = thinned(saved["xi"], args.draws) if "xi" in saved.files else lam
     if cache.exists():
         with np.load(cache) as saved:
-            summaries = [{k: saved[f"{i}_{k}"] for k in ("mean", "sd", "q05", "q50", "q95")}
-                         for i in range(len(sets))]
-            return summaries, saved["max_log_share"], lam
+            if f"{len(sets) - 1}_mean" in saved.files:
+                summaries = [{k: saved[f"{i}_{k}"] for k in ("mean", "sd", "q05", "q50", "q95")}
+                             for i in range(len(sets))]
+                return summaries, saved["max_log_share"], lam, xi
     logger.info("summarising the reference %s (cached for next time)", args.reference)
     acc = run_draws(inputs, {"lam": lam}, sets, args.ratio, args.bg_share)
     summaries = [cell_summary(acc.draws(i)) for i in range(len(sets))]
     np.savez(cache, max_log_share=acc.max_log_share,
              **{f"{i}_{k}": v for i, s in enumerate(summaries) for k, v in s.items()})
-    return summaries, acc.max_log_share, lam
+    return summaries, acc.max_log_share, lam, xi
 
 
 # -- output -------------------------------------------------------------------
@@ -413,10 +463,13 @@ def main() -> None:
         logger.warning("no held-out tables under %s; scoring without them", path)
     sets = outcome_sets(inputs, heldout)
 
-    source, timing = method_draws(args, inputs, rng)
-    ref_summaries = ref_max = ref_lam = None
+    from pmedm_vb.assemble.hierarchy import Hierarchy
+
+    hierarchy = Hierarchy.build(inputs, args.hierarchy)
+    source, timing = method_draws(args, inputs, rng, hierarchy)
+    ref_summaries = ref_max = ref_lam = ref_xi = None
     if args.reference is not None and args.method != "hmc_ref":
-        ref_summaries, ref_max, ref_lam = reference_summaries(args, inputs, sets)
+        ref_summaries, ref_max, ref_lam, ref_xi = reference_summaries(args, inputs, sets)
     acc = run_draws(inputs, source, sets, args.ratio, args.bg_share, ref_max)
 
     base = dict(method=args.method, puma=args.puma, alpha=args.alpha,
@@ -451,9 +504,10 @@ def main() -> None:
             import torch
 
             torch.set_num_threads(max(1, torch.get_num_threads()))
-            sigma = inputs.sigma(args.alpha, "tract", floor_spec(args.variance_floor))
-            target = _DualTarget(inputs, sigma, "cpu")
-            log_ratio = -inputs.n * batched_f(target, lam, 100) - source["q"].log_density(lam)
+            sigma = hierarchy.sigma(inputs, args.alpha, "tract", floor_spec(args.variance_floor))
+            target = _DualTarget(inputs, sigma, "cpu", hierarchy)
+            xi = source["xi"]
+            log_ratio = -inputs.n * batched_f(target, xi, 100) - source["q"].log_density(xi)
             rows.append(dict(base, subset="joint", metric="psis_khat", stat="value",
                              value=compare.psis_khat(log_ratio)))
         if ref_lam is not None:
@@ -465,9 +519,10 @@ def main() -> None:
                     rows.append(dict(base, subset="joint", metric=f"pair_{column}_{tag}",
                                      stat="p50", value=float(pairs[f"{column}_{tag}"].median())))
             if args.whiten is not None:
-                q_white, _, _ = load_vb(args.whiten / f"{fit_name(args.puma, args.alpha)}.npz")
-                coords = compare.coordinate_comparison(compare.whitened(q_white, ref_lam),
-                                                       compare.whitened(q_white, lam))
+                q_white, _, _ = load_vb(
+                    args.whiten / f"{fit_name(args.puma, args.alpha, args.hierarchy)}.npz")
+                coords = compare.coordinate_comparison(compare.whitened(q_white, ref_xi),
+                                                       compare.whitened(q_white, source["xi"]))
                 rows += rows_for(base, "joint", "whitened_sd_ratio", coords["sd_ratio"], CELL_STATS)
 
     rows.append(dict(base, subset="timing", metric="scoring_seconds", stat="value",

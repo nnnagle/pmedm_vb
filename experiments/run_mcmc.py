@@ -75,6 +75,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--puma", required=True)
     parser.add_argument("--alpha", type=float, required=True)
     parser.add_argument("--taper", choices=["tract", "none"], default="tract")
+    parser.add_argument("--hierarchy", choices=["none", "tract", "puma"], default="none",
+                        help="the VB run's hierarchy level (pmedm_vb.assemble.hierarchy); "
+                             "names gain _h<level>")
     parser.add_argument("--area", default="knox-2024-5yr", help="assembled-inputs directory name")
     parser.add_argument(
         "--variance-floor", default="none",
@@ -110,21 +113,38 @@ def floor_spec(text: str) -> str | float | None:
 
 
 def fit_name(args: argparse.Namespace) -> str:
-    return f"{args.puma}_{args.taper}_a{args.alpha:g}"
+    suffix = "" if args.hierarchy == "none" else f"_h{args.hierarchy}"
+    return f"{args.puma}_{args.taper}_a{args.alpha:g}{suffix}"
 
 
 def load_problem(args: argparse.Namespace):
+    from pmedm_vb.assemble.hierarchy import Hierarchy
+
     inputs = PMEDMInputs.load(processed_dir() / "inputs" / args.area / args.puma)
     taper = None if args.taper == "none" else args.taper
-    sigma = inputs.sigma(args.alpha, taper, floor_spec(args.variance_floor))
+    hierarchy = Hierarchy.build(inputs, args.hierarchy)
+    sigma = hierarchy.sigma(inputs, args.alpha, taper, floor_spec(args.variance_floor))
     vb_path = args.vb_run / f"{fit_name(args)}.npz"
     q, _, _ = load_vb(vb_path)
     with np.load(vb_path) as saved:
         map_lam = saved["map_lam"]
-    return inputs, sigma, q, map_lam
+        saved_level = str(saved["hierarchy"]) if "hierarchy" in saved.files else "none"
+    if saved_level != args.hierarchy:
+        raise SystemExit(f"{vb_path} was fitted with hierarchy={saved_level}, not {args.hierarchy}")
+    return inputs, sigma, q, map_lam, hierarchy
 
 
 # -- sample ------------------------------------------------------------------
+
+
+def draw_arrays(draws: np.ndarray, hierarchy) -> dict[str, np.ndarray]:
+    """Kept draws for the trace: ``lam`` always in today's layout (the
+    multipliers the data see), plus ``xi`` under a hierarchy, for densities."""
+    if hierarchy.is_trivial:
+        return {"lam": draws}
+    kept, chains, size = draws.shape
+    lam = hierarchy.lambda_data(draws.reshape(-1, size).T).T.reshape(kept, chains, hierarchy.m)
+    return {"lam": lam, "xi": draws}
 
 
 def sample(args: argparse.Namespace) -> None:
@@ -140,8 +160,8 @@ def sample(args: argparse.Namespace) -> None:
     state_path = args.out / f"{name}_state.npz"
     trace_path = args.out / f"{name}_trace.npz"
 
-    inputs, sigma, q, _ = load_problem(args)
-    target = _DualTarget(inputs, sigma, device)
+    inputs, sigma, q, _, hierarchy = load_problem(args)
+    target = _DualTarget(inputs, sigma, device, hierarchy)
     A = whitening_matrix(q)
     rng = np.random.default_rng(args.seed)
     x0 = starting_points(target, q.mean, A, args.chains, rng, args.init_max_share, device)
@@ -160,7 +180,8 @@ def sample(args: argparse.Namespace) -> None:
         with np.load(trace_path) as saved:
             trace = {key: list(saved[key]) for key in TRACE_KEYS}
             step_sizes, leapfrogs = list(saved["step_size"]), list(saved["n_leapfrog"])
-            draws = list(saved["lam"]) if "lam" in saved.files else []
+            key = "lam" if hierarchy.is_trivial else "xi"
+            draws = list(saved[key]) if key in saved.files else []
             earlier_seconds = float(saved["seconds"]) if "seconds" in saved.files else 0.0
             if "warmup_seconds" in saved.files:
                 warmup_seconds = float(saved["warmup_seconds"])
@@ -185,7 +206,7 @@ def sample(args: argparse.Namespace) -> None:
             warmup=args.warmup, thin=args.thin, n_zones=inputs.n_zones, n_units=inputs.n_units,
             seconds=earlier_seconds + time.perf_counter() - started,
             warmup_seconds=warmup_seconds,
-            **({"lam": np.asarray(draws)} if draws else {}),
+            **(draw_arrays(np.asarray(draws), hierarchy) if draws else {}),
         )
 
     while sampler.iteration < total:
@@ -242,7 +263,7 @@ def report(args: argparse.Namespace) -> None:
     done = trace["log_pi"].shape[0]
     if done <= warmup:
         raise SystemExit(f"{name}: {done} iterations, all warmup; nothing to report yet")
-    inputs, _, _, map_lam = load_problem(args)
+    inputs, _, _, map_lam, _ = load_problem(args)
     post = slice(warmup, None)
 
     def chains_first(key: str) -> np.ndarray:
@@ -282,16 +303,24 @@ def report(args: argparse.Namespace) -> None:
         )
     if "lam" in trace and trace["lam"].shape[0] >= 4:
         lam = np.transpose(trace["lam"], (1, 0, 2))  # (chains, kept draws, m)
-        dataset = az.convert_to_dataset({"lam": lam})
-        rhat = az.rhat(dataset)["lam"].values
-        bulk = az.ess(dataset, method="bulk")["lam"].values
-        tail = az.ess(dataset, method="tail")["lam"].values
+        # A hierarchy fixes some coordinates exactly (a lone block group's
+        # deviation from its tract is 0): no diagnostics for those.
+        varying = lam.reshape(-1, lam.shape[2]).std(axis=0) > 0
+        dataset = az.convert_to_dataset({"lam": lam[:, :, varying]})
+        rhat = np.full(lam.shape[2], np.nan)
+        bulk, tail = rhat.copy(), rhat.copy()
+        rhat[varying] = az.rhat(dataset)["lam"].values
+        bulk[varying] = az.ess(dataset, method="bulk")["lam"].values
+        tail[varying] = az.ess(dataset, method="tail")["lam"].values
+        fixed = int((~varying).sum())
+        rhat_v, bulk_v, tail_v = rhat[varying], bulk[varying], tail[varying]
         lines += [
-            f"   lambda, {lam.shape[2]:,} coordinates from {lam.shape[1]} kept draws per chain:",
-            f"     R-hat   {quantile_line(rhat)}",
-            f"     R-hat over 1.01: {int((rhat > 1.01).sum()):,}; over 1.1: {int((rhat > 1.1).sum()):,}",
-            f"     ESS bulk min {bulk.min():,.0f}, median {np.median(bulk):,.0f}; "
-            f"tail min {tail.min():,.0f}, median {np.median(tail):,.0f}",
+            f"   lambda, {lam.shape[2]:,} coordinates from {lam.shape[1]} kept draws per chain"
+            + (f" ({fixed:,} fixed by the hierarchy, left out):" if fixed else ":"),
+            f"     R-hat   {quantile_line(rhat_v)}",
+            f"     R-hat over 1.01: {int((rhat_v > 1.01).sum()):,}; over 1.1: {int((rhat_v > 1.1).sum()):,}",
+            f"     ESS bulk min {bulk_v.min():,.0f}, median {np.median(bulk_v):,.0f}; "
+            f"tail min {tail_v.min():,.0f}, median {np.median(tail_v):,.0f}",
             "     ten worst by R-hat:",
         ]
         table = constraint_table(inputs).assign(rhat=rhat, ess_bulk=bulk, ess_tail=tail,

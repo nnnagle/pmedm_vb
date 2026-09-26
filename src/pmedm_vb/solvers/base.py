@@ -119,7 +119,10 @@ def weights_from_lambda(
 class DualState(NamedTuple):
     """Everything one evaluation of the dual produces, so nothing is recomputed.
 
-    ``u`` is ``X'p``, which the gradient needs and the Hessian reuses.
+    ``u`` is ``X'p``, which the gradient needs and the Hessian reuses. With a
+    hierarchy, ``lam`` is the solver's ``xi`` and ``lam_data`` the multipliers
+    the data see (:mod:`pmedm_vb.assemble.hierarchy`); without one they are the
+    same array.
     """
 
     lam: np.ndarray
@@ -127,6 +130,7 @@ class DualState(NamedTuple):
     u: np.ndarray
     objective: float
     gradient: np.ndarray
+    lam_data: np.ndarray | None = None
 
 
 def dual_state(
@@ -134,18 +138,37 @@ def dual_state(
     lam: np.ndarray,
     sigma: Sigma,
     op: ConstraintOperator | None = None,
+    hierarchy=None,
 ) -> DualState:
-    """Evaluate ``p``, ``X'p``, the objective and the gradient at ``lam``."""
+    """Evaluate ``p``, ``X'p``, the objective and the gradient at ``lam``.
+
+    With a non-trivial ``hierarchy`` (a :class:`~pmedm_vb.assemble.hierarchy.Hierarchy`),
+    ``lam`` is ``xi``, ``sigma`` must be ``hierarchy.sigma(...)`` and the
+    objective is ``f~`` of that module.
+    """
     op = op or ConstraintOperator(inputs)
     c = penalty_scale(inputs)
-    logits, total = _log_weights(inputs, lam, op)
+    if hierarchy is None or hierarchy.is_trivial:
+        logits, total = _log_weights(inputs, lam, op)
+        p = np.exp(logits - total)
+        u = op.forward(p)
+        y = inputs.targets() / inputs.N
+        sigma_lam = sigma.matvec(lam)
+        objective = float(y @ lam + total + 0.5 * c * (lam @ sigma_lam))
+        gradient = y + c * sigma_lam - u
+        return DualState(lam=lam, p=p, u=u, objective=objective, gradient=gradient, lam_data=lam)
+    h = hierarchy
+    lam_data = h.lambda_data(lam)
+    logits, total = _log_weights(inputs, lam_data, op)
     p = np.exp(logits - total)
     u = op.forward(p)
-    y = inputs.targets() / inputs.N
-    sigma_lam = sigma.matvec(lam)
-    objective = float(y @ lam + total + 0.5 * c * (lam @ sigma_lam))
-    gradient = y + c * sigma_lam - u
-    return DualState(lam=lam, p=p, u=u, objective=objective, gradient=gradient)
+    zeta = h.zeta(lam)
+    sigma_zeta = sigma.matvec(zeta)
+    null = h.null(lam[: h.m])
+    objective = float(h.y_ext @ zeta + total + 0.5 * c * (zeta @ sigma_zeta)
+                      + 0.5 * h.kappa * (null @ null))
+    gradient = h.zeta_T(h.y_ext + c * sigma_zeta) - h.lambda_data_T(u) + h.ridge_gradient(lam)
+    return DualState(lam=lam, p=p, u=u, objective=objective, gradient=gradient, lam_data=lam_data)
 
 
 def dual_objective(inputs: PMEDMInputs, lam: np.ndarray, sigma: Sigma) -> float:

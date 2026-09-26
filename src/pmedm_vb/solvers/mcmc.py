@@ -60,7 +60,7 @@ def largest_share(target: _DualTarget, lam: torch.Tensor) -> tuple[torch.Tensor,
     """Per row of ``lam`` (``(k, m)``), the largest (zone, unit) cell's share of
     ``p(lambda)`` and its flat index into the ``(n_zones, n_units)`` matrix."""
     with torch.no_grad():
-        logits = target.log_q[None] - target.adjoint(lam)
+        logits = target.logits(lam)
         flat = logits.reshape(lam.shape[0], -1)
         top, index = flat.max(1)
         return torch.exp(top - torch.logsumexp(flat, 1)), index

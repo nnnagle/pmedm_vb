@@ -125,6 +125,12 @@ def parse_args() -> argparse.Namespace:
              "variance; a number floors at that value; 'none' (default) leaves them",
     )
     parser.add_argument(
+        "--hierarchy", choices=["none", "tract", "puma"], default="none",
+        help="solve, vb: sum-to-zero multipliers within each tract ('tract'), plus PUMA "
+             "totals with tract multipliers summing to zero ('puma'); see "
+             "pmedm_vb.assemble.hierarchy. Result names gain _h<level>",
+    )
+    parser.add_argument(
         "--family", choices=["gaussian", "skewed", "sumdiff"], default="gaussian",
         help="vb: 'skewed' adds a second stage fitting a per-coordinate skew; 'sumdiff' "
              "adds skew layers on tract+block group sums and differences as well",
@@ -367,8 +373,9 @@ def estimated_cost(manifest: dict, taper: str | None) -> float:
     return cost
 
 
-def result_name(puma: str, taper: str | None, alpha: float) -> str:
-    return f"{puma}_{taper or 'none'}_a{alpha:g}"
+def result_name(puma: str, taper: str | None, alpha: float, hierarchy: str = "none") -> str:
+    suffix = "" if hierarchy in ("none", None) else f"_h{hierarchy}"
+    return f"{puma}_{taper or 'none'}_a{alpha:g}{suffix}"
 
 
 def solve_one(path: Path, taper: str | None, alpha: float, out: Path, options: dict) -> dict:
@@ -377,14 +384,17 @@ def solve_one(path: Path, taper: str | None, alpha: float, out: Path, options: d
     from pmedm_vb.solvers.map_dual import solve_map
 
     puma = path.name
-    log_to_file(out / "logs" / f"{result_name(puma, taper, alpha)}.log")
+    hierarchy = options.get("hierarchy", "none")
+    name = result_name(puma, taper, alpha, hierarchy)
+    log_to_file(out / "logs" / f"{name}.log")
     floor = options["variance_floor"]
     row = {"puma": puma, "taper": taper or "none", "alpha": alpha,
-           "variance_floor": "none" if floor is None else str(floor)}
+           "variance_floor": "none" if floor is None else str(floor), "hierarchy": hierarchy}
     start = time.perf_counter()
     try:
         inputs = PMEDMInputs.load(path)
-        result = solve_map(inputs, alpha=alpha, taper=taper, variance_floor=floor)
+        result = solve_map(inputs, alpha=alpha, taper=taper, variance_floor=floor,
+                           hierarchy=hierarchy)
         row.update(
             n_constraints=inputs.n_constraints,
             converged=result.converged,
@@ -398,9 +408,10 @@ def solve_one(path: Path, taper: str | None, alpha: float, out: Path, options: d
             error="",
         )
         np.savez(
-            out / f"{result_name(puma, taper, alpha)}.npz",
+            out / f"{name}.npz",
             lam=result.lam,
             W=result.W,
+            **({} if result.xi is None else {"xi": result.xi}),
             **{f"trace_{key}": value for key, value in result.trace.items()},
             **{key: np.asarray(value) for key, value in row.items()},
         )
@@ -420,15 +431,18 @@ def vb_one(path: Path, taper: str | None, alpha: float, out: Path, options: dict
 
     torch.set_num_threads(int(os.environ.get("OMP_NUM_THREADS", "1")))
     puma = path.name
-    log_to_file(out / "logs" / f"{result_name(puma, taper, alpha)}.log")
+    hierarchy = options.get("hierarchy", "none")
+    name = result_name(puma, taper, alpha, hierarchy)
+    log_to_file(out / "logs" / f"{name}.log")
     floor = options["variance_floor"]
     row = {"puma": puma, "taper": taper or "none", "alpha": alpha,
-           "variance_floor": "none" if floor is None else str(floor)}
-    vb_options = {k: v for k, v in options.items() if k != "variance_floor"}
+           "variance_floor": "none" if floor is None else str(floor), "hierarchy": hierarchy}
+    vb_options = {k: v for k, v in options.items() if k != "variance_floor"}  # includes hierarchy
     start = time.perf_counter()
     try:
         inputs = PMEDMInputs.load(path)
-        start_map = solve_map(inputs, alpha=alpha, taper=taper, variance_floor=floor)
+        start_map = solve_map(inputs, alpha=alpha, taper=taper, variance_floor=floor,
+                              hierarchy=hierarchy)
         map_seconds = time.perf_counter() - start
         fit = solve_vb(inputs, alpha=alpha, taper=taper, variance_floor=floor,
                        init=start_map, **vb_options)
@@ -450,11 +464,12 @@ def vb_one(path: Path, taper: str | None, alpha: float, out: Path, options: dict
             error="",
         )
         np.savez(
-            out / f"{result_name(puma, taper, alpha)}.npz",
+            out / f"{name}.npz",
             mean=fit.q.mean,
             W=fit.q.W,
             V=fit.q.V,
             map_lam=fit.map_result.lam,
+            **({} if fit.map_result.xi is None else {"map_xi": fit.map_result.xi}),
             elbo_trace=fit.elbo_trace,
             **{f"rows_{i}": rows for i, rows in enumerate(fit.q.rows)},
             **{f"block_{i}": block for i, block in enumerate(fit.q.blocks)},
@@ -509,10 +524,12 @@ def rake_one(path: Path, taper: str | None, alpha: float, out: Path, options: di
 
 #: Summary columns per step, in order; read back from a saved result on resume.
 SUMMARY_KEYS = {
-    "solve": ["puma", "taper", "alpha", "variance_floor", "n_constraints", "converged", "n_iter",
+    "solve": ["puma", "taper", "alpha", "variance_floor", "hierarchy", "n_constraints",
+              "converged", "n_iter",
               "newton_decrement", "objective", "max_abs_z", "mahalanobis",
               "log_evidence", "seconds", "error"],
-    "vb": ["puma", "taper", "alpha", "variance_floor", "family", "n_constraints", "converged",
+    "vb": ["puma", "taper", "alpha", "variance_floor", "hierarchy", "family", "n_constraints",
+           "converged",
            "n_iter", "elbo", "elbo_se", "gaussian_elbo", "gaussian_elbo_se", "laplace_elbo",
            "laplace_elbo_se", "gain", "seed", "map_seconds", "seconds", "error"],
     "rake": ["puma", "method", "variance_floor", "n_constraints", "converged", "n_sweeps",
@@ -561,7 +578,8 @@ def run_sweep(
             continue
         for taper in (None if t == "none" else t for t in tapers):
             for alpha in alphas:
-                done = out / f"{result_name(path.name, taper, alpha)}.npz"
+                name = result_name(path.name, taper, alpha, options.get("hierarchy", "none"))
+                done = out / f"{name}.npz"
                 if done.exists():
                     rows.append(saved_row(done, step))
                 else:
@@ -586,7 +604,8 @@ def run_sweep(
                 row = future.result()
                 rows.append(row)
                 label = (f"{row['puma']}_{row['method']}" if step == "rake"
-                         else result_name(row["puma"], row["taper"], row["alpha"]))
+                         else result_name(row["puma"], row["taper"], row["alpha"],
+                                          row.get("hierarchy", "none")))
                 logger.info(
                     "%d of %d done: %s %s", count, len(tasks), label,
                     f"FAILED {row['error']} -- see {out / 'logs' / (label + '.log')}"
@@ -622,6 +641,7 @@ def main() -> None:
         options = {"max_iter": args.max_iter, "draws": args.draws,
                    "learning_rate": args.learning_rate, "variance_floor": args.variance_floor,
                    "epsilon": args.epsilon,
+                   **({"hierarchy": args.hierarchy} if args.step in ("solve", "vb") else {}),
                    **({"family": args.family, "seed": args.seed} if args.step == "vb" else {}),
                    **({"method": args.method, "tol": args.tol, "max_sweeps": args.max_sweeps}
                       if args.step == "rake" else {})}
