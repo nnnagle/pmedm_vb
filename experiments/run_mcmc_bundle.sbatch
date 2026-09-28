@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=pmedm-mcmc-bundle
-#SBATCH --account=acf-utk0011
+#SBATCH --account=isaac-utk0496
 #SBATCH --partition=campus-gpu
 #SBATCH --qos=campus-gpu
 #SBATCH --gpus=v100s:1
