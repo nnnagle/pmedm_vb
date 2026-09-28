@@ -199,6 +199,12 @@ export PMEDM_VB_DATA=/lustre/isaac24/scratch/$USER/pmedm_vb_data
 python -c "import sys; print(sys.executable)"   # must be inside the env
 ```
 
+**Slurm accounts.** GPU jobs are charged to `isaac-utk0496`; CPU and `short`
+jobs to `acf-utk0011`. The `.sbatch` headers follow this (`run_mcmc*.sbatch`
+on `isaac-utk0496`, the rest on `acf-utk0011`). A command-line `--partition`
+that moves a job between CPU and GPU needs a matching `--account` as well;
+a pending job can be moved with `scontrol update JobId=<id> Account=<account>`.
+
 **Do not `module load anaconda3`.** Source conda's shell hook from the module's
 installation path directly, as above. Loading the module prepends its own `bin`
 to `PATH`, and `conda activate` does not win that race -- the prompt and

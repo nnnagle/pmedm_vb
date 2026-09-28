@@ -46,7 +46,9 @@ The unit is the household or GQ person; one problem per PUMA; alpha in (0, 1],
 alpha = 1 is classic diagonal PMEDM; tract taper is the default; n is the
 sample size (record count) wherever it appears. HMC jobs run on the
 `campus-gpu` partition and QoS, which gives a V100: elsewhere they can land on
-a T4, about 30x slower for this float64 code. The recent VB and HMC runs all
+a T4, about 30x slower for this float64 code. GPU jobs are charged to Slurm
+account `isaac-utk0496`, CPU and `short` jobs to `acf-utk0011` (README,
+**Every session**); give commands that keep to this. The recent VB and HMC runs all
 used `--variance-floor zero`; confirm with the user whether the comparison
 keeps it.
 
