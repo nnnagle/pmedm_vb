@@ -16,7 +16,8 @@ Methods and where their draws come from (``--run`` is the results directory):
 - ``hmc_short``, ``hmc_ref``: ``<run>/<name>_trace.npz`` from
   ``run_mcmc.py sample``; kept draws, thinned evenly to ``--draws``.
 
-``<name>`` is ``<puma>_tract_a<alpha>``. ``--reference`` (an HMC reference run
+``<name>`` is ``<puma>_<taper>_a<alpha>`` (``--taper``, default ``tract``), with
+``_h<level>`` appended under a hierarchy. ``--reference`` (an HMC reference run
 for the same cell) adds the comparisons against it, and ``--whiten`` (the
 skewed VB run whose Gaussian part whitened HMC) adds the whitened-coordinate
 statistics. The reference's own summaries are cached in the reference
@@ -115,6 +116,9 @@ def parse_args() -> argparse.Namespace:
                         help="also append per-table summaries to this CSV (see module docstring)")
     parser.add_argument("--area", default="knox-2024-5yr")
     parser.add_argument("--variance-floor", default="zero")
+    parser.add_argument("--taper", choices=["tract", "none"], default="tract",
+                        help="the fits' Sigma taper: selects their result names and the Sigma "
+                             "for the Laplace start and PSIS")
     parser.add_argument("--hierarchy", choices=["none", "tract", "puma"], default="none",
                         help="the fits' hierarchy level (pmedm_vb.assemble.hierarchy): selects "
                              "the _h<level> results and scores lambda_data; raking ignores it")
@@ -129,9 +133,13 @@ def floor_spec(text: str):
     return None if text == "none" else "zero" if text == "zero" else float(text)
 
 
-def fit_name(puma: str, alpha: float, hierarchy: str = "none") -> str:
+def fit_name(puma: str, alpha: float, hierarchy: str = "none", taper: str = "tract") -> str:
     suffix = "" if hierarchy == "none" else f"_h{hierarchy}"
-    return f"{puma}_tract_a{alpha:g}{suffix}"
+    return f"{puma}_{taper}_a{alpha:g}{suffix}"
+
+
+def taper_spec(text: str) -> str | None:
+    return None if text == "none" else text
 
 
 def thinned(kept: np.ndarray | None, draws: int) -> np.ndarray | None:
@@ -162,7 +170,7 @@ def method_draws(args, inputs: PMEDMInputs, rng, h) -> tuple[dict, dict]:
     or None}``, and the method's timing and settings. ``lam`` is always in
     today's layout; ``xi`` is the solver's coordinates (the same without a
     hierarchy)."""
-    name = fit_name(args.puma, args.alpha, args.hierarchy)
+    name = fit_name(args.puma, args.alpha, args.hierarchy, args.taper)
     timing: dict[str, float] = {}
     if args.method in ("ipf", "sinkhorn"):
         with np.load(args.run / f"{args.puma}_{args.method}.npz") as saved:
@@ -180,7 +188,7 @@ def method_draws(args, inputs: PMEDMInputs, rng, h) -> tuple[dict, dict]:
             xi = saved["xi"] if "xi" in saved.files else None
             timing["fit_seconds"] = float(saved["seconds"])
         start = time.perf_counter()
-        result = SimpleNamespace(lam=lam, alpha=args.alpha, taper="tract",
+        result = SimpleNamespace(lam=lam, alpha=args.alpha, taper=taper_spec(args.taper),
                                  variance_floor=floor_spec(args.variance_floor),
                                  hierarchy=args.hierarchy, xi=xi)
         q = StructuredGaussian.laplace(inputs, result)
@@ -393,7 +401,7 @@ def reference_summaries(args, inputs, sets):
     """The reference's per-subset cell summaries, its per-cell max ``log p``, and
     its thinned ``lambda`` and ``xi`` draws; cached beside the reference trace
     (and recomputed if the cache predates a scored subset)."""
-    name = fit_name(args.puma, args.alpha, args.hierarchy)
+    name = fit_name(args.puma, args.alpha, args.hierarchy, args.taper)
     cache = args.reference / f"{name}_refsummary.npz"
     with np.load(args.reference / f"{name}_trace.npz") as saved:
         lam = thinned(saved["lam"], args.draws)
@@ -504,7 +512,8 @@ def main() -> None:
             import torch
 
             torch.set_num_threads(max(1, torch.get_num_threads()))
-            sigma = hierarchy.sigma(inputs, args.alpha, "tract", floor_spec(args.variance_floor))
+            sigma = hierarchy.sigma(inputs, args.alpha, taper_spec(args.taper),
+                                    floor_spec(args.variance_floor))
             target = _DualTarget(inputs, sigma, "cpu", hierarchy)
             xi = source["xi"]
             log_ratio = -inputs.n * batched_f(target, xi, 100) - source["q"].log_density(xi)
@@ -520,7 +529,7 @@ def main() -> None:
                                      stat="p50", value=float(pairs[f"{column}_{tag}"].median())))
             if args.whiten is not None:
                 q_white, _, _ = load_vb(
-                    args.whiten / f"{fit_name(args.puma, args.alpha, args.hierarchy)}.npz")
+                    args.whiten / f"{fit_name(args.puma, args.alpha, args.hierarchy, args.taper)}.npz")
                 coords = compare.coordinate_comparison(compare.whitened(q_white, ref_xi),
                                                        compare.whitened(q_white, source["xi"]))
                 rows += rows_for(base, "joint", "whitened_sd_ratio", coords["sd_ratio"], CELL_STATS)
