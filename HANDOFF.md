@@ -90,10 +90,12 @@ Every row is run afresh for every (PUMA, alpha); none has been run at alpha
 0.01 before, and only 4701502 at alpha 1 has an HMC reference so far.
 
 **Raking may not be feasible, and finding out is part of the job.** The
-constraints are published estimates at two levels that do not agree -- a
-tract estimate is not the sum of its block groups' -- and many small cells are
-published as 0 or with large SEs, so classic IPF (Deming & Stephan 1940) has
-no exact solution to converge to. Options to put to the user: rake to one
+constraints' estimates nest (block groups sum to tracts, tracts to PUMAs;
+only the MOEs do not add), so level disagreement is not the obstacle, and IPF
+fits block group margins only. But many small cells are published as 0 or with
+large SEs, and different tables may publish different totals for one
+universe, so classic IPF (Deming & Stephan 1940) may have no exact solution to
+converge to; `experiments/ipf_diagnosis.py` checks which cause applies. Options to put to the user: rake to one
 level only, rake to a reconciled set of margins, or a relaxed raking with a
 convergence tolerance. Raking has no Sigma, so its result does not depend on
 alpha, and it gives one weight matrix, so like MAP its only simulation is

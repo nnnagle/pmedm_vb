@@ -1002,12 +1002,16 @@ def core_tables(area: StudyArea, geography: str) -> list[ConstraintTable]:
 def default_tables(area: StudyArea) -> list[ConstraintTable]:
     """The settled constraint set: core six at both levels, plus tract-only.
 
-    The core tables are constrained at *both* levels deliberately, and this is
-    not double counting. An ACS tract estimate is not the sum of its block
-    group estimates: the two are estimated separately from the same sample, so
-    they differ, and the tract figure has the lower variance. Constraining both
-    lets the more reliable tract estimate discipline the noisier block group
-    ones, which is much of what PMEDM is for.
+    The core tables are constrained at both levels with the same categories.
+    ACS estimates nest: a tract estimate is the sum of its block group
+    estimates, and each replicate estimate is too; only the MOEs do not add,
+    because the block group errors are correlated. So each core tract row
+    measures a total its block group rows already determine. The model treats
+    the two as separate measurements whose errors are linked only through the
+    replicate covariance in ``Sigma``: fully at ``alpha = 0``, not at all at
+    ``alpha = 1``, where each tract total is in effect counted twice. The
+    ``hierarchy`` option (``assemble/hierarchy.py``) is the alternative that
+    measures each total once.
 
     The three tract-only tables add what block group cannot carry at all:
     group quarters population, income depth below the household income bands,

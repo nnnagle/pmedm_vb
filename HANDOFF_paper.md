@@ -86,9 +86,13 @@ race, B08301 means of transportation, B19001 household income, B25003 tenure,
 C24010 sex by occupation -- and three at tract only: B26001 group quarters,
 B17024 poverty by age, B23001 employment status. Categories are collapsed to
 published boundaries; collapsing is exact because the replicates are summed
-with the cells (module docstring). Both levels are constrained deliberately:
-a tract estimate is not the sum of its block groups' (`default_tables`
-docstring).
+with the cells (module docstring). ACS estimates nest: a tract estimate, and
+each of its replicates, is the sum of its block groups'; the MOEs do not add
+because the block group errors are correlated. So each core tract row measures
+a total its block group rows already determine, and the two are tied only
+through the replicate covariance in `Sigma` (fully at alpha 0, not at all at
+alpha 1). The `hierarchy` option measures each total once (`default_tables`
+docstring, `assemble/hierarchy.py`).
 
 **Variances and `Sigma`.** Successive-differences replicate variance, `4/80`
 times the sum of squared replicate deviations (Fay & Train 1995 is cited in
@@ -125,9 +129,12 @@ posterior. Which Laplace approximation is the baseline -- over `p` or over
 
 Settings: VB 64 draws per step; HMC 32 chains, trajectory 3.0, whitened by
 the same cell's skewed VB fit, distinct seeds per run; raking has no `Sigma`
-and so no alpha. Two raking points for the text: hard IPF has no exact
-solution here (published margins at the two levels, and different tables'
-totals, disagree), so it is run to a tolerance and reported where it stalls;
+and so no alpha. Two raking points for the text: hard IPF fits block group
+margins only and stalls in three of the four PUMAs, so it is run to a
+tolerance and reported where it stalls -- the cause (tables with one universe
+publishing different totals, or published zeros removing every carrier of a
+nonzero cell) is being checked with `experiments/ipf_diagnosis.py` and is not
+yet established;
 Sinkhorn's penalty weights `c_k = Y_k / sigma_k^2` and its zero-target rule
 (published SE / 1000) are this project's choices, not the literature's, and
 should be written as such (`rake.py` docstring).

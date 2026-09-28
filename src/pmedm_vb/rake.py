@@ -10,9 +10,13 @@ closest matrix in KL divergence that meets that one margin exactly (Csiszar
 1975, *Annals of Probability* 3). A unit with loading ``x_ik`` is scaled by
 ``exp(-theta x_ik)``, with ``theta`` the root of a one-dimensional monotone
 equation; for 0/1 loadings that is the familiar ratio update. Tract margins are
-not fitted. Block group and tract estimates do not agree, and published small
-cells may not be jointly attainable, so an exact solution may not exist: the
-cycle stops at ``tol`` or ``max_sweeps`` and reports how far it got.
+not fitted (they are the sums of the block group estimates, so they would add
+no target). Published margins may still not be jointly attainable -- two
+tables with one universe may publish different block group totals, and a
+published zero removes every unit carrying that category from the block group
+-- so an exact solution may not exist: the cycle stops at ``tol`` or
+``max_sweeps`` and reports how far it got (``experiments/ipf_diagnosis.py``
+checks which applies).
 
 **Unbalanced Sinkhorn** (:func:`rake_sinkhorn`). Hard margins replaced by KL
 penalties, as in the unbalanced scaling algorithms of Chizat, Peyre, Schmitzer
