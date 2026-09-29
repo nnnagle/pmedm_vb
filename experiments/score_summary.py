@@ -13,7 +13,10 @@ for tables and figures in R::
 With ``--by-table`` (the per-table CSV of ``compare_methods.py --by-table``)
 it writes ``<out>/table_summary.txt`` instead: per alpha and ACS table, the
 bias and coverage against the published values and the ratio of the draws'
-90% half-width to the published MOE, the last two over sampled cells only.
+90% half-width to the published MOE, the last two over sampled cells only;
+and ``<out>/distribution_summary.txt``: per alpha, table and method, the
+distribution measures (TVD, Q, geometric-mean half-width over MOE) of
+``compare_methods.distribution_rows``.
 """
 
 from __future__ import annotations
@@ -116,13 +119,57 @@ def table_view(path: Path) -> list[str]:
     return lines
 
 
+#: (label, cells, metric, stat) for the distribution view.
+DISTRIBUTION_COLUMNS = [
+    ("areas", "all", "tvd", "n"),
+    ("tvd", "all", "tvd", "wmean"),
+    ("tvd0", "all", "tvd_zero", "wmean"),
+    ("tvd_p90", "all", "tvd", "p90"),
+    ("tvd_rep", "all", "tvd_rep", "wmean"),
+    ("within", "all", "tvd_within_rep", "wmean"),
+    ("n_q", "sampled", "q", "n"),
+    ("Q_w", "sampled", "q", "weighted"),
+    ("Q_u", "sampled", "q", "unweighted"),
+    ("hw/moe_w", "sampled", "hw_over_moe_gmean", "weighted"),
+    ("hw/moe_u", "sampled", "hw_over_moe_gmean", "unweighted"),
+]
+
+
+def distribution_view(path: Path) -> list[str]:
+    frame = pd.read_csv(path, dtype={"puma": str})
+    lines = [
+        "Fit of each method's posterior mean to each published table (median over PUMAs [min,max]).",
+        "tvd: total variation between the fitted and published distributions over the table's",
+        "  categories, per area, weighted mean over areas by published total; tvd0 its part in",
+        "  published-zero cells; tvd_p90 over areas; tvd_rep the same for the SDR replicates",
+        "  (sampling error alone); within: share of areas whose tvd is at most the replicates' p90.",
+        "Q: mean z^2 over sampled cells, pooled over areas, weighted by published count (_w) or not",
+        "  (_u); 1 = off by sampling error alone. hw/moe: geometric mean of the 90% half-width",
+        "  over the published MOE, sampled cells, weighted or not. Held-out: no replicates, so no",
+        "  tvd_rep; held-out PUMA totals have no SE, so tvd only.", ""]
+    frame = frame[frame.metric.isin({c[2] for c in DISTRIBUTION_COLUMNS})]
+    for alpha, block in frame.groupby("alpha"):
+        rows = {}
+        for (subset, table, method), group in block.groupby(["subset", "table", "method"]):
+            row = {}
+            for label, cells, metric, stat in DISTRIBUTION_COLUMNS:
+                sel = group[(group.cells == cells) & (group.metric == metric) & (group.stat == stat)]
+                row[label] = fmt(sel.groupby("puma")["value"].first())
+            rows[(subset.replace("_block_group", "_bg"), table, method)] = row
+        lines += [f"== alpha {alpha:g}", pd.DataFrame(rows).T.to_string(), ""]
+    return lines
+
+
 def main() -> None:
     args = parse_args()
     if args.by_table is not None:
         text = "\n".join(table_view(args.by_table)) + "\n"
         args.out.mkdir(parents=True, exist_ok=True)
         (args.out / "table_summary.txt").write_text(text)
+        dist = "\n".join(distribution_view(args.by_table)) + "\n"
+        (args.out / "distribution_summary.txt").write_text(dist)
         print(text)
+        print(f"distribution view written to {args.out / 'distribution_summary.txt'}")
         return
     scores = pd.read_csv(args.scores, dtype={"puma": str})
     lines = ["Median over PUMAs [min,max]. Held-out: hr = related, hl = less related (block group).",

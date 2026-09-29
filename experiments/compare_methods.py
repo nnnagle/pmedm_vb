@@ -59,7 +59,17 @@ directory (``<name>_refsummary.npz``) and reused.
   SE) per ACS table, over all its cells (``cells = all``) and over the
   ``sampled`` ones only -- a nonzero estimate whose variance is a sampling
   variance, not a zero cell's modelled one and not below the zero-count
-  floor (see :func:`outcome_sets`).
+  floor (see :func:`outcome_sets`). The same CSV also carries, per table, how
+  the posterior mean fits the published table as a distribution over its
+  categories (total variation, split into published-zero and nonzero cells,
+  with the SDR replicates' own total variation as the sampling benchmark), the
+  mean ``z^2`` over sampled cells (``q``) and the geometric-mean half-width
+  over MOE, each weighted by published count and not; see
+  :func:`distribution_rows`. Held-out PUMA totals (the tract estimates
+  summed; no SE) are scored by total variation only.
+- ``--score-area`` scores against another area's tables with the same units
+  and zones: a fit on ``knox-min-2024-5yr`` (``drop_small_cells.py``) against
+  the full ``knox-2024-5yr`` tables, so its dropped cells are scored too.
 - ``timing``: seconds -- fit, MAP part, drawing -- and for HMC the sampler's
   seconds, its warmup part and seconds per 1,000 bulk ESS (minimum and median
   over coordinates of the kept ``lambda``).
@@ -115,6 +125,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--by-table", type=Path, default=None,
                         help="also append per-table summaries to this CSV (see module docstring)")
     parser.add_argument("--area", default="knox-2024-5yr")
+    parser.add_argument("--score-area", default=None,
+                        help="score against this area's tables instead of --area's: same units "
+                             "and zones, e.g. the full tables for a fit with cells dropped")
     parser.add_argument("--variance-floor", default="zero")
     parser.add_argument("--taper", choices=["tract", "none"], default="tract",
                         help="the fits' Sigma taper: selects their result names and the Sigma "
@@ -255,9 +268,11 @@ def outcome_sets(inputs: PMEDMInputs, heldout: HeldOut | None) -> list[dict]:
         ("block group", slice(split, None), inputs.Y_B, inputs.bg_constraints),
     ):
         v, fl, s = (a[rows].reshape(Y.shape, order="F") for a in (inputs.sigma_v, floor, replicate))
+        # replicate deviations Y_r - Y as (areas, cells, replicates)
+        rep = inputs.sigma_l[rows].reshape(Y.shape[1], Y.shape[0], -1).transpose(1, 0, 2)
         sets.append(dict(subset=f"constrained_{level.replace(' ', '_')}", level=level,
                          X=sp.csc_matrix(inputs.X_T if level == "tract" else inputs.X_B),
-                         Y=Y, se=np.sqrt(v), names=list(names),
+                         Y=Y, se=np.sqrt(v), names=list(names), rep=rep,
                          sampled=(Y > 0) & (s > 0) & (v >= fl)))
     if heldout is not None:
         for level, rows, n_areas in (("tract", slice(0, split), inputs.Y_T.shape[0]),
@@ -285,7 +300,18 @@ def outcome_sets(inputs: PMEDMInputs, heldout: HeldOut | None) -> list[dict]:
     Y_p = inputs.Y_T.sum(axis=0)[None, :]
     sets.append(dict(subset="constrained_puma", level="puma", X=sp.csc_matrix(inputs.X_T),
                      Y=Y_p, se=np.sqrt(s_p)[None, :], names=list(inputs.tract_constraints),
-                     sampled=(Y_p > 0) & (s_p[None, :] > 0)))
+                     rep=summed[None], sampled=(Y_p > 0) & (s_p[None, :] > 0)))
+    # Held-out PUMA totals: the tract estimates summed. No replicates, so no SE:
+    # scored by the distribution measures of ``--by-table`` only.
+    if heldout is not None:
+        relation = np.array(heldout.relation("tract"))
+        for kind in ("related", "less_related"):
+            cols = np.flatnonzero(relation == kind)
+            Y = heldout.Y["tract"][:, cols].sum(axis=0)[None, :]
+            sets.append(dict(subset=f"heldout_{kind}_puma", level="puma",
+                             X=sp.csc_matrix(heldout.X["tract"])[:, cols], Y=Y, se=None,
+                             names=[heldout.names["tract"][c] for c in cols],
+                             sampled=np.zeros(Y.shape, bool)))
     return sets
 
 
@@ -371,26 +397,30 @@ def outcome_metrics(draws: np.ndarray, s: dict, ref: dict | None) -> dict[str, n
     """Per-cell metrics for one subset, flattened over (area, cell)."""
     summary = cell_summary(draws)
     out = {k: v.ravel() for k, v in summary.items()}
-    if s["Y"] is not None:
+    if s["Y"] is not None and s["se"] is not None:  # a published value with an SE
         Y, se = s["Y"], np.maximum(s["se"], 1e-9)
         out["z"] = ((summary["mean"] - Y) / se).ravel()
         out["abs_z"] = np.abs(out["z"])
-    if s["Y"] is not None and draws.shape[0] > 1:  # intervals need more than one draw
+    if s["Y"] is not None and s["se"] is not None and draws.shape[0] > 1:  # intervals need >1 draw
         Y, se = s["Y"], np.maximum(s["se"], 1e-9)
         out["halfwidth_over_moe"] = ((summary["q95"] - summary["q05"]) / 2 / (Z90 * se)).ravel()
         out["covers_published"] = ((summary["q05"] <= Y) & (Y <= summary["q95"])).astype(float).ravel()
         dev = np.abs(draws - Y[None]) / se[None]
         out["share_beyond_2se"] = (dev > 2).mean(0).ravel()
         out["share_beyond_3se"] = (dev > 3).mean(0).ravel()
-    if ref is not None:
-        scale = np.maximum(ref["sd"], compare.SD_FLOOR)
-        out["median_diff_ref_sd"] = np.abs((summary["q50"] - ref["q50"]) / scale).ravel()
-        if draws.shape[0] == 1:
-            return out
-        width_ref = np.maximum(ref["q95"] - ref["q05"], compare.SD_FLOOR)
-        out["mean_diff_ref_sd"] = np.abs((summary["mean"] - ref["mean"]) / scale).ravel()
-        out["sd_ratio_ref"] = (summary["sd"] / scale).ravel()
-        out["width_ratio_ref"] = ((summary["q95"] - summary["q05"]) / width_ref).ravel()
+    return out if ref is None else _ref_metrics(out, summary, draws, ref)
+
+
+def _ref_metrics(out: dict, summary: dict, draws: np.ndarray, ref: dict) -> dict:
+    """Add the comparisons against the reference's cell summaries to ``out``."""
+    scale = np.maximum(ref["sd"], compare.SD_FLOOR)
+    out["median_diff_ref_sd"] = np.abs((summary["q50"] - ref["q50"]) / scale).ravel()
+    if draws.shape[0] == 1:
+        return out
+    width_ref = np.maximum(ref["q95"] - ref["q05"], compare.SD_FLOOR)
+    out["mean_diff_ref_sd"] = np.abs((summary["mean"] - ref["mean"]) / scale).ravel()
+    out["sd_ratio_ref"] = (summary["sd"] / scale).ravel()
+    out["width_ratio_ref"] = ((summary["q95"] - summary["q05"]) / width_ref).ravel()
     return out
 
 
@@ -402,7 +432,8 @@ def reference_summaries(args, inputs, sets):
     its thinned ``lambda`` and ``xi`` draws; cached beside the reference trace
     (and recomputed if the cache predates a scored subset)."""
     name = fit_name(args.puma, args.alpha, args.hierarchy, args.taper)
-    cache = args.reference / f"{name}_refsummary.npz"
+    tag = "" if args.score_area in (None, args.area) else f"_{args.score_area}"
+    cache = args.reference / f"{name}{tag}_refsummary.npz"
     with np.load(args.reference / f"{name}_trace.npz") as saved:
         lam = thinned(saved["lam"], args.draws)
         xi = thinned(saved["xi"], args.draws) if "xi" in saved.files else lam
@@ -445,7 +476,7 @@ def by_table_rows(base: dict, s: dict, metrics: dict[str, np.ndarray]) -> list[d
     table = np.array([n.split(".")[0] for n in s["names"]])[np.tile(np.arange(k), s["Y"].shape[0])]
     sampled = s["sampled"].ravel()
     per_cell = dict(metrics)
-    if "sd" in per_cell:
+    if "sd" in per_cell and s["se"] is not None:
         per_cell["sd_over_se"] = per_cell["sd"] / np.maximum(s["se"], 1e-9).ravel()
     out = []
     for name in np.unique(table):
@@ -454,6 +485,87 @@ def by_table_rows(base: dict, s: dict, metrics: dict[str, np.ndarray]) -> list[d
             for metric in TABLE_METRICS:
                 if metric in per_cell:
                     out += rows_for(row_base, s["subset"], metric, per_cell[metric][mask], CELL_STATS)
+    return out
+
+
+#: Per-area statistics of the distribution measures: the mean weighted by the
+#: area's published table total, then the plain mean and quantiles.
+AREA_STATS = (0.50, 0.90, 1.00)
+
+
+def distribution_rows(base: dict, s: dict, mean: np.ndarray,
+                      metrics: dict[str, np.ndarray]) -> list[dict]:
+    """Per-table fit of the posterior mean to the published table.
+
+    Per area, the table's published cells ``Y`` and fitted means ``m`` are each
+    normalised to a distribution over the table's categories, ``p`` and
+    ``p_hat``, and compared by total variation: ``tvd = 1/2 sum |p_hat - p|``,
+    split into ``tvd_zero`` (the fitted mass in published-zero cells) and
+    ``tvd_pos`` (the mismatch among the nonzero ones). With replicates, the
+    same is computed for each replicate table ``Y + 2 (Y_r - Y)`` (the factor
+    2 gives each deviation one sampling variance under SDR's ``4/80``; clipped
+    at 0) against ``p``: ``tvd_rep`` is its mean over replicates, and
+    ``tvd_within_rep`` whether the fit's tvd is at most the replicates' 90th
+    percentile. Areas with a published total of 0 are skipped; so are
+    one-category tables, whose tvd is 0 by construction.
+
+    Over the table's sampled cells, pooled across areas: ``q`` is the mean of
+    ``z^2``, weighted by the published count (``stat = weighted``) and not
+    (``unweighted``) -- 1 if the fit were off by sampling error alone -- and
+    ``hw_over_moe_gmean`` the geometric mean of the draws' 90% half-width over
+    the published MOE, weighted and not.
+    """
+    Y = s["Y"]
+    table = np.array([n.split(".")[0] for n in s["names"]])
+    rep = s.get("rep")
+    out = []
+    for name in np.unique(table):
+        cols = np.flatnonzero(table == name)
+        row_base = dict(base, table=name)
+        Yt, Mt = Y[:, cols], mean[:, cols]
+        total, fitted = Yt.sum(axis=1), Mt.sum(axis=1)
+        keep = (total > 0) & (fitted > 0)
+        if cols.size > 1 and keep.any():
+            p, ph = Yt[keep] / total[keep, None], Mt[keep] / fitted[keep, None]
+            zero = p == 0
+            per_area = {"tvd_zero": 0.5 * np.where(zero, ph, 0).sum(axis=1),
+                        "tvd_pos": 0.5 * np.where(zero, 0, np.abs(ph - p)).sum(axis=1)}
+            per_area["tvd"] = per_area["tvd_zero"] + per_area["tvd_pos"]
+            if rep is not None:
+                Yr = np.maximum(Yt[keep][:, :, None] + 2 * rep[keep][:, cols], 0)
+                pr = Yr / np.maximum(Yr.sum(axis=1, keepdims=True), 1e-12)
+                tvd_r = 0.5 * np.abs(pr - p[:, :, None]).sum(axis=1)  # (areas, replicates)
+                per_area["tvd_rep"] = tvd_r.mean(axis=1)
+                per_area["tvd_within_rep"] = (
+                    per_area["tvd"] <= np.quantile(tvd_r, 0.9, axis=1)).astype(float)
+            weight = total[keep]
+            for metric, values in per_area.items():
+                rb = dict(row_base, cells="all", subset=s["subset"], metric=metric)
+                out.append(dict(rb, stat="wmean", value=float(np.average(values, weights=weight))))
+                out.append(dict(rb, stat="mean", value=float(values.mean())))
+                out.append(dict(rb, stat="n", value=float(values.size)))
+                out += [dict(rb, stat=f"p{100 * q:g}", value=float(np.quantile(values, q)))
+                        for q in AREA_STATS]
+        if s["se"] is None:
+            continue
+        mask = s["sampled"][:, cols]
+        if not mask.any():
+            continue
+        rb = dict(row_base, cells="sampled", subset=s["subset"])
+        w = Yt[mask]
+        z2 = np.square((Mt[mask] - Yt[mask]) / np.maximum(s["se"][:, cols][mask], 1e-9))
+        out += [dict(rb, metric="q", stat="weighted", value=float(np.average(z2, weights=w))),
+                dict(rb, metric="q", stat="unweighted", value=float(z2.mean())),
+                dict(rb, metric="q", stat="n", value=float(z2.size))]
+        if "halfwidth_over_moe" in metrics:
+            ratio = metrics["halfwidth_over_moe"].reshape(Y.shape)[:, cols][mask]
+            ok = ratio > 0
+            if ok.any():
+                log_r = np.log(ratio[ok])
+                out += [dict(rb, metric="hw_over_moe_gmean", stat="weighted",
+                             value=float(np.exp(np.average(log_r, weights=w[ok])))),
+                        dict(rb, metric="hw_over_moe_gmean", stat="unweighted",
+                             value=float(np.exp(log_r.mean())))]
     return out
 
 
@@ -466,10 +578,15 @@ def main() -> None:
 
     path = processed_dir() / "inputs" / args.area / args.puma
     inputs = PMEDMInputs.load(path)
-    heldout = HeldOut.load(path) if HeldOut.exists(path) else None
+    score_path = processed_dir() / "inputs" / (args.score_area or args.area) / args.puma
+    scored = inputs if score_path == path else PMEDMInputs.load(score_path)
+    if scored is not inputs and not (scored.units.equals(inputs.units)
+                                     and scored.zones.equals(inputs.zones)):
+        raise SystemExit(f"{score_path} and {path} have different units or zones")
+    heldout = HeldOut.load(score_path) if HeldOut.exists(score_path) else None
     if heldout is None:
-        logger.warning("no held-out tables under %s; scoring without them", path)
-    sets = outcome_sets(inputs, heldout)
+        logger.warning("no held-out tables under %s; scoring without them", score_path)
+    sets = outcome_sets(scored, heldout)
 
     from pmedm_vb.assemble.hierarchy import Hierarchy
 
@@ -492,6 +609,8 @@ def main() -> None:
             rows += rows_for(base, s["subset"], metric, values, CELL_STATS)
         if args.by_table is not None and s["Y"] is not None:
             table_rows += by_table_rows(base, s, metrics)
+            table_rows += distribution_rows(base, s, metrics["mean"].reshape(s["Y"].shape),
+                                            metrics)
 
     p = pd.DataFrame(acc.p_rows)
     for column in p.columns:
