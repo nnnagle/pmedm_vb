@@ -120,13 +120,13 @@ class Hierarchy:
         """``level`` is one of :data:`LEVELS`, or one with ``-c<threshold>``
         appended for the per-area collapse of :mod:`pmedm_vb.assemble.collapse`
         (e.g. ``"puma-c15"``), which returns a
-        :class:`~pmedm_vb.assemble.collapse.CollapsedHierarchy`. ``"null"`` (or
-        ``"null-c<threshold>"``) returns a
+        :class:`~pmedm_vb.assemble.collapse.CollapsedHierarchy`. ``"nullspace"`` (or
+        ``"nullspace-c<threshold>"``) returns a
         :class:`~pmedm_vb.assemble.nullspace.NullSpaceHierarchy`, which is built
         for one ``Sigma`` and so needs ``alpha``, ``taper`` and ``variance_floor``;
         the other levels ignore them."""
         base, collapse = split_level(level)
-        if base == "null":
+        if base == "nullspace":
             from pmedm_vb.assemble.nullspace import NullSpaceHierarchy
 
             return NullSpaceHierarchy.build_null(inputs, collapse, alpha=alpha, taper=taper,

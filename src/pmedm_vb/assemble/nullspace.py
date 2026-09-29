@@ -7,7 +7,7 @@ the fit along it is set by ``Sigma`` alone. Two sources give such directions
 (``experiments/null_directions.py`` counts them): a total measured at two
 levels (a tract against its block groups, the PUMA against its tracts), and
 two tables sharing a universe or a margin in one area (total population in
-B01001 and B03002, households in B19001 and B25003). Level ``"null"`` removes
+B01001 and B03002, households in B19001 and B25003). Level ``"nullspace"`` removes
 all of them, with the PUMA rows of ``"puma"`` included.
 
 **Only where the tables agree.** Removing a direction ``v`` also removes the
@@ -40,7 +40,7 @@ inside tracts; the complement is then ``D``-orthogonal, not exactly
 ``Sigma``-orthogonal, for the few directions coupling tracts.
 
 Works on the plain layout or on the per-area collapse of
-:mod:`pmedm_vb.assemble.collapse` (level ``"null-c<threshold>"``).
+:mod:`pmedm_vb.assemble.collapse` (level ``"nullspace-c<threshold>"``).
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ def _consistent(V: np.ndarray, y: np.ndarray, L: np.ndarray) -> tuple[np.ndarray
 
 
 class NullSpaceHierarchy(CollapsedHierarchy):
-    """Level ``"null"``: PUMA rows, and every consistent invisible direction removed.
+    """Level ``"nullspace"``: PUMA rows, and every consistent invisible direction removed.
 
     Built with :meth:`build_null` for one ``Sigma`` (``alpha``, taper,
     variance floor). Offers the interface of
@@ -105,8 +105,8 @@ class NullSpaceHierarchy(CollapsedHierarchy):
                 else CollapsedHierarchy.build(inputs, "puma", collapse))
         self = cls.__new__(cls)
         self.__dict__.update(base.__dict__)
-        self.level = "null" if collapse is None else f"null-c{collapse:g}"
-        self.base = "null"
+        self.level = "nullspace" if collapse is None else f"nullspace-c{collapse:g}"
+        self.base = "nullspace"
         self.group = np.full(self.m, -1)
         self.bg_group = self.group.copy()
         self.settings = (alpha, taper, variance_floor)

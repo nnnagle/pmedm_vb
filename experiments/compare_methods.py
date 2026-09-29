@@ -132,7 +132,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--taper", choices=["tract", "none"], default="tract",
                         help="the fits' Sigma taper: selects their result names and the Sigma "
                              "for the Laplace start and PSIS")
-    parser.add_argument("--hierarchy", choices=["none", "tract", "puma", "null"], default="none",
+    parser.add_argument("--hierarchy", choices=["none", "tract", "puma", "nullspace"], default="none",
                         help="the fits' hierarchy level (pmedm_vb.assemble.hierarchy): selects "
                              "the _h<level> results and scores lambda_data; raking ignores it")
     parser.add_argument("--draws", type=int, default=4000)

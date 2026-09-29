@@ -75,7 +75,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--puma", required=True)
     parser.add_argument("--alpha", type=float, required=True)
     parser.add_argument("--taper", choices=["tract", "none"], default="tract")
-    parser.add_argument("--hierarchy", choices=["none", "tract", "puma", "null"], default="none",
+    parser.add_argument("--hierarchy", choices=["none", "tract", "puma", "nullspace"], default="none",
                         help="the VB run's hierarchy level (pmedm_vb.assemble.hierarchy); "
                              "names gain _h<level>")
     parser.add_argument("--area", default="knox-2024-5yr", help="assembled-inputs directory name")
