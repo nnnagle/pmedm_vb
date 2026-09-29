@@ -23,8 +23,11 @@ Also, for the constraint tables only, the number of cells at each level
 (areas x categories, over all the PUMAs; PUMA cells are the summed tract
 estimates) with the published zeros among them in parentheses.
 
-Writes ``<out>/table_inventory.md``, ``.tex`` (booktabs) and ``.csv``, and the
-cell counts as ``<out>/table_cells.md``, ``.tex`` and ``.csv``::
+And the same counts per PUMA, over all constraint tables.
+
+Writes ``<out>/table_inventory.md``, ``.tex`` (booktabs) and ``.csv``, the
+cell counts by table as ``<out>/table_cells.*`` and by PUMA as
+``<out>/puma_cells.*``::
 
     $CONDA_PREFIX/bin/python experiments/table_inventory.py \\
         --puma 4701501 4701502 4701503 4701504 --out $RUNS/table_inventory
@@ -186,6 +189,26 @@ def cell_counts(area: StudyArea, pumas: list[str]) -> pd.DataFrame:
     return frame
 
 
+def puma_counts(area: StudyArea, pumas: list[str]) -> pd.DataFrame:
+    """Per PUMA: constraint cells at each level, and the published zeros among them."""
+    columns = {"PUMA": "PUMA (zeros)", "Tract": "Tract (zeros)", "Block Group": "Block Group (zeros)"}
+    rows = []
+    for puma in pumas:
+        inputs = PMEDMInputs.load(processed_dir() / "inputs" / area.slug / puma)
+        row = {"PUMA ID": puma}
+        for level, Y in (("PUMA", inputs.Y_T.sum(axis=0)), ("Tract", inputs.Y_T),
+                         ("Block Group", inputs.Y_B)):
+            row[columns[level]] = (int(Y.size), int((Y == 0).sum()))
+        rows.append(row)
+    total = {"PUMA ID": "Total"}
+    for column in columns.values():
+        total[column] = (sum(r[column][0] for r in rows), sum(r[column][1] for r in rows))
+    frame = pd.DataFrame(rows + [total])
+    for column in columns.values():
+        frame[column] = frame[column].map(lambda v: f"{v[0]:,} ({v[1]:,})")
+    return frame
+
+
 def simple_markdown(frame: pd.DataFrame) -> str:
     lines = ["| " + " | ".join(frame.columns) + " |", "|" + "---|" * len(frame.columns)]
     lines += ["| " + " | ".join(map(str, r)) + " |" for r in frame.itertuples(index=False)]
@@ -218,9 +241,14 @@ def main() -> None:
     cells.to_csv(args.out / "table_cells.csv", index=False)
     (args.out / "table_cells.md").write_text(simple_markdown(cells))
     (args.out / "table_cells.tex").write_text(simple_latex(cells))
+    by_puma = puma_counts(area, args.puma)
+    by_puma.to_csv(args.out / "puma_cells.csv", index=False)
+    (args.out / "puma_cells.md").write_text(simple_markdown(by_puma))
+    (args.out / "puma_cells.tex").write_text(simple_latex(by_puma))
     missing = frame.loc[frame.title == "", "table"].tolist()
     print(markdown(frame))
     print(simple_markdown(cells))
+    print(simple_markdown(by_puma))
     if missing:
         print(f"no published title found for: {', '.join(missing)}")
 
