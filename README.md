@@ -4,7 +4,7 @@ Penalized Max Ent Dasymetric Modeling problem as a variational bayes
 The derivation of the original max ent problem is in pmedm_derivation.md.
 The Census endpoints the downloaders use -- layouts, file schemas, coverage and
 the variance formulas -- are documented in census_data_sources.md.
-The original Maximum a posteriori problem was solved using Gauss Newton optimization on the dual function with custom rcpp code to evaluate the Hessian. This is a port to PyTorch for solving the Variational Bayes Problem (as well as the original MAP/Laplacian formulation for comparison).
+The original Maximum a posteriori problem was solved on the dual function by trust-region Newton with a preconditioned conjugate-gradient inner solver (exact Hessian-vector products, preconditioned by a sparse Cholesky factorisation of the Hessian refreshed every 20 iterations), in custom Rcpp code (PMEDMrcpp). This is a port to PyTorch for solving the Variational Bayes Problem (as well as the original MAP/Laplacian formulation for comparison).
 
 This is not production code. This is research code to write a paper. The paper will present the VB method, and compare simulation accuracy usability with the original (MAP/Laplacian/Penalized MaxEnt) method.
 
