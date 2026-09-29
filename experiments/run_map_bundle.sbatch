@@ -28,6 +28,9 @@
 # $RUNS/<jobid>/vb_<family>, each with its own summary.csv and logs/; each VB
 # process's own output is in $RUNS/<jobid>/vb_<family>.log. The job fails at
 # the end if any step did. --draws defaults to 64 here, as in the grid.
+# FAMILIES (environment) picks the VB families, default "gaussian skewed
+# sumdiff"; e.g. sbatch --export=ALL,FAMILIES="gaussian skewed" ... (sumdiff
+# does not run under --collapse).
 
 set -eo pipefail
 NAME=${1:?usage: sbatch run_map_bundle.sbatch NAME PUMA [options]}
@@ -59,8 +62,9 @@ esac
 mkdir -p "$OUT"
 cd "$REPO"
 CORES=${SLURM_CPUS_PER_TASK}
-PER=$((CORES / 3))
-echo "node $(hostname), $CORES cores ($PER per VB family), commit $(git rev-parse --short HEAD), $(date)"
+read -r -a FAMS <<< "${FAMILIES:-gaussian skewed sumdiff}"
+PER=$((CORES / ${#FAMS[@]}))
+echo "node $(hostname), $CORES cores ($PER per VB family: ${FAMS[*]}), commit $(git rev-parse --short HEAD), $(date)"
 echo "name $NAME, puma $PUMA, options: $*"
 
 failed=0
@@ -72,18 +76,17 @@ else
 fi
 
 pids=()
-for family in gaussian skewed sumdiff; do
+for family in "${FAMS[@]}"; do
     $PY -u experiments/run_map.py vb --name "$NAME" --puma "$PUMA" --cores "$PER" \
         --family "$family" --draws 64 --out "$OUT/vb_$family" "$@" \
         > "$OUT/vb_$family.log" 2>&1 &
     pids+=($!)
 done
-for i in 0 1 2; do
-    family=(gaussian skewed sumdiff)
+for i in "${!FAMS[@]}"; do
     if wait "${pids[i]}"; then
-        echo "=== $(date +%T) vb ${family[i]} done"
+        echo "=== $(date +%T) vb ${FAMS[i]} done"
     else
-        echo "=== $(date +%T) vb ${family[i]} FAILED (see $OUT/vb_${family[i]}.log)"; failed=$((failed + 1))
+        echo "=== $(date +%T) vb ${FAMS[i]} FAILED (see $OUT/vb_${FAMS[i]}.log)"; failed=$((failed + 1))
     fi
 done
 echo "done $(date); $failed step(s) failed"
