@@ -328,6 +328,96 @@ class DualHessian:
         return k_part + float(logdet_j) + float(np.log(np.abs(diagonal)).sum())
 
 
+class CollapsedHessian(DualHessian):
+    """:class:`DualHessian` for a :class:`~pmedm_vb.assemble.collapse.CollapsedHierarchy`.
+
+    In ``xi = (theta, lambda_P)`` the data see ``A xi`` for
+    ``A = [C'(I - Q_B - U U'), E_P]``, with ``Q_B`` the block group group means
+    (inside tracts), ``U`` the unit indicators of the tract-cell groups and
+    ``C`` the collapse (block diagonal by area). Split ``A = A_loc + G Gamma``
+    with ``A_loc = [C'(I - Q_B), 0]``, local to each tract, ``G = [C'U, E_P]``
+    and ``Gamma = [[-U', 0], [0, I]]``. Then
+
+    - data: ``A_loc' S A_loc`` in the tract blocks, and columns
+      ``F = A_loc' S G`` and ``Gamma'`` with ``[[0, I], [I, G'SG]]``;
+    - ``Sigma`` on ``zeta = (I - Q_B) theta ++ lambda_P - [U; 0] U' theta``: the
+      projected blocks, and columns ``Z_loc' Sigma_b [U; 0]`` and ``[U; 0]``
+      with ``c [[0, -I], [-I, U' Sigma_b U]]``, plus ``sqrt(c) zeta_T(B)`` for
+      an untapered global factor;
+    - the ridge ``kappa (Q_B + U U')``: ``kappa Q_B`` in the blocks, ``[U; 0]``
+      with ``kappa I``;
+    - the downdate ``-(A'u)(A'u)'``.
+
+    Without a collapse (``C = I``) this is the Hessian :class:`DualHessian`
+    builds for the same hierarchy, and it is checked against it.
+    """
+
+    def __init__(self, inputs: PMEDMInputs, state: DualState, sigma: Sigma, hierarchy) -> None:
+        h = hierarchy
+        c = penalty_scale(inputs)
+        self.size = h.size
+        self.rows, self.blocks, self.factors = [], [], []
+        U = h.tract_group_basis()                     # (size, g), zero off tract cells
+        g, k = U.shape[1], h.n_puma
+        G = np.zeros((h.m_full, g + k))
+        G[:, :g] = U[: h.m][h.row_cell]
+        tract_rows = np.flatnonzero(h.puma_of_row >= 0)
+        G[tract_rows, g + h.puma_of_row[tract_rows]] = 1.0
+        F = np.zeros((h.size, g + k))
+        GSG = np.zeros((g + k, g + k))
+        sig_u = np.zeros((h.size, g))
+        u_sig_u = np.zeros((g, g))
+        for (full_rows, s_block), cells in zip(_tract_blocks(inputs, state.p), h.tract_cells):
+            C_t = (h.row_cell[full_rows][None, :] == cells[:, None]).astype(float)
+            Q = h.local_projector(cells)
+            P = np.eye(cells.size) - Q
+            sigma_block = sigma.block_dense(cells)
+            block = P @ (C_t @ s_block @ C_t.T + c * sigma_block) @ P + h.kappa * Q
+            self._add_block(cells, block)
+            sg = s_block @ G[full_rows]
+            F[cells] = P @ (C_t @ sg)
+            GSG += G[full_rows].T @ sg
+            su = sigma_block @ U[cells]
+            sig_u[cells] = P @ su
+            u_sig_u += U[cells].T @ su
+        if k:
+            puma_rows = np.arange(h.m, h.size)
+            self._add_block(puma_rows, c * sigma.block_dense(puma_rows))
+
+        columns, pieces = [], []
+        b = sigma.global_factor
+        if b is not None:
+            columns.append(np.sqrt(c) * h.zeta_T(b))
+            pieces.append(np.eye(b.shape[1]))
+        if g + k:
+            gamma_t = np.zeros((h.size, g + k))
+            gamma_t[:, :g] = -U
+            gamma_t[h.m:, g:] = np.eye(k)
+            columns += [F, gamma_t]
+            eye = np.eye(g + k)
+            pieces.append(np.block([[np.zeros((g + k, g + k)), eye], [eye, GSG]]))
+        if g:
+            eye = np.eye(g)
+            columns += [sig_u, U]
+            pieces.append(c * np.block([[np.zeros((g, g)), -eye], [-eye, u_sig_u]]))
+            columns.append(U)
+            pieces.append(h.kappa * eye)
+        columns.append(h.lambda_data_T(state.u)[:, None])
+        pieces.append(-np.ones((1, 1)))
+        self.w = np.hstack(columns)
+        self.J = block_diag(*pieces)
+        self.signs = np.diag(self.J).copy()
+        self.k_inv_w = self._k_solve(self.w)
+        self.capacitance = lu_factor(np.linalg.inv(self.J) + self.w.T @ self.k_inv_w)
+
+
+def dual_hessian(inputs: PMEDMInputs, state: DualState, sigma: Sigma, hierarchy=None) -> DualHessian:
+    """The dual Hessian for whichever hierarchy ``hierarchy`` is."""
+    if getattr(hierarchy, "is_collapsed", False):
+        return CollapsedHessian(inputs, state, sigma, hierarchy)
+    return DualHessian(inputs, state, sigma, hierarchy)
+
+
 def solve_map(
     inputs: PMEDMInputs,
     *,
@@ -357,7 +447,9 @@ def solve_map(
         symmetry with :func:`~pmedm_vb.solvers.vb.solve_vb`.
     hierarchy:
         ``"none"``, ``"tract"`` or ``"puma"``: the sum-to-zero constraints and
-        PUMA rows of :mod:`pmedm_vb.assemble.hierarchy`. Newton then runs in
+        PUMA rows of :mod:`pmedm_vb.assemble.hierarchy`; with ``-c<threshold>``
+        appended, on the per-area collapsed cells of
+        :mod:`pmedm_vb.assemble.collapse`. Newton then runs in
         ``xi``; ``init``, if given, is ``xi``. The saddlepoint evidence is
         reported as NaN, since it is not comparable across constraint sets.
     """
@@ -370,8 +462,8 @@ def solve_map(
     op = ConstraintOperator(inputs)
     lam = np.zeros(h.size) if init is None else np.asarray(init, float)
     state = dual_state(inputs, lam, sigma, op, h)
-    scale = np.sqrt(np.concatenate([inputs.sigma_v, h.v_P]))
-    targets = np.concatenate([inputs.targets(), h.Y_P])
+    scale = np.sqrt(h.v_ext)
+    targets = h.targets_ext
 
     trace: dict[str, list[float]] = {
         "objective": [], "decrement": [], "step": [], "max_abs_z": [], "mahalanobis": [],
@@ -386,7 +478,7 @@ def solve_map(
     )
     for n_iter in range(max_iter + 1):
         tick = time.perf_counter()
-        hessian = DualHessian(inputs, state, sigma, h)
+        hessian = dual_hessian(inputs, state, sigma, h)
         direction = -hessian.solve(state.gradient)
         slope = float(state.gradient @ direction)
         if slope >= 0:
@@ -492,7 +584,7 @@ def laplace_precision(inputs: PMEDMInputs, result: MAPResult) -> DualHessian:
     sigma = h.sigma(inputs, result.alpha, result.taper, result.variance_floor)
     xi = result.lam if result.xi is None else result.xi
     state = dual_state(inputs, xi, sigma, hierarchy=h)
-    return DualHessian(inputs, state, sigma, h)
+    return dual_hessian(inputs, state, sigma, h)
 
 
 def _tract_blocks(inputs: PMEDMInputs, p: np.ndarray):

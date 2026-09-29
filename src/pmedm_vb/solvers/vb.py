@@ -128,7 +128,7 @@ from pmedm_vb.assemble.inputs import PMEDMInputs
 from pmedm_vb.assemble.sigma import Sigma
 from pmedm_vb.progress import logger
 from pmedm_vb.solvers.base import category_pairs, dual_state, weights_from_lambda
-from pmedm_vb.solvers.map_dual import DualHessian, MAPResult, solve_map
+from pmedm_vb.solvers.map_dual import DualHessian, MAPResult, dual_hessian, solve_map
 
 DTYPE = torch.float64
 
@@ -338,7 +338,7 @@ class StructuredGaussian:
         h = Hierarchy.build(inputs, getattr(result, "hierarchy", "none"))
         sigma = h.sigma(inputs, result.alpha, result.taper, result.variance_floor)
         centre = result.lam if getattr(result, "xi", None) is None else result.xi
-        hessian = DualHessian(inputs, dual_state(inputs, centre, sigma, hierarchy=h), sigma, h)
+        hessian = dual_hessian(inputs, dual_state(inputs, centre, sigma, hierarchy=h), sigma, h)
         n = inputs.n
         blocks = [np.linalg.cholesky(n * block) for block in hessian.blocks]
         family = cls(centre.copy(), hessian.rows, blocks,
@@ -705,6 +705,9 @@ def solve_vb(
 
     if family not in FAMILY_LAYERS:
         raise ValueError(f"family must be one of {sorted(FAMILY_LAYERS)}, got {family!r}")
+    if family == "sumdiff" and "-c" in hierarchy:
+        raise ValueError("the sumdiff family pairs tract and block group rows by category, "
+                         "which a collapsed hierarchy does not keep; use gaussian or skewed")
     if init is None:
         init = solve_map(inputs, alpha=alpha, taper=taper, variance_floor=variance_floor,
                          hierarchy=hierarchy)

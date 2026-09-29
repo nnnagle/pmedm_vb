@@ -139,7 +139,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ratio", type=float, nargs="+", default=[10.0, 100.0])
     parser.add_argument("--bg-share", type=float, nargs="+", default=[0.05, 0.25])
     parser.add_argument("--seed", type=int, default=0)
-    return parser.parse_args()
+    parser.add_argument("--collapse", type=float, default=None,
+                        help="collapse each area's zero cells into one and merge small positive "
+                             "cells until each holds more than this many (pmedm_vb.assemble."
+                             "collapse); the hierarchy level becomes <level>-c<threshold>")
+    args = parser.parse_args()
+    from pmedm_vb.assemble.hierarchy import level_name
+
+    if getattr(args, "hierarchy", None) is not None:
+        args.hierarchy = level_name(args.hierarchy, args.collapse)
+    return args
 
 
 def floor_spec(text: str):

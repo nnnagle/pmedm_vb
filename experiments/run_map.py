@@ -150,7 +150,16 @@ def parse_args() -> argparse.Namespace:
         help="assemble, solve, vb: statewide support with this prior share off the "
              "PUMA's own records (default: the PUMA's records only)",
     )
-    return parser.parse_args()
+    parser.add_argument("--collapse", type=float, default=None,
+                        help="collapse each area's zero cells into one and merge small positive "
+                             "cells until each holds more than this many (pmedm_vb.assemble."
+                             "collapse); the hierarchy level becomes <level>-c<threshold>")
+    args = parser.parse_args()
+    from pmedm_vb.assemble.hierarchy import level_name
+
+    if getattr(args, "hierarchy", None) is not None:
+        args.hierarchy = level_name(args.hierarchy, args.collapse)
+    return args
 
 
 def floor_spec(text: str) -> str | float | None:

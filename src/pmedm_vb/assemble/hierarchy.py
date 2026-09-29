@@ -63,6 +63,19 @@ from pmedm_vb.data.variance import SDR_FACTOR
 LEVELS = ("none", "tract", "puma")
 
 
+def split_level(level: str) -> tuple[str, float | None]:
+    """``"puma-c15"`` -> ``("puma", 15.0)``; ``"puma"`` -> ``("puma", None)``."""
+    if "-c" in level:
+        base, threshold = level.split("-c", 1)
+        return base, float(threshold)
+    return level, None
+
+
+def level_name(level: str, collapse: float | None) -> str:
+    """The level string for a CLI's ``--hierarchy`` and ``--collapse``."""
+    return level if collapse is None else f"{level}-c{collapse:g}"
+
+
 def _group_means(x: np.ndarray, group: np.ndarray, counts: np.ndarray) -> np.ndarray:
     """Per-row mean of ``x`` over its group (0 for ungrouped rows); ``x`` is
     ``(rows,)`` or ``(rows, k)``."""
@@ -98,9 +111,20 @@ class Hierarchy:
     kappa: float
     n_tracts: int
     puma_names: list[str]
+    N: float = 1.0
+    sigma_v: np.ndarray | None = None
 
     @classmethod
     def build(cls, inputs: PMEDMInputs, level: str = "none") -> "Hierarchy":
+        """``level`` is one of :data:`LEVELS`, or one with ``-c<threshold>``
+        appended for the per-area collapse of :mod:`pmedm_vb.assemble.collapse`
+        (e.g. ``"puma-c15"``), which returns a
+        :class:`~pmedm_vb.assemble.collapse.CollapsedHierarchy`."""
+        base, collapse = split_level(level)
+        if collapse is not None:
+            from pmedm_vb.assemble.collapse import CollapsedHierarchy
+
+            return CollapsedHierarchy.build(inputs, base, collapse)
         if level not in LEVELS:
             raise ValueError(f"level must be one of {LEVELS}, got {level!r}")
         n_tracts, c_t = inputs.Y_T.shape
@@ -146,7 +170,8 @@ class Hierarchy:
         y_ext = np.concatenate([inputs.targets(), Y_P]) / inputs.N
         return cls(level=level, m=m, group=group, bg_group=bg_group, puma_of_row=puma_of_row,
                    y_ext=y_ext, Y_P=Y_P, v_P=v_P, l_P=l_P, kappa=1.0 / inputs.n,
-                   n_tracts=n_tracts, puma_names=list(inputs.tract_constraints) if level == "puma" else [])
+                   n_tracts=n_tracts, puma_names=list(inputs.tract_constraints) if level == "puma" else [],
+                   N=float(inputs.N), sigma_v=inputs.sigma_v)
 
     # -- sizes -----------------------------------------------------------
 
@@ -162,6 +187,18 @@ class Hierarchy:
     @property
     def is_trivial(self) -> bool:
         return self.level == "none"
+
+    is_collapsed = False
+
+    @property
+    def targets_ext(self) -> np.ndarray:
+        """The constraint targets, PUMA rows appended (not divided by ``N``)."""
+        return self.y_ext * self.N
+
+    @property
+    def v_ext(self) -> np.ndarray:
+        """The published variances, PUMA rows appended."""
+        return np.concatenate([self.sigma_v, self.v_P])
 
     def _counts(self, group: np.ndarray) -> np.ndarray:
         return np.bincount(group[group >= 0], minlength=int(group.max()) + 1 if group.max() >= 0 else 0)
