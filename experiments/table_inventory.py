@@ -19,7 +19,12 @@ where it is not cached this needs the network, so run it on a login node.
 Category names are this project's, lightly tidied (``lt``/``ge`` become
 ``<``/``>=``, underscores become spaces).
 
-Writes ``<out>/table_inventory.md``, ``.tex`` (booktabs) and ``.csv``::
+Also, for the constraint tables only, the number of cells at each level
+(areas x categories, over all the PUMAs; PUMA cells are the summed tract
+estimates) with the published zeros among them in parentheses.
+
+Writes ``<out>/table_inventory.md``, ``.tex`` (booktabs) and ``.csv``, and the
+cell counts as ``<out>/table_cells.md``, ``.tex`` and ``.csv``::
 
     $CONDA_PREFIX/bin/python experiments/table_inventory.py \\
         --puma 4701501 4701502 4701503 4701504 --out $RUNS/table_inventory
@@ -145,6 +150,59 @@ def latex(frame: pd.DataFrame) -> str:
     return "\n".join(lines) + "\n"
 
 
+def cell_counts(area: StudyArea, pumas: list[str]) -> pd.DataFrame:
+    """Per constraint table and level: cells (areas x categories) and published zeros.
+
+    Summed over ``pumas``. PUMA cells are the tract estimates summed per PUMA,
+    one per category, as the ``--hierarchy puma`` rows are.
+    """
+    counts: dict[str, dict[str, list[int]]] = {}
+    for puma in pumas:
+        inputs = PMEDMInputs.load(processed_dir() / "inputs" / area.slug / puma)
+        tract_tables = np.array([n.split(".")[0] for n in inputs.tract_constraints])
+        bg_tables = np.array([n.split(".")[0] for n in inputs.bg_constraints])
+        for level, Y, tables in (("PUMA", inputs.Y_T.sum(axis=0, keepdims=True), tract_tables),
+                                 ("Tract", inputs.Y_T, tract_tables),
+                                 ("Block Group", inputs.Y_B, bg_tables)):
+            for table in np.unique(tables):
+                block = Y[:, tables == table]
+                entry = counts.setdefault(table, {}).setdefault(level, [0, 0])
+                entry[0] += block.size
+                entry[1] += int((block == 0).sum())
+    rows = []
+    for table in sorted(counts):
+        row = {"Table": table}
+        for level in ("PUMA", "Tract", "Block Group"):
+            row[level] = counts[table].get(level)
+        rows.append(row)
+    total = {"Table": "Total"}
+    for level in ("PUMA", "Tract", "Block Group"):
+        have = [r[level] for r in rows if r[level] is not None]
+        total[level] = [sum(c for c, _ in have), sum(z for _, z in have)]
+    rows.append(total)
+    frame = pd.DataFrame(rows)
+    for level in ("PUMA", "Tract", "Block Group"):
+        frame[level] = frame[level].map(lambda v: "–" if v is None else f"{v[0]:,} ({v[1]:,})")
+    return frame
+
+
+def simple_markdown(frame: pd.DataFrame) -> str:
+    lines = ["| " + " | ".join(frame.columns) + " |", "|" + "---|" * len(frame.columns)]
+    lines += ["| " + " | ".join(map(str, r)) + " |" for r in frame.itertuples(index=False)]
+    return "\n".join(lines) + "\n"
+
+
+def simple_latex(frame: pd.DataFrame) -> str:
+    lines = [r"\begin{tabular}{l" + "r" * (len(frame.columns) - 1) + "}", r"\toprule",
+             " & ".join(frame.columns) + r" \\", r"\midrule"]
+    for r in frame.itertuples(index=False):
+        if r[0] == "Total":
+            lines.append(r"\midrule")
+        lines.append(" & ".join(latex_escape(str(c)).replace("–", "--") for c in r) + r" \\")
+    lines += [r"\bottomrule", r"\end{tabular}"]
+    return "\n".join(lines) + "\n"
+
+
 def main() -> None:
     args = parse_args()
     area = StudyArea(name=args.name, state=args.state, year=args.year,
@@ -155,8 +213,14 @@ def main() -> None:
     frame.to_csv(args.out / "table_inventory.csv", index=False)
     (args.out / "table_inventory.md").write_text(markdown(frame))
     (args.out / "table_inventory.tex").write_text(latex(frame))
+    cells = cell_counts(area, args.puma)
+    cells = cells.rename(columns={c: f"{c} (zeros)" for c in ("PUMA", "Tract", "Block Group")})
+    cells.to_csv(args.out / "table_cells.csv", index=False)
+    (args.out / "table_cells.md").write_text(simple_markdown(cells))
+    (args.out / "table_cells.tex").write_text(simple_latex(cells))
     missing = frame.loc[frame.title == "", "table"].tolist()
     print(markdown(frame))
+    print(simple_markdown(cells))
     if missing:
         print(f"no published title found for: {', '.join(missing)}")
 
