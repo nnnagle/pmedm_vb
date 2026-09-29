@@ -136,7 +136,7 @@ def latex_escape(text: str) -> str:
 
 
 def latex(frame: pd.DataFrame) -> str:
-    lines = [r"\begin{tabular}{llllp{3cm}p{4cm}p{4cm}}", r"\toprule",
+    lines = [r"\begin{tabular}{lp{4.5cm}p{2.2cm}rp{2.2cm}p{3.5cm}p{3.5cm}}", r"\toprule",
              " & ".join(HEADERS) + r" \\", r"\midrule"]
     for r in frame.itertuples(index=False):
         cells = [r.table, r.title, r.role, str(r.categories), r.levels, r.largest, r.smallest]
