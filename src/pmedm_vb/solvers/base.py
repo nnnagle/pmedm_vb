@@ -164,10 +164,10 @@ def dual_state(
     u = op.forward(p)
     zeta = h.zeta(lam)
     sigma_zeta = sigma.matvec(zeta)
-    null = h.null(lam[: h.m])
+    ridge = h.ridge_gradient(lam)  # kappa (I - M) xi, M an orthogonal projection
     objective = float(h.y_ext @ zeta + total + 0.5 * c * (zeta @ sigma_zeta)
-                      + 0.5 * h.kappa * (null @ null))
-    gradient = h.zeta_T(h.y_ext + c * sigma_zeta) - h.lambda_data_T(u) + h.ridge_gradient(lam)
+                      + 0.5 * (lam @ ridge))
+    gradient = h.zeta_T(h.y_ext + c * sigma_zeta) - h.lambda_data_T(u) + ridge
     return DualState(lam=lam, p=p, u=u, objective=objective, gradient=gradient, lam_data=lam_data)
 
 

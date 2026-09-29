@@ -75,7 +75,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--puma", required=True)
     parser.add_argument("--alpha", type=float, required=True)
     parser.add_argument("--taper", choices=["tract", "none"], default="tract")
-    parser.add_argument("--hierarchy", choices=["none", "tract", "puma"], default="none",
+    parser.add_argument("--hierarchy", choices=["none", "tract", "puma", "null"], default="none",
                         help="the VB run's hierarchy level (pmedm_vb.assemble.hierarchy); "
                              "names gain _h<level>")
     parser.add_argument("--area", default="knox-2024-5yr", help="assembled-inputs directory name")
@@ -131,8 +131,10 @@ def load_problem(args: argparse.Namespace):
 
     inputs = PMEDMInputs.load(processed_dir() / "inputs" / args.area / args.puma)
     taper = None if args.taper == "none" else args.taper
-    hierarchy = Hierarchy.build(inputs, args.hierarchy)
-    sigma = hierarchy.sigma(inputs, args.alpha, taper, floor_spec(args.variance_floor))
+    floor = floor_spec(args.variance_floor)
+    hierarchy = Hierarchy.build(inputs, args.hierarchy, alpha=args.alpha, taper=taper,
+                                variance_floor=floor)
+    sigma = hierarchy.sigma(inputs, args.alpha, taper, floor)
     vb_path = args.vb_run / f"{fit_name(args)}.npz"
     q, _, _ = load_vb(vb_path)
     with np.load(vb_path) as saved:

@@ -115,12 +115,22 @@ class Hierarchy:
     sigma_v: np.ndarray | None = None
 
     @classmethod
-    def build(cls, inputs: PMEDMInputs, level: str = "none") -> "Hierarchy":
+    def build(cls, inputs: PMEDMInputs, level: str = "none", *, alpha: float | None = None,
+              taper: str | None = None, variance_floor=None) -> "Hierarchy":
         """``level`` is one of :data:`LEVELS`, or one with ``-c<threshold>``
         appended for the per-area collapse of :mod:`pmedm_vb.assemble.collapse`
         (e.g. ``"puma-c15"``), which returns a
-        :class:`~pmedm_vb.assemble.collapse.CollapsedHierarchy`."""
+        :class:`~pmedm_vb.assemble.collapse.CollapsedHierarchy`. ``"null"`` (or
+        ``"null-c<threshold>"``) returns a
+        :class:`~pmedm_vb.assemble.nullspace.NullSpaceHierarchy`, which is built
+        for one ``Sigma`` and so needs ``alpha``, ``taper`` and ``variance_floor``;
+        the other levels ignore them."""
         base, collapse = split_level(level)
+        if base == "null":
+            from pmedm_vb.assemble.nullspace import NullSpaceHierarchy
+
+            return NullSpaceHierarchy.build_null(inputs, collapse, alpha=alpha, taper=taper,
+                                                 variance_floor=variance_floor)
         if collapse is not None:
             from pmedm_vb.assemble.collapse import CollapsedHierarchy
 

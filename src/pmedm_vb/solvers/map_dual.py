@@ -329,26 +329,28 @@ class DualHessian:
 
 
 class CollapsedHessian(DualHessian):
-    """:class:`DualHessian` for a :class:`~pmedm_vb.assemble.collapse.CollapsedHierarchy`.
+    """:class:`DualHessian` for a collapsed or null-space hierarchy.
 
-    In ``xi = (theta, lambda_P)`` the data see ``A xi`` for
-    ``A = [C'(I - Q_B - U U'), E_P]``, with ``Q_B`` the block group group means
-    (inside tracts), ``U`` the unit indicators of the tract-cell groups and
-    ``C`` the collapse (block diagonal by area). Split ``A = A_loc + G Gamma``
-    with ``A_loc = [C'(I - Q_B), 0]``, local to each tract, ``G = [C'U, E_P]``
-    and ``Gamma = [[-U', 0], [0, I]]``. Then
+    Both write the constraint multipliers as ``zeta = S^{-1} (I - Q - W W') xi``
+    -- ``S`` a diagonal scale (ones for the collapse; ``D^{1/2}`` for
+    :mod:`~pmedm_vb.assemble.nullspace`), ``Q`` block diagonal by tract, ``W``
+    a few global columns (zero on the PUMA rows for the collapse) -- and the
+    data multipliers as ``lambda_data = B0 zeta`` with ``B0 = [C', E_P]``: the
+    per-area collapse ``C`` (block diagonal by area) and ``E_P`` adding each
+    PUMA cell to its tract rows. With ``Z = S^{-1}(I - Q)`` local, split
+    ``B0 Z - B0 S^{-1} W W' = A_loc + G Gamma`` with ``A_loc = [C' Z_theta, 0]``,
+    ``G = [E_P S_P^{-1}, B0 S^{-1} W]`` and ``Gamma = [[0, I], [-W']]``:
 
     - data: ``A_loc' S A_loc`` in the tract blocks, and columns
       ``F = A_loc' S G`` and ``Gamma'`` with ``[[0, I], [I, G'SG]]``;
-    - ``Sigma`` on ``zeta = (I - Q_B) theta ++ lambda_P - [U; 0] U' theta``: the
-      projected blocks, and columns ``Z_loc' Sigma_b [U; 0]`` and ``[U; 0]``
-      with ``c [[0, -I], [-I, U' Sigma_b U]]``, plus ``sqrt(c) zeta_T(B)`` for
-      an untapered global factor;
-    - the ridge ``kappa (Q_B + U U')``: ``kappa Q_B`` in the blocks, ``[U; 0]``
-      with ``kappa I``;
+    - ``Sigma``: ``Z' Sigma_b Z`` in the tract blocks and the PUMA block, and
+      columns ``Z' Sigma_b S^{-1} W`` and ``W`` with
+      ``c [[0, -I], [-I, W'S^{-1} Sigma_b S^{-1} W]]``, plus
+      ``sqrt(c) zeta_T(B)`` for an untapered global factor;
+    - the ridge ``kappa (Q + W W')``: ``kappa Q`` in the blocks, ``W`` with ``kappa I``;
     - the downdate ``-(A'u)(A'u)'``.
 
-    Without a collapse (``C = I``) this is the Hessian :class:`DualHessian`
+    Without a collapse or a scale this is the Hessian :class:`DualHessian`
     builds for the same hierarchy, and it is checked against it.
     """
 
@@ -357,50 +359,59 @@ class CollapsedHessian(DualHessian):
         c = penalty_scale(inputs)
         self.size = h.size
         self.rows, self.blocks, self.factors = [], [], []
-        U = h.tract_group_basis()                     # (size, g), zero off tract cells
-        g, k = U.shape[1], h.n_puma
-        G = np.zeros((h.m_full, g + k))
-        G[:, :g] = U[: h.m][h.row_cell]
+        scale = getattr(h, "scale", None)
+        inv = np.ones(h.size) if scale is None else 1.0 / scale
+        W = h.tract_group_basis()                     # (size, g)
+        g, k = W.shape[1], h.n_puma
+        Ws = inv[:, None] * W                         # S^{-1} W
+        G = np.zeros((h.m_full, k + g))
         tract_rows = np.flatnonzero(h.puma_of_row >= 0)
-        G[tract_rows, g + h.puma_of_row[tract_rows]] = 1.0
-        F = np.zeros((h.size, g + k))
-        GSG = np.zeros((g + k, g + k))
-        sig_u = np.zeros((h.size, g))
-        u_sig_u = np.zeros((g, g))
+        G[tract_rows, h.puma_of_row[tract_rows]] = inv[h.m + h.puma_of_row[tract_rows]]
+        G[:, k:] = Ws[: h.m][h.row_cell]
+        G[tract_rows, k:] += Ws[h.m + h.puma_of_row[tract_rows]]
+        F = np.zeros((h.size, k + g))
+        GSG = np.zeros((k + g, k + g))
+        sig_w = np.zeros((h.size, g))
+        w_sig_w = np.zeros((g, g))
         for (full_rows, s_block), cells in zip(_tract_blocks(inputs, state.p), h.tract_cells):
             C_t = (h.row_cell[full_rows][None, :] == cells[:, None]).astype(float)
             Q = h.local_projector(cells)
-            P = np.eye(cells.size) - Q
+            Z = inv[cells][:, None] * (np.eye(cells.size) - Q)
             sigma_block = sigma.block_dense(cells)
-            block = P @ (C_t @ s_block @ C_t.T + c * sigma_block) @ P + h.kappa * Q
+            block = Z.T @ (C_t @ s_block @ C_t.T + c * sigma_block) @ Z + h.kappa * Q
             self._add_block(cells, block)
             sg = s_block @ G[full_rows]
-            F[cells] = P @ (C_t @ sg)
+            F[cells] = Z.T @ (C_t @ sg)
             GSG += G[full_rows].T @ sg
-            su = sigma_block @ U[cells]
-            sig_u[cells] = P @ su
-            u_sig_u += U[cells].T @ su
+            sw = sigma_block @ Ws[cells]
+            sig_w[cells] = Z.T @ sw
+            w_sig_w += Ws[cells].T @ sw
         if k:
             puma_rows = np.arange(h.m, h.size)
-            self._add_block(puma_rows, c * sigma.block_dense(puma_rows))
+            sigma_p = sigma.block_dense(puma_rows)
+            z_p = inv[puma_rows]
+            self._add_block(puma_rows, c * (z_p[:, None] * sigma_p * z_p[None, :]))
+            sw = sigma_p @ Ws[puma_rows]
+            sig_w[puma_rows] = z_p[:, None] * sw
+            w_sig_w += Ws[puma_rows].T @ sw
 
         columns, pieces = [], []
         b = sigma.global_factor
         if b is not None:
             columns.append(np.sqrt(c) * h.zeta_T(b))
             pieces.append(np.eye(b.shape[1]))
-        if g + k:
-            gamma_t = np.zeros((h.size, g + k))
-            gamma_t[:, :g] = -U
-            gamma_t[h.m:, g:] = np.eye(k)
+        if k + g:
+            gamma_t = np.zeros((h.size, k + g))
+            gamma_t[h.m:, :k] = np.eye(k)
+            gamma_t[:, k:] = -W
             columns += [F, gamma_t]
-            eye = np.eye(g + k)
-            pieces.append(np.block([[np.zeros((g + k, g + k)), eye], [eye, GSG]]))
+            eye = np.eye(k + g)
+            pieces.append(np.block([[np.zeros((k + g, k + g)), eye], [eye, GSG]]))
         if g:
             eye = np.eye(g)
-            columns += [sig_u, U]
-            pieces.append(c * np.block([[np.zeros((g, g)), -eye], [-eye, u_sig_u]]))
-            columns.append(U)
+            columns += [sig_w, W]
+            pieces.append(c * np.block([[np.zeros((g, g)), -eye], [-eye, w_sig_w]]))
+            columns.append(W)
             pieces.append(h.kappa * eye)
         columns.append(h.lambda_data_T(state.u)[:, None])
         pieces.append(-np.ones((1, 1)))
@@ -457,7 +468,7 @@ def solve_map(
         raise ValueError(f"solve_map runs on numpy/scipy only; got device={device!r}")
     from pmedm_vb.assemble.hierarchy import Hierarchy
 
-    h = Hierarchy.build(inputs, hierarchy)
+    h = Hierarchy.build(inputs, hierarchy, alpha=alpha, taper=taper, variance_floor=variance_floor)
     sigma = h.sigma(inputs, alpha, taper, variance_floor)
     op = ConstraintOperator(inputs)
     lam = np.zeros(h.size) if init is None else np.asarray(init, float)
@@ -580,7 +591,8 @@ def laplace_precision(inputs: PMEDMInputs, result: MAPResult) -> DualHessian:
     """
     from pmedm_vb.assemble.hierarchy import Hierarchy
 
-    h = Hierarchy.build(inputs, result.hierarchy)
+    h = Hierarchy.build(inputs, result.hierarchy, alpha=result.alpha, taper=result.taper,
+                        variance_floor=result.variance_floor)
     sigma = h.sigma(inputs, result.alpha, result.taper, result.variance_floor)
     xi = result.lam if result.xi is None else result.xi
     state = dual_state(inputs, xi, sigma, hierarchy=h)

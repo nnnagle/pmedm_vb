@@ -335,7 +335,8 @@ class StructuredGaussian:
         """
         from pmedm_vb.assemble.hierarchy import Hierarchy
 
-        h = Hierarchy.build(inputs, getattr(result, "hierarchy", "none"))
+        h = Hierarchy.build(inputs, getattr(result, "hierarchy", "none"), alpha=result.alpha,
+                            taper=result.taper, variance_floor=result.variance_floor)
         sigma = h.sigma(inputs, result.alpha, result.taper, result.variance_floor)
         centre = result.lam if getattr(result, "xi", None) is None else result.xi
         hessian = dual_hessian(inputs, dual_state(inputs, centre, sigma, hierarchy=h), sigma, h)
@@ -705,9 +706,10 @@ def solve_vb(
 
     if family not in FAMILY_LAYERS:
         raise ValueError(f"family must be one of {sorted(FAMILY_LAYERS)}, got {family!r}")
-    if family == "sumdiff" and "-c" in hierarchy:
+    if family == "sumdiff" and ("-c" in hierarchy or hierarchy.startswith("null")):
         raise ValueError("the sumdiff family pairs tract and block group rows by category, "
-                         "which a collapsed hierarchy does not keep; use gaussian or skewed")
+                         "which the collapsed and null-space coordinates do not keep; "
+                         "use gaussian or skewed")
     if init is None:
         init = solve_map(inputs, alpha=alpha, taper=taper, variance_floor=variance_floor,
                          hierarchy=hierarchy)
@@ -721,7 +723,7 @@ def solve_vb(
         )
     torch.manual_seed(seed)
     started = time.perf_counter()
-    h = Hierarchy.build(inputs, hierarchy)
+    h = Hierarchy.build(inputs, hierarchy, alpha=alpha, taper=taper, variance_floor=variance_floor)
     target = _DualTarget(inputs, h.sigma(inputs, alpha, taper, variance_floor), device, h)
     model = _Variational(StructuredGaussian.laplace(inputs, init), device)
     n = inputs.n
@@ -879,6 +881,7 @@ def posterior_weights(
     from pmedm_vb.assemble.hierarchy import Hierarchy
 
     rng = rng or np.random.default_rng()
-    h = Hierarchy.build(inputs, result.hierarchy)
+    h = Hierarchy.build(inputs, result.hierarchy, alpha=result.alpha, taper=result.taper,
+                        variance_floor=result.variance_floor)
     lams = h.lambda_data(result.q.sample(rng, n_draws)) if not h.is_trivial else result.q.sample(rng, n_draws)
     return np.stack([inputs.N * weights_from_lambda(inputs, lam) for lam in lams.T])

@@ -132,7 +132,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--taper", choices=["tract", "none"], default="tract",
                         help="the fits' Sigma taper: selects their result names and the Sigma "
                              "for the Laplace start and PSIS")
-    parser.add_argument("--hierarchy", choices=["none", "tract", "puma"], default="none",
+    parser.add_argument("--hierarchy", choices=["none", "tract", "puma", "null"], default="none",
                         help="the fits' hierarchy level (pmedm_vb.assemble.hierarchy): selects "
                              "the _h<level> results and scores lambda_data; raking ignores it")
     parser.add_argument("--draws", type=int, default=4000)
@@ -599,7 +599,9 @@ def main() -> None:
 
     from pmedm_vb.assemble.hierarchy import Hierarchy
 
-    hierarchy = Hierarchy.build(inputs, args.hierarchy)
+    hierarchy = Hierarchy.build(inputs, args.hierarchy, alpha=args.alpha,
+                                taper=taper_spec(args.taper),
+                                variance_floor=floor_spec(args.variance_floor))
     source, timing = method_draws(args, inputs, rng, hierarchy)
     ref_summaries = ref_max = ref_lam = ref_xi = None
     if args.reference is not None and args.method != "hmc_ref":

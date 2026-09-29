@@ -125,10 +125,12 @@ def parse_args() -> argparse.Namespace:
              "variance; a number floors at that value; 'none' (default) leaves them",
     )
     parser.add_argument(
-        "--hierarchy", choices=["none", "tract", "puma"], default="none",
+        "--hierarchy", choices=["none", "tract", "puma", "null"], default="none",
         help="solve, vb: sum-to-zero multipliers within each tract ('tract'), plus PUMA "
              "totals with tract multipliers summing to zero ('puma'); see "
-             "pmedm_vb.assemble.hierarchy. Result names gain _h<level>",
+             "pmedm_vb.assemble.hierarchy; 'null': PUMA totals and every consistent "
+             "direction the data cannot see removed (pmedm_vb.assemble.nullspace). "
+             "Result names gain _h<level>",
     )
     parser.add_argument(
         "--family", choices=["gaussian", "skewed", "sumdiff"], default="gaussian",
