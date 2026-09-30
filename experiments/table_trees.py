@@ -10,8 +10,10 @@ national file (summary level 010), where almost no line is zero:
    descendants), and a sub-universe's title ends in ":". A recursive parse
    takes each such line as a subtotal whose children are the subtrees that
    follow it up to where their sum equals it exactly -- to ``--tol`` in the
-   national estimate and its 80 replicates. Titled subtotals that nothing sums
-   to are reported. The extent of an all-zero subtotal is not fixed by the
+   national estimate and its 80 replicates. Where nothing sums exactly (a few
+   people nationally outside every published line), it closes at the nearest
+   run if the relative gap is at most ``--close-rtol``, and says so; titled
+   subtotals that still fail are reported. The extent of an all-zero subtotal is not fixed by the
    data; it takes the all-zero lines that follow it.
 2. **Check on the study area.** At each level the table constrains, every
    subtotal must equal the sum of its children in every area and replicate.
@@ -65,6 +67,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--levels", nargs="+", default=["tract", "block group"])
     parser.add_argument("--tol", type=float, default=1e-6,
                         help="largest |subtotal - sum of children| counted as exact")
+    parser.add_argument("--close-rtol", type=float, default=1e-4,
+                        help="where no run of lines sums exactly to a subtotal in the US "
+                             "file, close it at the nearest run if its gap relative to the "
+                             "subtotal is at most this (the study-area check stays exact)")
     parser.add_argument("--out", type=Path, required=True)
     return parser.parse_args()
 
@@ -86,9 +92,9 @@ def line_matrix(frame: pd.DataFrame, cells: list[str] | None = None
     return cells, titles, V
 
 
-def parse_tree(V: np.ndarray, titles: list[str], tol: float
-               ) -> tuple[dict[int, list[int]], list[int], list[int], list[int]]:
-    """``(children, roots, failed, assumed)``.
+def parse_tree(V: np.ndarray, titles: list[str], tol: float, close_rtol: float = 0.0
+               ) -> tuple[dict[int, list[int]], list[int], list[int], list[int], dict[int, float]]:
+    """``(children, roots, failed, assumed, approx)``.
 
     ``children`` maps each subtotal line to its child lines. Candidates are the
     lines whose title ends in ":" (the Census marks sub-universes that way);
@@ -96,7 +102,12 @@ def parse_tree(V: np.ndarray, titles: list[str], tol: float
     follow it, up to the first point where their sum equals it exactly in
     every column; all-zero leaves right after that point are taken in too.
     No sign is assumed, so a running sum may pass the subtotal on the way.
-    ``failed`` lists candidates no run of following subtrees adds up to (they
+    Where no run sums exactly, the candidate closes at the run whose sum is
+    nearest it -- the smallest largest-over-columns gap relative to the
+    subtotal -- if that gap is at most ``close_rtol``; ``approx`` maps each such
+    line to its gap in the first column (the estimate). The nearest run, not
+    the first within tolerance, so a tiny last line is not left out. ``failed``
+    lists candidates no run of following subtrees adds up to (they
     are kept as leaves); ``assumed`` lists all-zero candidates, whose extent
     the data cannot fix and which take the following all-zero lines.
     """
@@ -104,7 +115,7 @@ def parse_tree(V: np.ndarray, titles: list[str], tol: float
     zero = np.abs(V).max(axis=1) <= tol
     colon = [str(t).rstrip().endswith(":") for t in titles]
     sys.setrecursionlimit(max(10_000, 10 * n))
-    failed, assumed = set(), set()
+    failed, assumed, approx = set(), set(), {}
 
     @functools.lru_cache(maxsize=None)
     def parse(i: int) -> tuple[int, tuple[int, ...]]:
@@ -119,19 +130,33 @@ def parse_tree(V: np.ndarray, titles: list[str], tol: float
                 j, _ = parse(j)
             return (j, tuple(kids)) if kids else (i + 1, ())
         acc = np.zeros(V.shape[1])
+        scale = np.abs(V[i]).max()
         kids, j = [], i + 1
+        best = (np.inf, i + 1, (), 0.0)       # (relative gap, end, children, estimate gap)
         while j < n:
             end, _ = parse(j)
             acc = acc + V[j]
             kids.append(j)
             j = end
-            if np.abs(acc - V[i]).max() <= tol:
-                while j < n and zero[j] and not colon[j]:
-                    kids.append(j)
-                    j += 1
-                return j, tuple(kids)
+            gap = np.abs(acc - V[i]).max()
+            if gap <= tol:
+                return absorb_zeros(j, kids)
+            if gap / scale < best[0]:
+                best = (gap / scale, j, tuple(kids), float(V[i, 0] - acc[0]))
+        if j == i + 1:                        # nothing follows: a lone line
+            return i + 1, ()
+        if best[0] <= close_rtol:
+            approx[i] = best[3]
+            return absorb_zeros(best[1], list(best[2]))
         failed.add(i)
         return i + 1, ()
+
+    def absorb_zeros(j: int, kids: list[int]) -> tuple[int, tuple[int, ...]]:
+        """All-zero leaves right after a subtotal closes belong to it."""
+        while j < n and zero[j] and not colon[j]:
+            kids.append(j)
+            j += 1
+        return j, tuple(kids)
 
     children, roots, i = {}, [], 0
     while i < n:
@@ -145,7 +170,8 @@ def parse_tree(V: np.ndarray, titles: list[str], tol: float
         if kids:
             children[k] = list(kids)
             stack += kids
-    return children, roots, sorted(failed), sorted(assumed & set(children))
+    return (children, roots, sorted(failed), sorted(assumed & set(children)),
+            {k: g for k, g in approx.items() if k in children})
 
 
 def unexplained(V: np.ndarray, children: dict[int, list[int]], tol: float
@@ -199,9 +225,9 @@ def depths(parent: dict[int, int], n: int) -> dict[int, int]:
     return out
 
 
-def tree_report(cells, titles, V, tol) -> tuple[list[str], dict[int, list[int]]]:
+def tree_report(cells, titles, V, tol, close_rtol) -> tuple[list[str], dict[int, list[int]]]:
     """Parse the tree from the national file; its summary and the indented tree."""
-    children, roots, failed, assumed = parse_tree(V, titles, tol)
+    children, roots, failed, assumed, approx = parse_tree(V, titles, tol, close_rtol)
     parent = ancestors(children, len(cells))
     depth = depths(parent, len(cells))
     n_zero = int((np.abs(V).max(axis=1) <= tol).sum())
@@ -211,6 +237,9 @@ def tree_report(cells, titles, V, tol) -> tuple[list[str], dict[int, list[int]]]
     if failed:
         lines.append("   titled subtotals that no run of following lines sums to: "
                      + ", ".join(f"{cells[k]} {titles[k]}" for k in failed))
+    if approx:
+        lines.append("   subtotals closed approximately (US estimate - sum of children): "
+                     + ", ".join(f"{cells[k]} {titles[k]} ({g:+,.0f})" for k, g in approx.items()))
     if assumed:
         lines.append("   all-zero subtotals (extent taken as the following all-zero lines): "
                      + ", ".join(cells[k] for k in assumed))
@@ -320,7 +349,7 @@ def main() -> None:
     for table, by_level in specs.items():
         cells, titles, V_us = line_matrix(fetch_us(area, table))
         out_lines.append(f"== {table}: tree from the US file")
-        lines, children = tree_report(cells, titles, V_us, args.tol)
+        lines, children = tree_report(cells, titles, V_us, args.tol, args.close_rtol)
         out_lines += lines
         for level, spec in by_level.items():
             frame = fetch_replicates(area, [table], geography=level)
