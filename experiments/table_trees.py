@@ -6,10 +6,12 @@ replicates, since each replicate is a full re-tabulation. So the structure can
 be read off the variance replicate files themselves, without the titles:
 
 1. **Tree.** The lines are published in pre-order (a subtotal, then its
-   descendants). A recursive parse reads line ``i`` as a subtotal when the
-   lines following it split into subtrees whose sum equals it exactly -- to
-   ``--tol`` in every area and replicate -- and as a leaf otherwise. A line that
-   is zero everywhere is always a leaf (it would sum to anything).
+   descendants), and a sub-universe's title ends in ":". A recursive parse
+   takes each such line as a subtotal whose children are the subtrees that
+   follow it up to where their sum equals it exactly -- to ``--tol`` in every
+   area and replicate. Titled subtotals that nothing sums to are reported. The
+   extent of an all-zero subtotal is not fixed by the data; it takes the
+   all-zero lines that follow it.
 2. **Check against the null space.** Stack the lines as rows of a matrix whose
    columns are every area's estimate and its 80 replicates. Its rank
    deficiency is the number of independent exact identities among the lines.
@@ -78,17 +80,38 @@ def line_matrix(frame: pd.DataFrame) -> tuple[list[str], list[str], np.ndarray]:
     return cells, titles, V
 
 
-def parse_tree(V: np.ndarray, tol: float) -> tuple[dict[int, list[int]], list[int]]:
-    """``children`` of each subtotal line, and the top-level lines."""
+def parse_tree(V: np.ndarray, titles: list[str], tol: float
+               ) -> tuple[dict[int, list[int]], list[int], list[int], list[int]]:
+    """``(children, roots, failed, assumed)``.
+
+    ``children`` maps each subtotal line to its child lines. Candidates are the
+    lines whose title ends in ":" (the Census marks sub-universes that way);
+    every other line is a leaf. A candidate's children are the subtrees that
+    follow it, up to the first point where their sum equals it exactly in
+    every column; all-zero leaves right after that point are taken in too.
+    No sign is assumed, so a running sum may pass the subtotal on the way.
+    ``failed`` lists candidates no run of following subtrees adds up to (they
+    are kept as leaves); ``assumed`` lists all-zero candidates, whose extent
+    the data cannot fix and which take the following all-zero lines.
+    """
     n = V.shape[0]
     zero = np.abs(V).max(axis=1) <= tol
+    colon = [str(t).rstrip().endswith(":") for t in titles]
     sys.setrecursionlimit(max(10_000, 10 * n))
+    failed, assumed = set(), set()
 
     @functools.lru_cache(maxsize=None)
     def parse(i: int) -> tuple[int, tuple[int, ...]]:
         """(end, children): line i's subtree is lines i..end-1."""
-        if zero[i]:
+        if not colon[i]:
             return i + 1, ()
+        if zero[i]:
+            assumed.add(i)
+            kids, j = [], i + 1
+            while j < n and zero[j]:
+                kids.append(j)
+                j, _ = parse(j)
+            return (j, tuple(kids)) if kids else (i + 1, ())
         acc = np.zeros(V.shape[1])
         kids, j = [], i + 1
         while j < n:
@@ -96,39 +119,33 @@ def parse_tree(V: np.ndarray, tol: float) -> tuple[dict[int, list[int]], list[in
             acc = acc + V[j]
             kids.append(j)
             j = end
-            if (acc - V[i] > tol).any():      # overshot: i is not the sum of what follows
-                return i + 1, ()
             if np.abs(acc - V[i]).max() <= tol:
-                # trailing all-zero lines belong to the subtree too
-                while j < n and zero[j]:
+                while j < n and zero[j] and not colon[j]:
                     kids.append(j)
                     j += 1
                 return j, tuple(kids)
+        failed.add(i)
         return i + 1, ()
 
     children, roots, i = {}, [], 0
     while i < n:
         roots.append(i)
-        end, _ = parse(i)
-        i = end
-    for k in range(n):
-        end, kids = parse(k)
-        if kids:
-            children[k] = list(kids)
+        i, _ = parse(i)
     # keep only the parse actually reached from the roots
-    reached, stack = set(), list(roots)
+    stack = list(roots)
     while stack:
         k = stack.pop()
-        if k in reached:
-            continue
-        reached.add(k)
-        stack += children.get(k, [])
-    children = {k: v for k, v in children.items() if k in reached}
-    return children, roots
+        _, kids = parse(k)
+        if kids:
+            children[k] = list(kids)
+            stack += kids
+    return children, roots, sorted(failed), sorted(assumed & set(children))
 
 
-def unexplained(V: np.ndarray, children: dict[int, list[int]], tol: float) -> tuple[int, list[list[int]]]:
-    """Rank deficiency of V, and the line sets of relations the tree does not explain."""
+def unexplained(V: np.ndarray, children: dict[int, list[int]], tol: float
+                ) -> tuple[int, int, list[list[int]]]:
+    """Rank deficiency of V, the number of independent identities the tree and
+    the all-zero lines explain, and the line sets of the relations they miss."""
     scale = max(1.0, np.abs(V).max())
     u, s, _ = np.linalg.svd(V / scale, full_matrices=True)
     rank = int((s > 1e-9 * s.max()).sum()) if s.size and s.max() > 0 else 0
@@ -144,12 +161,18 @@ def unexplained(V: np.ndarray, children: dict[int, list[int]], tol: float) -> tu
         v[z] = 1.0
         known.append(v)
     K = np.array(known).T if known else np.zeros((V.shape[0], 0))
-    q, _ = np.linalg.qr(K) if K.size else (K, None)
+    n_known = int(np.linalg.matrix_rank(K)) if K.size else 0
+    # an orthonormal basis of the explained identities (K may be rank deficient)
+    if K.size:
+        uk, sk, _ = np.linalg.svd(K, full_matrices=False)
+        q = uk[:, : n_known]
+    else:
+        q = K
     rest = left_null - q @ (q.T @ left_null) if q.size else left_null
     uu, ss, _ = np.linalg.svd(rest, full_matrices=False) if rest.size else (rest, np.zeros(0), None)
     extra = uu[:, ss > 1e-6] if rest.size else rest
     groups = [list(np.flatnonzero(np.abs(extra[:, j]) > 1e-6)) for j in range(extra.shape[1])]
-    return V.shape[0] - rank, groups
+    return V.shape[0] - rank, n_known, groups
 
 
 def ancestors(children: dict[int, list[int]], n: int) -> dict[int, int]:
@@ -161,7 +184,7 @@ def ancestors(children: dict[int, list[int]], n: int) -> dict[int, int]:
 
 
 def analyse(cells, titles, V, table_spec, tol) -> tuple[list[str], pd.DataFrame]:
-    children, roots = parse_tree(V, tol)
+    children, roots, failed, assumed = parse_tree(V, titles, tol)
     parent = ancestors(children, len(cells))
     depth = {}
     for i in range(len(cells)):
@@ -171,12 +194,20 @@ def analyse(cells, titles, V, table_spec, tol) -> tuple[list[str], pd.DataFrame]
         depth[i] = d
     residual = max((float(np.abs(V[p] - V[kids].sum(axis=0)).max()) for p, kids in children.items()),
                    default=0.0)
-    nullity, extra = unexplained(V, children, tol)
+    nullity, n_known, extra = unexplained(V, children, tol)
     n_zero = int((np.abs(V).max(axis=1) <= tol).sum())
-    lines = [f"   {len(cells)} lines; {len(children)} subtotals, max |subtotal - sum of children| "
-             f"{residual:.3g}; {n_zero} all-zero lines; rank deficiency {nullity} = "
-             f"{len(children)} tree identities + {n_zero} zero lines + {nullity - len(children) - n_zero} "
-             f"unexplained" + ("  -> TREE" if not extra else "  -> NOT A TREE (see below)")]
+    n_colon = sum(str(t).rstrip().endswith(":") for t in titles)
+    lines = [f"   {len(cells)} lines ({n_colon} titled as subtotals); {len(children)} subtotals parsed, "
+             f"max |subtotal - sum of children| {residual:.3g}; {n_zero} all-zero lines; "
+             f"smallest value {V.min():,.0f}; rank deficiency {nullity} = {n_known} explained by "
+             f"the tree and zero lines + {nullity - n_known} unexplained"
+             + ("  -> TREE" if not extra and not failed else "  -> NOT A TREE (see below)")]
+    if failed:
+        lines.append("   titled subtotals that no run of following lines sums to: "
+                     + ", ".join(f"{cells[k]} {titles[k]}" for k in failed))
+    if assumed:
+        lines.append("   all-zero subtotals (extent taken as the following all-zero lines): "
+                     + ", ".join(cells[k] for k in assumed))
     county = V[:, : V.shape[1] // 81].sum(axis=1)  # estimate columns come first
     for i, (cell, title) in enumerate(zip(cells, titles)):
         tag = " [subtotal]" if i in children else ""
