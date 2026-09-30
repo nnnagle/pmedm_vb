@@ -2,34 +2,36 @@
 
 A table's published lines include its universe and sub-universe cells, each the
 exact sum of the lines beneath it -- in every area and in every one of the 80
-replicates, since each replicate is a full re-tabulation. So the structure can
-be read off the variance replicate files themselves, without the titles:
+replicates, since each replicate is a full re-tabulation. A table has the same
+structure in every area and at every level, so it is read once, from the
+national file (summary level 010), where almost no line is zero:
 
 1. **Tree.** The lines are published in pre-order (a subtotal, then its
    descendants), and a sub-universe's title ends in ":". A recursive parse
    takes each such line as a subtotal whose children are the subtrees that
-   follow it up to where their sum equals it exactly -- to ``--tol`` in every
-   area and replicate. Titled subtotals that nothing sums to are reported. The
-   extent of an all-zero subtotal is not fixed by the data; it takes the
-   all-zero lines that follow it.
-2. **Check against the null space.** Stack the lines as rows of a matrix whose
-   columns are every area's estimate and its 80 replicates. Its rank
-   deficiency is the number of independent exact identities among the lines.
-   The tree accounts for one per subtotal, and each all-zero line for one
-   more; any excess is a relation the tree does not explain -- a second margin
-   (a cross-tab publishing both its row and column totals: a lattice, not a
-   tree) or a line that repeats another -- and the lines involved are listed.
+   follow it up to where their sum equals it exactly -- to ``--tol`` in the
+   national estimate and its 80 replicates. Titled subtotals that nothing sums
+   to are reported. The extent of an all-zero subtotal is not fixed by the
+   data; it takes the all-zero lines that follow it.
+2. **Check on the study area.** At each level the table constrains, every
+   subtotal must equal the sum of its children in every area and replicate.
+   Stack the lines as rows of a matrix whose columns are every area's estimate
+   and its 80 replicates; its rank deficiency is the number of independent
+   exact identities among the lines. The tree and the all-zero lines should
+   explain all of them; any excess is a relation the tree does not explain --
+   a second margin (a cross-tab publishing both its row and column totals: a
+   lattice, not a tree) or a line that repeats another -- and the lines
+   involved are listed.
 3. **Our categories in the tree.** Each category of the constraint table is a
    set of published lines. It is placed under the lowest tree node containing
    all of them, and categories under the same node are siblings -- the groups
    a structure-aware roll-up merges within before crossing a sub-universe.
 
-Writes ``<out>/table_trees.txt``: per table and level, the tree (indented, with
-titles and the county total of each line), the identity count against the
-null space, any unexplained relations, and the sibling groups of our
-categories; and ``<out>/table_trees.csv``, one row per line. Reads the cached
-replicate files, fetching any missing ones (so run it where the network is
-available, e.g. a login node)::
+Writes ``<out>/table_trees.txt``: per table, the tree (indented, with titles
+and national totals), then per level the check and the sibling groups of our
+categories with their county counts; and ``<out>/table_trees.csv``, one row per
+line and level. Reads the cached replicate files, fetching any missing ones
+(so run it where the network is available, e.g. a login node)::
 
     $CONDA_PREFIX/bin/python experiments/table_trees.py --out $RUNS/table_trees
 """
@@ -46,7 +48,9 @@ import pandas as pd
 
 from pmedm_vb.assemble.constraints import default_tables
 from pmedm_vb.config import StudyArea
-from pmedm_vb.data.variance import REPLICATE_COLUMNS, fetch_replicates
+from pmedm_vb.data.cache import fetch_cached
+from pmedm_vb.data.variance import (REPLICATE_COLUMNS, VRE_BASE, _read_replicate_file,
+                                    _span_label, fetch_replicates)
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,12 +69,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def line_matrix(frame: pd.DataFrame) -> tuple[list[str], list[str], np.ndarray]:
-    """Lines in published order, their titles, and the ``(lines, areas x 81)``
-    matrix of estimates and replicates."""
+def line_matrix(frame: pd.DataFrame, cells: list[str] | None = None
+                ) -> tuple[list[str], list[str], np.ndarray]:
+    """Lines in published order (or in ``cells``' order), their titles, and the
+    ``(lines, areas x 81)`` matrix of estimates and replicates."""
     frame = frame.reset_index()
-    order = frame.groupby("cell")["order"].first().sort_values()
-    cells = list(order.index)
+    if cells is None:
+        order = frame.groupby("cell")["order"].first().sort_values()
+        cells = list(order.index)
     titles = frame.groupby("cell")["title"].first().reindex(cells).tolist()
     blocks = []
     for column in ["estimate", *REPLICATE_COLUMNS]:
@@ -183,35 +189,57 @@ def ancestors(children: dict[int, list[int]], n: int) -> dict[int, int]:
     return parent
 
 
-def analyse(cells, titles, V, table_spec, tol) -> tuple[list[str], pd.DataFrame]:
-    children, roots, failed, assumed = parse_tree(V, titles, tol)
-    parent = ancestors(children, len(cells))
-    depth = {}
-    for i in range(len(cells)):
+def depths(parent: dict[int, int], n: int) -> dict[int, int]:
+    out = {}
+    for i in range(n):
         d, k = 0, i
         while k in parent:
             k, d = parent[k], d + 1
-        depth[i] = d
-    residual = max((float(np.abs(V[p] - V[kids].sum(axis=0)).max()) for p, kids in children.items()),
-                   default=0.0)
-    nullity, n_known, extra = unexplained(V, children, tol)
+        out[i] = d
+    return out
+
+
+def tree_report(cells, titles, V, tol) -> tuple[list[str], dict[int, list[int]]]:
+    """Parse the tree from the national file; its summary and the indented tree."""
+    children, roots, failed, assumed = parse_tree(V, titles, tol)
+    parent = ancestors(children, len(cells))
+    depth = depths(parent, len(cells))
     n_zero = int((np.abs(V).max(axis=1) <= tol).sum())
     n_colon = sum(str(t).rstrip().endswith(":") for t in titles)
-    lines = [f"   {len(cells)} lines ({n_colon} titled as subtotals); {len(children)} subtotals parsed, "
-             f"max |subtotal - sum of children| {residual:.3g}; {n_zero} all-zero lines; "
-             f"smallest value {V.min():,.0f}; rank deficiency {nullity} = {n_known} explained by "
-             f"the tree and zero lines + {nullity - n_known} unexplained"
-             + ("  -> TREE" if not extra and not failed else "  -> NOT A TREE (see below)")]
+    lines = [f"   US: {len(cells)} lines ({n_colon} titled as subtotals); {len(children)} subtotals "
+             f"parsed; {n_zero} all-zero lines; smallest value {V.min():,.0f}"]
     if failed:
         lines.append("   titled subtotals that no run of following lines sums to: "
                      + ", ".join(f"{cells[k]} {titles[k]}" for k in failed))
     if assumed:
         lines.append("   all-zero subtotals (extent taken as the following all-zero lines): "
                      + ", ".join(cells[k] for k in assumed))
-    county = V[:, : V.shape[1] // 81].sum(axis=1)  # estimate columns come first
+    us = V[:, 0]  # the single area's estimate comes first
     for i, (cell, title) in enumerate(zip(cells, titles)):
         tag = " [subtotal]" if i in children else ""
-        lines.append(f"     {'  ' * depth[i]}{cell} {title} ({county[i]:,.0f}){tag}")
+        lines.append(f"     {'  ' * depth[i]}{cell} {title} (US {us[i]:,.0f}){tag}")
+    return lines, children
+
+
+def level_report(cells, titles, V, children, table_spec, tol) -> tuple[list[str], pd.DataFrame]:
+    """Check the national tree on one level's areas and place our categories in it."""
+    parent = ancestors(children, len(cells))
+    depth = depths(parent, len(cells))
+    residual = max((float(np.abs(V[p] - V[kids].sum(axis=0)).max()) for p, kids in children.items()),
+                   default=0.0)
+    nullity, n_known, extra = unexplained(V, children, tol)
+    n_zero = int((np.abs(V).max(axis=1) <= tol).sum())
+    county = V[:, : V.shape[1] // 81].sum(axis=1)  # estimate columns come first
+    ok = residual <= tol and not extra
+    lines = [f"   max |subtotal - sum of children| {residual:.3g}; {n_zero} all-zero lines; "
+             f"smallest value {V.min():,.0f}; rank deficiency {nullity} = {n_known} explained by "
+             f"the tree and zero lines + {nullity - n_known} unexplained"
+             + ("  -> TREE" if ok else "  -> NOT A TREE (see below)")]
+    if residual > tol:
+        for p, kids in children.items():
+            gap = float(np.abs(V[p] - V[kids].sum(axis=0)).max())
+            if gap > tol:
+                lines.append(f"   fails here: {cells[p]} {titles[p]} (max gap {gap:,.3g})")
     if extra:
         # State each unexplained relation sparsely: a line outside the tree's
         # identities that is an exact 0/1 sum of the tree's leaves.
@@ -258,8 +286,9 @@ def analyse(cells, titles, V, table_spec, tol) -> tuple[list[str], pd.DataFrame]
             home = parent.get(lca, -1)
         else:
             home = lca
-        groups.setdefault(home, []).append(cat.name)
-    lines.append("   our categories by parent node (the sibling groups for rolling up):")
+        groups.setdefault(home, []).append(f"{cat.name} ({county[members].sum():,.0f})")
+    lines.append("   our categories by parent node, with county counts (the sibling groups "
+                 "for rolling up):")
     for home, names in sorted(groups.items(), key=lambda kv: kv[0]):
         label = "(top)" if home < 0 else f"{cells[home]} {titles[home]}"
         lines.append(f"     {label}: {', '.join(names)}")
@@ -270,21 +299,43 @@ def analyse(cells, titles, V, table_spec, tol) -> tuple[list[str], pd.DataFrame]
     return lines, frame
 
 
+def fetch_us(area: StudyArea, table: str) -> pd.DataFrame:
+    """The national (summary level 010) replicate file, named ``{table}.csv.zip``."""
+    url = f"{VRE_BASE}/{area.year}/data/{_span_label(area)}/010/{table}.csv.zip"
+    frame = _read_replicate_file(fetch_cached(url, subdir=f"vre/{area.year}/010"))
+    return frame.assign(geoid="US").set_index(["geoid", "cell"])
+
+
 def main() -> None:
     args = parse_args()
     area = StudyArea(name=args.name, state=args.state, year=args.year,
                      counties=tuple(args.county), span=args.span)
     args.out.mkdir(parents=True, exist_ok=True)
-    out_lines, frames = [], []
+    specs: dict[str, dict[str, object]] = {}
     for level in args.levels:
-        specs = {t.table: t for t in default_tables(area) if t.geography == level}
-        for table, spec in specs.items():
+        for t in default_tables(area):
+            if t.geography == level:
+                specs.setdefault(t.table, {})[level] = t
+    out_lines, frames = [], []
+    for table, by_level in specs.items():
+        cells, titles, V_us = line_matrix(fetch_us(area, table))
+        out_lines.append(f"== {table}: tree from the US file")
+        lines, children = tree_report(cells, titles, V_us, args.tol)
+        out_lines += lines
+        for level, spec in by_level.items():
             frame = fetch_replicates(area, [table], geography=level)
-            cells, titles, V = line_matrix(frame)
-            out_lines.append(f"== {table} at {level}: {V.shape[1] // 81} areas")
-            lines, rows = analyse(cells, titles, V, spec, args.tol)
-            out_lines += lines + [""]
-            frames.append(rows.assign(table=table, level=level))
+            local_cells, _, _ = line_matrix(frame)
+            _, _, V = line_matrix(frame, cells)
+            out_lines.append(f"  -- checked on {args.name} {level}: {V.shape[1] // 81} areas")
+            if set(local_cells) != set(cells):
+                out_lines.append(f"   lines differ from the US file: only here "
+                                 f"{sorted(set(local_cells) - set(cells))}, only in US "
+                                 f"{sorted(set(cells) - set(local_cells))}")
+            lines, rows = level_report(cells, titles, V, children, spec, args.tol)
+            out_lines += lines
+            frames.append(rows.assign(table=table, level=level,
+                                      us_estimate=V_us[:, 0]))
+        out_lines.append("")
     pd.concat(frames).to_csv(args.out / "table_trees.csv", index=False)
     text = "\n".join(out_lines) + "\n"
     (args.out / "table_trees.txt").write_text(text)
