@@ -1,33 +1,38 @@
-"""Where do the weight ratios of wall draws sit? The evidence for placing a ratio cap.
+"""Where do the weight ratios sit, in VB and HMC draws? The evidence for a ratio cap.
 
 A unit's weight ratio in a zone is ``w / (N q)``, with ``q`` the design
 probabilities normalised to sum to 1. Its log,
 
-    l = log q - X lambda - log Z - log q  (the logits less their log-sum-exp),
+    l = -X lambda - log Z   (the logits less their log-sum-exp, less log q),
 
-is what a cap ``(tau/2) (l - b)_+^2`` would act on. For each fit this draws
-from the VB family (and takes the MAP), maps each draw to the multipliers the
-data see, and reports:
+is what a cap ``(tau/2) (l - b)_+^2`` would act on. For each fit this takes
+draws -- from a VB family (``--runs``) and from HMC traces (``--hmc``) -- and
+the MAP, and reports:
 
-- per draw, the largest ``l``, split by whether the draw has a *wall* (a
+- per draw, the largest ``l``, split into draws with and without a *wall* (a
   zone x unit weight over ``--wall`` of N, the scoring's definition);
-- per candidate bound ``b`` (``--bounds``, as ratios), how many unit-zones
-  exceed it, in wall and wall-free draws, and at the MAP;
-- for each wall draw's largest cell, the unit's constraint rows: how often
-  each row appears, with its published estimate and its design-expected count
-  (``N x forward(q)``), to check that walls ride on rare rows.
+- per candidate bound (``--bounds``, as ratios), how many unit-zones exceed
+  it;
+- for each draw's largest cell, what drives it. ``l`` splits exactly into one
+  term per constraint row the unit contributes to, ``-x_k lambda_k``, less
+  ``log Z``; the rows whose term grew most against the same cell at the MAP
+  are its drivers, reported with their published estimate, standard error and
+  design-expected count (``N x forward(q)``), and the cell's design
+  probability against the median.
 
-A good ``b`` sits above everything the MAP and wall-free draws use and below
-what wall draws reach; if the two overlap, a cap would bend ordinary fits.
+HMC samples the posterior itself, so if its draws stay well below VB's, the
+walls are VB's, and a cap above HMC's range would leave the posterior nearly
+unchanged while trimming VB's tails.
 
-``--runs`` are job directories of ``run_map_bundle.sbatch`` (each holding
-``map/`` and ``vb_<family>/``); every fit found there is analysed. Writes
+``--runs`` are job directories of ``run_map_bundle.sbatch`` (``map/`` and
+``vb_<family>/``); ``--hmc`` directories holding ``<name>_trace.npz``. A trace
+is matched to the MAP of the same name among ``--runs``. Writes
 ``<out>/ratio_diagnostic.txt``, ``ratio_draws.csv`` (one row per draw) and
-``ratio_wall_rows.csv`` (one row per constraint row seen under a wall)::
+``ratio_drivers.csv`` (the top driver rows of each draw's largest cell)::
 
     $CONDA_PREFIX/bin/python experiments/ratio_diagnostic.py \\
-        --runs $RUNS/6293070 $RUNS/6293071 $RUNS/6293072 $RUNS/6293073 \\
-        --out $RUNS/ratio_diagnostic
+        --runs $RUNS/<fit job> ... --hmc $RUNS/nullspace_grid/hmc/*_ref \\
+        --out $RUNS/ratio_diagnostic_hmc
 """
 
 from __future__ import annotations
@@ -51,13 +56,17 @@ from pmedm_vb.config import processed_dir  # noqa: E402
 from pmedm_vb.solvers.base import ConstraintOperator  # noqa: E402
 
 NAME = re.compile(r"^(?P<puma>\d+)_(?P<taper>[^_]+)_a(?P<alpha>[0-9.e-]+)(?:_h(?P<level>.+))?$")
+TOP_DRIVERS = 3
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--runs", nargs="+", type=Path, required=True)
+    parser.add_argument("--runs", nargs="*", type=Path, default=[],
+                        help="fit job directories (map/, vb_<family>/)")
+    parser.add_argument("--hmc", nargs="*", type=Path, default=[],
+                        help="directories holding HMC <name>_trace.npz")
     parser.add_argument("--area", default="knox-2024-5yr")
     parser.add_argument("--family", default="skewed")
     parser.add_argument("--draws", type=int, default=500)
@@ -70,7 +79,7 @@ def parse_args() -> argparse.Namespace:
 
 
 class Ratios:
-    """Log weight ratios of one PUMA's problem."""
+    """Log weight ratios of one PUMA's problem, and their split by constraint row."""
 
     def __init__(self, inputs: PMEDMInputs) -> None:
         self.inputs = inputs
@@ -79,114 +88,190 @@ class Ratios:
         self.support = q > 0
         with np.errstate(divide="ignore"):
             self.log_q = np.log(q)
+        self.median_log_q = float(np.median(self.log_q[self.support]))
         self.design = inputs.N * self.op.forward(q)          # design-expected count per row
         self.targets = inputs.targets()
+        self.se = np.sqrt(inputs.sigma_v)
         self.names = ([f"T:{n}" for n in inputs.tract_constraints for _ in range(inputs.Y_T.shape[0])]
                       + [f"B:{n}" for n in inputs.bg_constraints for _ in range(inputs.Y_B.shape[0])])
+        self.x_t = inputs.X_T.tocsr()
+        self.x_b = inputs.X_B.tocsr()
+        self.zone_tract = inputs.zone_tracts()
 
-    def log_ratio(self, lam: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """``(l, log p)`` over the supported unit-zones, as ``(n_zones, n_units)``."""
+    def log_ratio(self, lam: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
+        """``(l, log p, log Z)``, the first two as ``(n_zones, n_units)``."""
         logits = self.log_q - self.op.adjoint(lam)
-        log_p = logits - logsumexp(logits[self.support])
-        return np.where(self.support, log_p - self.log_q, -np.inf), log_p
+        log_z = float(logsumexp(logits[self.support]))
+        log_p = logits - log_z
+        return np.where(self.support, log_p - self.log_q, -np.inf), log_p, log_z
 
-    def rows_of(self, zone: int, unit: int) -> np.ndarray:
-        """The stacked constraint rows unit ``unit`` contributes to in zone ``zone``."""
-        inputs = self.inputs
-        n_tracts = inputs.Y_T.shape[0]
-        n_zones = inputs.Y_B.shape[0]
-        tract = int(inputs.zone_tracts()[zone])
-        cols_t = inputs.X_T[unit].nonzero()[1] if hasattr(inputs.X_T, "nonzero") else np.flatnonzero(inputs.X_T[unit])
-        cols_b = inputs.X_B[unit].nonzero()[1] if hasattr(inputs.X_B, "nonzero") else np.flatnonzero(inputs.X_B[unit])
-        return np.concatenate([cols_t * n_tracts + tract, inputs.Y_T.size + cols_b * n_zones + zone])
+    def terms(self, zone: int, unit: int, lam: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """The rows unit ``unit`` contributes to in zone ``zone``, and each row's
+        term ``-x lambda`` of its log ratio there."""
+        n_tracts, n_zones = self.inputs.Y_T.shape[0], self.inputs.Y_B.shape[0]
+        tract = int(self.zone_tract[zone])
+        row_t, row_b = self.x_t.getrow(unit), self.x_b.getrow(unit)
+        rows = np.concatenate([row_t.indices * n_tracts + tract,
+                               self.inputs.Y_T.size + row_b.indices * n_zones + zone])
+        x = np.concatenate([row_t.data, row_b.data])
+        return rows, -x * lam[rows]
 
 
 def fits_in(run: Path, family: str):
     for path in sorted((run / f"vb_{family}").glob("*.npz")):
         match = NAME.match(path.stem)
         if match:
-            yield path, match.group("puma"), float(match.group("alpha")), match.group("level") or "none"
+            yield path, match
+
+
+def traces_in(directory: Path):
+    for path in sorted(directory.glob("*_trace.npz")):
+        match = NAME.match(path.stem[: -len("_trace")])
+        if match:
+            yield path, match
+
+
+def analyse(ratios: Ratios, key: dict, source: str, lam_draws: np.ndarray, map_lam: np.ndarray | None,
+            args, draw_rows: list, driver_rows: list) -> None:
+    """Statistics of each draw (columns of ``lam_draws``) and the drivers of its largest cell."""
+    log_bounds = np.log(args.bounds)
+    if map_lam is not None:
+        l_map, log_p_map, log_z_map = ratios.log_ratio(map_lam)
+        if source == "vb":   # the MAP row once per fit
+            draw_rows.append(dict(**key, source="map", draw=-1,
+                                  wall=bool(np.exp(log_p_map[ratios.support].max()) > args.wall),
+                                  max_log_ratio=float(l_map[ratios.support].max()),
+                                  **{f"over_{b:g}": int((l_map > lb).sum())
+                                     for b, lb in zip(args.bounds, log_bounds)}))
+    for d in range(lam_draws.shape[1]):
+        lam = lam_draws[:, d]
+        l, log_p, log_z = ratios.log_ratio(lam)
+        zone, unit = np.unravel_index(np.argmax(np.where(ratios.support, log_p, -np.inf)), log_p.shape)
+        wall = bool(np.exp(log_p[zone, unit]) > args.wall)
+        draw_rows.append(dict(**key, source=source, draw=d, wall=wall,
+                              max_log_ratio=float(l[ratios.support].max()),
+                              top_log_ratio=float(l[zone, unit]),
+                              top_share=float(np.exp(log_p[zone, unit])),
+                              top_log_q_offset=float(ratios.log_q[zone, unit] - ratios.median_log_q),
+                              **{f"over_{b:g}": int((l > lb).sum())
+                                 for b, lb in zip(args.bounds, log_bounds)}))
+        rows, terms = ratios.terms(zone, unit, lam)
+        if map_lam is not None:
+            _, terms_map = ratios.terms(zone, unit, map_lam)
+            growth = terms - terms_map
+            log_z_change = log_z - log_z_map
+        else:
+            growth = terms
+            log_z_change = np.nan
+        for rank, i in enumerate(np.argsort(growth)[::-1][:TOP_DRIVERS]):
+            row = int(rows[i])
+            driver_rows.append(dict(**key, source=source, draw=d, wall=wall, rank=rank + 1,
+                                    name=ratios.names[row], row=row,
+                                    term=float(terms[i]), growth=float(growth[i]),
+                                    log_z_change=float(log_z_change),
+                                    published=float(ratios.targets[row]), se=float(ratios.se[row]),
+                                    design=float(ratios.design[row])))
 
 
 def main() -> None:
     args = parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(args.seed)
-    log_bounds = np.log(args.bounds)
-    draw_rows, wall_rows, lines = [], [], []
-    for run in args.runs:
-        for path, puma, alpha, level in fits_in(run, args.family):
-            inputs = PMEDMInputs.load(processed_dir() / "inputs" / args.area / puma)
-            ratios = Ratios(inputs)
-            h = Hierarchy.build(inputs, level, alpha=alpha, taper=None, variance_floor="zero")
-            with np.load(path) as saved:
-                found = str(saved["hierarchy"]) if "hierarchy" in saved.files else "none"
-                if found != level:
-                    raise SystemExit(f"{path}: fitted at {found}, name says {level}")
-            q, _, _ = load_vb(path)
-            xi = q.sample(rng, args.draws)                       # (size, draws)
-            lam = xi if h.is_trivial else h.lambda_data(xi)
-            map_path = run / "map" / path.name
-            label = f"{puma} a{alpha:g} {level}"
+    draw_rows: list[dict] = []
+    driver_rows: list[dict] = []
+    maps = {path.stem: path for run in args.runs for path in (run / "map").glob("*.npz")}
+    cache: dict[str, Ratios] = {}
 
-            if map_path.exists():
-                with np.load(map_path) as saved:
-                    l_map, log_p_map = ratios.log_ratio(saved["lam"])
-                draw_rows.append(dict(puma=puma, alpha=alpha, level=level, source="map", draw=-1,
-                                      wall=bool(np.exp(log_p_map[ratios.support].max()) > args.wall),
-                                      max_log_ratio=float(l_map[ratios.support].max()),
-                                      **{f"over_{b:g}": int((l_map > lb).sum())
-                                         for b, lb in zip(args.bounds, log_bounds)}))
-            for d in range(lam.shape[1]):
-                l, log_p = ratios.log_ratio(lam[:, d])
-                top = np.unravel_index(np.argmax(np.where(ratios.support, log_p, -np.inf)), log_p.shape)
-                wall = bool(np.exp(log_p[top]) > args.wall)
-                draw_rows.append(dict(puma=puma, alpha=alpha, level=level, source=args.family, draw=d,
-                                      wall=wall, max_log_ratio=float(l[ratios.support].max()),
-                                      **{f"over_{b:g}": int((l > lb).sum())
-                                         for b, lb in zip(args.bounds, log_bounds)}))
-                if wall:
-                    for row in ratios.rows_of(*top):
-                        wall_rows.append(dict(puma=puma, alpha=alpha, level=level, draw=d,
-                                              row=int(row), name=ratios.names[row],
-                                              log_ratio=float(l[top]), share=float(np.exp(log_p[top])),
-                                              published=float(ratios.targets[row]),
-                                              design=float(ratios.design[row])))
-            print(f"done {label}", flush=True)
+    def ratios_for(puma: str) -> Ratios:
+        if puma not in cache:
+            cache.clear()   # one PUMA's problem in memory at a time
+            cache[puma] = Ratios(PMEDMInputs.load(processed_dir() / "inputs" / args.area / puma))
+        return cache[puma]
+
+    def map_lam(name: str) -> np.ndarray | None:
+        if name not in maps:
+            return None
+        with np.load(maps[name]) as saved:
+            return saved["lam"]
+
+    jobs = [("vb", path, match) for run in args.runs for path, match in fits_in(run, args.family)]
+    jobs += [("hmc", path, match) for d in args.hmc for path, match in traces_in(d)]
+    jobs.sort(key=lambda job: job[2].group("puma"))
+    for source, path, match in jobs:
+        puma, alpha = match.group("puma"), float(match.group("alpha"))
+        level, taper = match.group("level") or "none", match.group("taper")
+        name = path.stem if source == "vb" else path.stem[: -len("_trace")]
+        key = dict(puma=puma, alpha=alpha, level=level)
+        ratios = ratios_for(puma)
+        if source == "vb":
+            h = Hierarchy.build(ratios.inputs, level, alpha=alpha,
+                                taper=None if taper == "none" else taper, variance_floor="zero")
+            q, _, _ = load_vb(path)
+            xi = q.sample(rng, args.draws)                                   # (size, draws)
+            lam = xi if h.is_trivial else h.lambda_data(xi)
+        else:
+            with np.load(path) as saved:
+                kept = saved["lam"]                                          # (kept, chains, m)
+            flat = kept.reshape(-1, kept.shape[-1])
+            pick = np.unique(np.linspace(0, len(flat) - 1, min(args.draws, len(flat))).astype(int))
+            lam = flat[pick].T
+        analyse(ratios, key, source, lam, map_lam(name), args, draw_rows, driver_rows)
+        print(f"done {source} {name}: {lam.shape[1]} draws", flush=True)
 
     draws = pd.DataFrame(draw_rows)
     draws.to_csv(args.out / "ratio_draws.csv", index=False)
-    walls = pd.DataFrame(wall_rows)
-    walls.to_csv(args.out / "ratio_wall_rows.csv", index=False)
+    drivers = pd.DataFrame(driver_rows)
+    drivers.to_csv(args.out / "ratio_drivers.csv", index=False)
+    write_report(args, draws, drivers)
 
+
+def group_of(frame: pd.DataFrame) -> pd.Series:
+    return np.where(frame.source == "map", "MAP",
+                    np.where(frame.source == "hmc", np.where(frame.wall, "HMC, wall", "HMC, no wall"),
+                             np.where(frame.wall, "VB, wall", "VB, no wall")))
+
+
+def write_report(args, draws: pd.DataFrame, drivers: pd.DataFrame) -> None:
     over = [f"over_{b:g}" for b in args.bounds]
-    lines.append(f"Log weight ratios l = log(w / N q); bounds as ratios {args.bounds} "
-                 f"(log {', '.join(f'{x:.2f}' for x in log_bounds)}); wall = a cell over "
-                 f"{args.wall:g} of N; VB-{args.family}, {args.draws} draws per fit")
+    order = ["MAP", "HMC, no wall", "HMC, wall", "VB, no wall", "VB, wall"]
+    lines = [f"Log weight ratios l = log(w / N q); bounds as ratios {args.bounds}; wall = a cell over "
+             f"{args.wall:g} of N; up to {args.draws} draws per fit (VB-{args.family}, HMC thinned)"]
+    draws = draws.assign(group=group_of(draws))
     for (puma, alpha, level), part in draws.groupby(["puma", "alpha", "level"], sort=True):
         lines.append(f"\n== {puma} alpha {alpha:g} {level}")
-        for name, sel in (("MAP", part.source == "map"),
-                          ("VB, no wall", (part.source != "map") & ~part.wall),
-                          ("VB, wall", (part.source != "map") & part.wall)):
-            sub = part[sel]
+        for group in order:
+            sub = part[part.group == group]
             if sub.empty:
-                lines.append(f"   {name:12s}: none")
                 continue
             m = sub.max_log_ratio
             counts = "  ".join(f">{b:g}: {sub[c].mean():.1f}" for b, c in zip(args.bounds, over))
-            lines.append(f"   {name:12s}: {len(sub):4d} draws; max l min {m.min():.2f} "
-                         f"median {m.median():.2f} max {m.max():.2f} (ratio {np.exp(m.median()):,.0f}); "
+            lines.append(f"   {group:13s}: {len(sub):4d} draws; max l median {m.median():.2f} "
+                         f"(ratio {np.exp(m.median()):,.0f}), range {m.min():.2f}-{m.max():.2f}; "
                          f"mean unit-zones over bound  {counts}")
-    if not walls.empty:
-        lines.append("\nConstraint rows under the largest cell of wall draws (all fits), most frequent:")
-        rows = walls.groupby("name").agg(wall_draws=("draw", "size"),
-                                         published=("published", "median"),
-                                         design=("design", "median"),
-                                         log_ratio=("log_ratio", "median"))
-        rows = rows.sort_values("wall_draws", ascending=False).head(30)
-        lines.append(rows.round(2).to_string())
-        lines.append("\nAll rows under wall cells, published and design-expected counts (quartiles):")
-        lines.append(walls[["published", "design"]].describe(percentiles=[0.25, 0.5, 0.75]).round(1).to_string())
+    lines.append("\nThe largest cell of each draw: its log ratio, share of N, and design "
+                 "probability against the median (log), medians by group:")
+    cells = draws[draws.source != "map"].groupby("group")[
+        ["top_log_ratio", "top_share", "top_log_q_offset"]].median()
+    lines.append(cells.reindex([g for g in order if g in cells.index]).round(4).to_string())
+    if not drivers.empty:
+        drivers = drivers.assign(group=group_of(drivers))
+        lines.append(f"\nTop driver of each draw's largest cell (the row whose term -x lambda grew most "
+                     f"against the MAP), by group; growth and the log Z change in log-ratio units:")
+        top = drivers[drivers["rank"] == 1]
+        for group in order:
+            sub = top[top.group == group]
+            if sub.empty:
+                continue
+            table = sub.groupby("name").agg(draws=("draw", "size"), growth=("growth", "median"),
+                                            log_z_change=("log_z_change", "median"),
+                                            published=("published", "median"), se=("se", "median"),
+                                            design=("design", "median"))
+            lines.append(f"\n   {group} ({len(sub)} draws), most frequent top drivers:")
+            lines += ["     " + r for r in
+                      table.sort_values("draws", ascending=False).head(15).round(2).to_string().splitlines()]
+            lines.append(f"     all top drivers: published median {sub.published.median():.1f}, "
+                         f"quartiles {sub.published.quantile(0.25):.1f}-{sub.published.quantile(0.75):.1f}; "
+                         f"design median {sub.design.median():.1f}")
     text = "\n".join(lines) + "\n"
     (args.out / "ratio_diagnostic.txt").write_text(text)
     print(text)
