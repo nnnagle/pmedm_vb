@@ -131,6 +131,9 @@ def category_tree(children: dict[int, list[int]], cells: list[str], titles: list
         return {"cat": name, "titles": sorted({titles[i] for i in cat_leaves[name]})}
 
     root = frozenset(names)
+    if len(root) == 1:
+        # a one-category table: its tree is that category alone
+        return {"children": [leaf(root)]}, dropped
     return build(root), dropped
 
 
