@@ -96,7 +96,7 @@ class NullSpaceHierarchy(CollapsedHierarchy):
     """
 
     @classmethod
-    def build_null(cls, inputs: PMEDMInputs, collapse: float | None, *, alpha: float,
+    def build_null(cls, inputs: PMEDMInputs, collapse, *, alpha: float,
                    taper: str | None, variance_floor) -> "NullSpaceHierarchy":
         if alpha is None:
             raise ValueError("the null-space hierarchy is built for one Sigma: pass alpha, "
@@ -105,7 +105,7 @@ class NullSpaceHierarchy(CollapsedHierarchy):
                 else CollapsedHierarchy.build(inputs, "puma", collapse))
         self = cls.__new__(cls)
         self.__dict__.update(base.__dict__)
-        self.level = "nullspace" if collapse is None else f"nullspace-c{collapse:g}"
+        self.level = "nullspace" if collapse is None else "nullspace" + base.level[len("puma"):]
         self.base = "nullspace"
         self.group = np.full(self.m, -1)
         self.bg_group = self.group.copy()

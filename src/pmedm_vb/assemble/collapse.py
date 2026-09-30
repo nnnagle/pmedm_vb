@@ -60,6 +60,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from pmedm_vb.assemble.inputs import PMEDMInputs
+from pmedm_vb.assemble.rollup import RollupSpec, RollupStats, prune, rollup, tree_categories
 from pmedm_vb.assemble.sigma import Sigma
 from pmedm_vb.data.variance import SDR_FACTOR
 
@@ -94,6 +95,56 @@ def collapse_blocks(counts: np.ndarray, start: list[list[int]], threshold: float
         positive = [(s1 + s2, sorted(b1 + b2))] + positive[2:]
     out += [(b, False) for _, b in sorted(positive, key=lambda sb: sb[1][0])]
     return out
+
+
+class _Partitioner:
+    """The structure-aware roll-up for one table in one area, in
+    :func:`collapse_blocks`' output form, with a tally per level and table."""
+
+    def __init__(self, inputs: PMEDMInputs, spec: RollupSpec) -> None:
+        if inputs.trees is None:
+            raise ValueError(
+                "the structure-aware roll-up needs the constraint tables' category trees, "
+                "and these inputs have none: run experiments/table_trees.py --write-inputs "
+                "on a node with network access")
+        self.trees = inputs.trees
+        self.spec = spec
+        self.tally: dict[tuple[str, str], dict] = {}
+
+    def __call__(self, counts: np.ndarray, names: list[str], cats: np.ndarray,
+                 where: str) -> list[tuple[list[int], bool]]:
+        table = _table(names[int(cats[0])])
+        if table not in self.trees:
+            raise ValueError(f"no category tree for {table}; rerun table_trees.py --write-inputs")
+        entry = self.trees[table]
+        position = {names[int(k)].split(".", 1)[1]: int(k) for k in cats}
+        unknown = sorted(set(position) - set(tree_categories(entry["tree"])))
+        if unknown:
+            raise ValueError(f"{table}: categories {unknown} are not in its category tree")
+        tree = prune(entry["tree"], set(position))
+        order = tree_categories(tree)
+        index = np.array([position[name] for name in order])
+        threshold = self.spec.threshold(entry["universe"])
+        parts, stats = rollup(tree, counts[index], threshold)
+        row = self.tally.setdefault((where, table), dict(
+            level=where, table=table, universe=entry["universe"], threshold=threshold,
+            areas=0, categories=0, cells=0, zero_cells=0, zero_categories=0, stats=RollupStats()))
+        row["areas"] += 1
+        row["categories"] += len(order)
+        row["cells"] += len(parts)
+        row["zero_cells"] += sum(z for _, z in parts)
+        row["zero_categories"] += int((counts[index] == 0).sum())
+        row["stats"].add(stats)
+        return [([int(index[i]) for i in members], zero) for members, zero in parts]
+
+    def report(self) -> list[dict]:
+        out = []
+        for row in self.tally.values():
+            stats = row.pop("stats")
+            row.update(parallel_merges=stats.parallel_merges, collapsed_nodes=stats.collapsed_nodes,
+                       crossings=stats.crossings, cells_below_threshold=stats.below_threshold)
+            out.append(row)
+        return out
 
 
 class _UnionFind:
@@ -151,8 +202,13 @@ class CollapsedHierarchy:
     # -- construction ------------------------------------------------------
 
     @classmethod
-    def build(cls, inputs: PMEDMInputs, base: str, threshold: float,
+    def build(cls, inputs: PMEDMInputs, base: str, threshold: "float | RollupSpec",
               merge_zeros: bool = True) -> "CollapsedHierarchy":
+        """``threshold`` a number: the collapse above, top-down. A
+        :class:`~pmedm_vb.assemble.rollup.RollupSpec`: the structure-aware
+        roll-up of :mod:`pmedm_vb.assemble.rollup`, run on each area's own
+        counts (the PUMA, each tract, each block group) independently."""
+        rolled = isinstance(threshold, RollupSpec)
         if base not in ("none", "tract", "puma"):
             raise ValueError(f"base level must be none, tract or puma, got {base!r}")
         if inputs.sigma_l is None:
@@ -171,13 +227,21 @@ class CollapsedHierarchy:
         t_tables = np.array([_table(n) for n in t_names])
         b_tables = np.array([_table(n) for n in b_names])
         big = np.inf if threshold is None else threshold
+        if rolled:
+            partition = _Partitioner(inputs, threshold)
+
+            def cells_of(counts, names, cats, start, where):
+                return partition(counts, names, cats, where)
+        else:
+            def cells_of(counts, names, cats, start, where):
+                return collapse_blocks(counts, start, big, merge_zeros)
 
         # PUMA partition per table, from the tract estimates summed.
         puma_counts = inputs.Y_T.sum(axis=0)
         puma_blocks = {}
         for table in dict.fromkeys(t_tables):
             cats = np.flatnonzero(t_tables == table)
-            blocks = collapse_blocks(puma_counts, [[int(k)] for k in cats], big, merge_zeros)
+            blocks = cells_of(puma_counts, t_names, cats, [[int(k)] for k in cats], "puma")
             puma_blocks[table] = blocks
 
         cells: list[dict] = []
@@ -188,7 +252,7 @@ class CollapsedHierarchy:
             counts = inputs.Y_T[t]
             for table, blocks in puma_blocks.items():
                 start = [b for b, _ in blocks]
-                parts = collapse_blocks(counts, start, big, merge_zeros)
+                parts = cells_of(counts, t_names, np.flatnonzero(t_tables == table), start, "tract")
                 tract_blocks[t, table] = [b for b, _ in parts]
                 for members, zero in parts:
                     rows = np.array(members) * n_tracts + t
@@ -204,7 +268,7 @@ class CollapsedHierarchy:
                 b_cats = np.flatnonzero(b_tables == table)
                 t_to_b = {int(b_to_t[kb]): int(kb) for kb in b_cats}
                 start = [[t_to_b[k] for k in blk if k in t_to_b] for blk in tract_blocks[t, table]]
-                parts = collapse_blocks(counts, start, big, merge_zeros)
+                parts = cells_of(counts, b_names, b_cats, start, "block group")
                 bg_parts[z, table] = parts
                 for members, zero in parts:
                     rows = split + np.array(members) * n_zones + z
@@ -249,6 +313,11 @@ class CollapsedHierarchy:
                     for z in zones:
                         for members, _ in bg_parts[z, table]:
                             uf.union([position[k] for k in members])
+                    # the tract's own cells too: a no-op under the top-down
+                    # collapse, where block group cells are unions of them
+                    t_to_b = {int(b_to_t[kb]): int(kb) for kb in b_cats}
+                    for members in tract_blocks[t, table]:
+                        uf.union([position[t_to_b[k]] for k in members if k in t_to_b])
                     roots = {}
                     for z in zones:
                         for members, _ in bg_parts[z, table]:
@@ -274,6 +343,8 @@ class CollapsedHierarchy:
                 for t in range(n_tracts):
                     for members in tract_blocks[t, table]:
                         uf.union([position[k] for k in members])
+                for members, _ in puma_blocks[table]:
+                    uf.union([position[k] for k in members])
                 roots = {}
                 for t in range(n_tracts):
                     for members in tract_blocks[t, table]:
@@ -314,8 +385,11 @@ class CollapsedHierarchy:
         bg_group = np.where(bg_group >= 0, remap[np.maximum(bg_group, 0)], -1)
 
         tract_cells = [np.flatnonzero(cell_area == t) for t in range(n_tracts)]
-        level = f"{base}-c{threshold:g}" if merge_zeros else f"{base}-c{threshold:g}-keepzeros"
-        return cls(level=level, base=base, threshold=threshold, m=m, m_full=m_full,
+        if rolled:
+            level = f"{base}-r{threshold}"
+        else:
+            level = f"{base}-c{threshold:g}" if merge_zeros else f"{base}-c{threshold:g}-keepzeros"
+        self = cls(level=level, base=base, threshold=threshold, m=m, m_full=m_full,
                    row_cell=row_cell, puma_of_row=puma_of_row, cell_area=cell_area,
                    cell_is_tract=cell_is_tract, cell_zero=cell_zero,
                    cell_names=[c["name"] for c in cells], group=group, bg_group=bg_group,
@@ -323,6 +397,8 @@ class CollapsedHierarchy:
                    puma_names=puma_names,
                    y_ext=np.concatenate([Y_c, Y_P]) / inputs.N, kappa=1.0 / inputs.n,
                    n_tracts=n_tracts, tract_cells=tract_cells)
+        self.rollup_report = partition.report() if rolled else None
+        return self
 
     # -- sizes -------------------------------------------------------------
 

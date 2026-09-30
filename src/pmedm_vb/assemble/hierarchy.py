@@ -63,16 +63,29 @@ from pmedm_vb.data.variance import SDR_FACTOR
 LEVELS = ("none", "tract", "puma")
 
 
-def split_level(level: str) -> tuple[str, float | None]:
-    """``"puma-c15"`` -> ``("puma", 15.0)``; ``"puma"`` -> ``("puma", None)``."""
+def split_level(level: str):
+    """``"puma-c15"`` -> ``("puma", 15.0)``; ``"puma-r15h10"`` -> ``("puma",
+    RollupSpec(15, 10))`` (the structure-aware roll-up, persons 15, households
+    10); ``"puma"`` -> ``("puma", None)``."""
+    from pmedm_vb.assemble.rollup import RollupSpec
+
     if "-c" in level:
         base, threshold = level.split("-c", 1)
         return base, float(threshold)
+    if "-r" in level:
+        base, spec = level.split("-r", 1)
+        return base, RollupSpec.parse(spec)
     return level, None
 
 
-def level_name(level: str, collapse: float | None) -> str:
-    """The level string for a CLI's ``--hierarchy`` and ``--collapse``."""
+def level_name(level: str, collapse: float | None, rollup: str | None = None) -> str:
+    """The level string for a CLI's ``--hierarchy``, ``--collapse`` and ``--rollup``."""
+    if collapse is not None and rollup is not None:
+        raise ValueError("--collapse and --rollup are alternatives; give one")
+    if rollup is not None:
+        from pmedm_vb.assemble.rollup import RollupSpec
+
+        return f"{level}-r{RollupSpec.parse(rollup)}"
     return level if collapse is None else f"{level}-c{collapse:g}"
 
 
@@ -119,9 +132,11 @@ class Hierarchy:
               taper: str | None = None, variance_floor=None) -> "Hierarchy":
         """``level`` is one of :data:`LEVELS`, or one with ``-c<threshold>``
         appended for the per-area collapse of :mod:`pmedm_vb.assemble.collapse`
-        (e.g. ``"puma-c15"``), which returns a
+        (e.g. ``"puma-c15"``), or ``-r<persons>[h<households>]`` for the
+        structure-aware roll-up of :mod:`pmedm_vb.assemble.rollup` (e.g.
+        ``"puma-r15h10"``), either of which returns a
         :class:`~pmedm_vb.assemble.collapse.CollapsedHierarchy`. ``"nullspace"`` (or
-        ``"nullspace-c<threshold>"``) returns a
+        ``"nullspace-c<threshold>"``, ``"nullspace-r<spec>"``) returns a
         :class:`~pmedm_vb.assemble.nullspace.NullSpaceHierarchy`, which is built
         for one ``Sigma`` and so needs ``alpha``, ``taper`` and ``variance_floor``;
         the other levels ignore them."""

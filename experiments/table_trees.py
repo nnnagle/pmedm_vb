@@ -29,10 +29,16 @@ national file (summary level 010), where almost no line is zero:
    all of them, and categories under the same node are siblings -- the groups
    a structure-aware roll-up merges within before crossing a sub-universe.
 
+4. **The tree over our categories.** For every published node, the set of
+   our categories with a line under it; the sets that nest are the nodes of
+   the tree the roll-up works on (:mod:`pmedm_vb.assemble.rollup`), printed
+   per table, with any sets dropped for crossing another. ``--write-inputs``
+   writes these trees into each PUMA's inputs.
+
 Writes ``<out>/table_trees.txt``: per table, the tree (indented, with titles
 and national totals), then per level the check and the sibling groups of our
 categories with their county counts; and ``<out>/table_trees.csv``, one row per
-line and level. Reads the cached replicate files, fetching any missing ones
+line and level; and ``<out>/category_trees.json``. Reads the cached replicate files, fetching any missing ones
 (so run it where the network is available, e.g. a login node)::
 
     $CONDA_PREFIX/bin/python experiments/table_trees.py --out $RUNS/table_trees
@@ -42,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import json
 import sys
 from pathlib import Path
 
@@ -49,7 +56,9 @@ import numpy as np
 import pandas as pd
 
 from pmedm_vb.assemble.constraints import default_tables
-from pmedm_vb.config import StudyArea
+from pmedm_vb.assemble.inputs import TREES_FILE
+from pmedm_vb.assemble.rollup import category_tree, tree_categories
+from pmedm_vb.config import StudyArea, processed_dir
 from pmedm_vb.data.cache import fetch_cached
 from pmedm_vb.data.variance import (REPLICATE_COLUMNS, VRE_BASE, _read_replicate_file,
                                     _span_label, fetch_replicates)
@@ -71,6 +80,10 @@ def parse_args() -> argparse.Namespace:
                         help="where no run of lines sums exactly to a subtotal in the US "
                              "file, close it at the nearest run if its gap relative to the "
                              "subtotal is at most this (the study-area check stays exact)")
+    parser.add_argument("--write-inputs", nargs="+", default=[], metavar="AREA",
+                        help="also write the category trees into every PUMA's inputs under "
+                             "processed/inputs/AREA (e.g. knox-2024-5yr), for the "
+                             "structure-aware roll-up (the -r hierarchy levels)")
     parser.add_argument("--out", type=Path, required=True)
     return parser.parse_args()
 
@@ -250,6 +263,11 @@ def tree_report(cells, titles, V, tol, close_rtol) -> tuple[list[str], dict[int,
     return lines, children
 
 
+#: Tables whose tree failed the exact check at some level; no trees are written
+#: into the inputs while any did.
+tree_failures: list[str] = []
+
+
 def level_report(cells, titles, V, children, table_spec, tol) -> tuple[list[str], pd.DataFrame]:
     """Check the national tree on one level's areas and place our categories in it."""
     parent = ancestors(children, len(cells))
@@ -260,6 +278,8 @@ def level_report(cells, titles, V, children, table_spec, tol) -> tuple[list[str]
     n_zero = int((np.abs(V).max(axis=1) <= tol).sum())
     county = V[:, : V.shape[1] // 81].sum(axis=1)  # estimate columns come first
     ok = residual <= tol and not extra
+    if not ok:
+        tree_failures.append(table_spec.table)
     lines = [f"   max |subtotal - sum of children| {residual:.3g}; {n_zero} all-zero lines; "
              f"smallest value {V.min():,.0f}; rank deficiency {nullity} = {n_known} explained by "
              f"the tree and zero lines + {nullity - n_known} unexplained"
@@ -345,7 +365,7 @@ def main() -> None:
         for t in default_tables(area):
             if t.geography == level:
                 specs.setdefault(t.table, {})[level] = t
-    out_lines, frames = [], []
+    out_lines, frames, trees = [], [], {}
     for table, by_level in specs.items():
         cells, titles, V_us = line_matrix(fetch_us(area, table))
         out_lines.append(f"== {table}: tree from the US file")
@@ -364,11 +384,49 @@ def main() -> None:
             out_lines += lines
             frames.append(rows.assign(table=table, level=level,
                                       us_estimate=V_us[:, 0]))
+        # the tree over our categories, the same at every level
+        specs_here = list(by_level.values())
+        categories = [(c.name, tuple(c.published)) for c in specs_here[0].categories]
+        for other in specs_here[1:]:
+            if [(c.name, tuple(c.published)) for c in other.categories] != categories:
+                raise ValueError(f"{table}: categories differ between levels")
+        tree, dropped = category_tree(children, cells, titles, categories)
+        trees[table] = {"universe": specs_here[0].universe, "tree": tree, "dropped": dropped}
+        out_lines.append(f"  -- category tree ({specs_here[0].universe}):")
+        out_lines += category_tree_lines(tree)
+        if dropped:
+            out_lines.append("   category sets dropped for crossing another: "
+                             + "; ".join("{" + ", ".join(d) + "}" for d in dropped))
         out_lines.append("")
     pd.concat(frames).to_csv(args.out / "table_trees.csv", index=False)
+    (args.out / "category_trees.json").write_text(json.dumps(trees, indent=1) + "\n")
     text = "\n".join(out_lines) + "\n"
     (args.out / "table_trees.txt").write_text(text)
     print(text)
+    if args.write_inputs:
+        if tree_failures:
+            raise SystemExit(f"not writing trees into the inputs: {sorted(set(tree_failures))} "
+                             f"failed the exact check")
+        for name in args.write_inputs:
+            root = processed_dir() / "inputs" / name
+            dirs = sorted(d for d in root.iterdir() if (d / "manifest.json").exists())
+            if not dirs:
+                raise SystemExit(f"no inputs under {root}")
+            for d in dirs:
+                (d / TREES_FILE).write_text(json.dumps(trees, indent=1) + "\n")
+            print(f"wrote {TREES_FILE} into {len(dirs)} inputs under {root}")
+
+
+def category_tree_lines(node: dict, depth: int = 0) -> list[str]:
+    """The category tree, indented; a node unnamed, a leaf by its category."""
+    out = []
+    for child in node["children"]:
+        if "cat" in child:
+            out.append(f"     {'  ' * depth}{child['cat']}")
+        else:
+            out.append(f"     {'  ' * depth}[{len(tree_categories(child))} categories]")
+            out += category_tree_lines(child, depth + 1)
+    return out
 
 
 if __name__ == "__main__":

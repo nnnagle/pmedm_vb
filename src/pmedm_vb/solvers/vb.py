@@ -706,7 +706,8 @@ def solve_vb(
 
     if family not in FAMILY_LAYERS:
         raise ValueError(f"family must be one of {sorted(FAMILY_LAYERS)}, got {family!r}")
-    if family == "sumdiff" and ("-c" in hierarchy or hierarchy.startswith("nullspace")):
+    if family == "sumdiff" and ("-c" in hierarchy or "-r" in hierarchy
+                               or hierarchy.startswith("nullspace")):
         raise ValueError("the sumdiff family pairs tract and block group rows by category, "
                          "which the collapsed and null-space coordinates do not keep; "
                          "use gaussian or skewed")

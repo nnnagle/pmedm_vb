@@ -156,11 +156,15 @@ def parse_args() -> argparse.Namespace:
                         help="collapse each area's zero cells into one and merge small positive "
                              "cells until each holds more than this many (pmedm_vb.assemble."
                              "collapse); the hierarchy level becomes <level>-c<threshold>")
+    parser.add_argument("--rollup", default=None,
+                        help="the structure-aware roll-up (pmedm_vb.assemble.rollup) with this "
+                             "threshold, PERSONS or PERSONShHOUSEHOLDS (e.g. 15h10); the "
+                             "hierarchy level becomes <level>-r<spec>")
     args = parser.parse_args()
     from pmedm_vb.assemble.hierarchy import level_name
 
     if getattr(args, "hierarchy", None) is not None:
-        args.hierarchy = level_name(args.hierarchy, args.collapse)
+        args.hierarchy = level_name(args.hierarchy, args.collapse, args.rollup)
     return args
 
 
