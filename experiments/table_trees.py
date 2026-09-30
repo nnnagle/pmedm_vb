@@ -361,8 +361,9 @@ def main() -> None:
                      counties=tuple(args.county), span=args.span)
     args.out.mkdir(parents=True, exist_ok=True)
     specs: dict[str, dict[str, object]] = {}
+    tables = default_tables(area)
     for level in args.levels:
-        for t in default_tables(area):
+        for t in tables:
             if t.geography == level:
                 specs.setdefault(t.table, {})[level] = t
     out_lines, frames, trees = [], [], {}
