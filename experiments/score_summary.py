@@ -14,9 +14,11 @@ With ``--by-table`` (the per-table CSV of ``compare_methods.py --by-table``)
 it writes ``<out>/table_summary.txt`` instead: per alpha and ACS table, the
 bias and coverage against the published values and the ratio of the draws'
 90% half-width to the published MOE, the last two over sampled cells only;
-and ``<out>/distribution_summary.txt``: per alpha, table and method, the
+``<out>/distribution_summary.txt``: per alpha, table and method, the
 distribution measures (TVD, Q, geometric-mean half-width over MOE) of
-``compare_methods.distribution_rows``.
+``compare_methods.distribution_rows``; and ``<out>/calibration_summary.txt``:
+the error decomposition and the across-area shrinkage tests of
+``compare_methods.error_decomposition`` and ``shrinkage_rows``.
 """
 
 from __future__ import annotations
@@ -147,12 +149,60 @@ def distribution_view(path: Path) -> list[str]:
         "  (_u); 1 = off by sampling error alone. hw/moe: geometric mean of the 90% half-width",
         "  over the published MOE, sampled cells, weighted or not. Held-out: no replicates, so no",
         "  tvd_rep; held-out PUMA totals have no SE, so tvd only.", ""]
-    frame = frame[frame.metric.isin({c[2] for c in DISTRIBUTION_COLUMNS})]
+    return lines + columns_view(frame, DISTRIBUTION_COLUMNS)
+
+
+#: (label, cells, metric, stat) for the calibration view.
+CALIBRATION_COLUMNS = [
+    ("n", "sampled", "decomp", "n"),
+    ("z_mean", "sampled", "decomp", "z_mean"),
+    ("z2", "sampled", "decomp", "z2"),
+    ("bias2", "sampled", "decomp", "bias2"),
+    ("scatter", "sampled", "decomp", "scatter"),
+    ("claimed", "sampled", "decomp", "claimed"),
+    ("claim_p50", "sampled", "decomp", "claimed_p50"),
+    ("ratio", "sampled", "decomp", "calib_ratio"),
+    ("ratio_p50", "sampled", "decomp", "calib_ratio_p50"),
+    ("pred_q", "sampled", "decomp", "pred_q"),
+    ("pred_cov", "sampled", "pred_covers", "mean"),
+    ("slope", "all", "calib_slope", "p50"),
+    ("smooth", "all", "smooth_ratio", "p50"),
+    ("cov<1", "all", "covers_published_by_distance", "lt1"),
+    ("cov1-2", "all", "covers_published_by_distance", "1to2"),
+    ("cov>2", "all", "covers_published_by_distance", "ge2"),
+    ("pcov>2", "all", "pred_covers_by_distance", "ge2"),
+]
+
+
+def calibration_view(path: Path) -> list[str]:
+    frame = pd.read_csv(path, dtype={"puma": str})
+    lines = [
+        "Is each method as uncertain as its error? (median over PUMAs [min,max]; sampled cells.)",
+        "In SE units, z = (mean - published) / SE. z2 = mean z^2 = 1 + the model's own squared",
+        "  error when the survey error is independent of the fit -- exactly so for held-out",
+        "  tables, not for constrained ones, which the fit has seen. That error splits into",
+        "  bias2 = z_mean^2 (systematic) and scatter (the rest). claimed: the posterior's own",
+        "  variance, mean (sd/SE)^2, and its median; ratio = (z2 - 1) / claimed: ~1 calibrated,",
+        "  > 1 too sure. pred_q: mean predictive z^2, (mean - Y)^2 / (SE^2 + sd^2), 1 when",
+        "  calibrated; pred_cov: 90% predictive coverage (normal).",
+        "Across areas, per category, in shares of the area's table total (median over the table's",
+        "  categories): slope of published on fitted share, 1 if right and > 1 if the fit is pulled",
+        "  toward the PUMA-wide share; smooth: variance of the fitted shares over the true",
+        "  between-area variance (published less sampling), < 1 if smoother than the truth (noisier",
+        "  than slope). cov<1, cov1-2, cov>2: 90% posterior coverage of cells whose published share",
+        "  is that many SEs from the PUMA-wide share; pcov>2 the predictive coverage of the last.", ""]
+    return lines + columns_view(frame, CALIBRATION_COLUMNS)
+
+
+def columns_view(frame: pd.DataFrame, columns) -> list[str]:
+    """Per alpha, one row per (subset, table, method), one column per entry of ``columns``."""
+    lines = []
+    frame = frame[frame.metric.isin({c[2] for c in columns})]
     for alpha, block in frame.groupby("alpha"):
         rows = {}
         for (subset, table, method), group in block.groupby(["subset", "table", "method"]):
             row = {}
-            for label, cells, metric, stat in DISTRIBUTION_COLUMNS:
+            for label, cells, metric, stat in columns:
                 sel = group[(group.cells == cells) & (group.metric == metric) & (group.stat == stat)]
                 row[label] = fmt(sel.groupby("puma")["value"].first())
             rows[(subset.replace("_block_group", "_bg"), table, method)] = row
@@ -168,6 +218,8 @@ def main() -> None:
         (args.out / "table_summary.txt").write_text(text)
         dist = "\n".join(distribution_view(args.by_table)) + "\n"
         (args.out / "distribution_summary.txt").write_text(dist)
+        calib = "\n".join(calibration_view(args.by_table)) + "\n"
+        (args.out / "calibration_summary.txt").write_text(calib)
         print(text)
         print(f"distribution view written to {args.out / 'distribution_summary.txt'}")
         return

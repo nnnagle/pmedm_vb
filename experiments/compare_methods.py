@@ -30,7 +30,9 @@ directory (``<name>_refsummary.npz``) and reused.
   the race x income cross-tabulation (block group; no published value). Per
   cell: mean, sd, 5/50/95% quantiles; ``z = (mean - Y) / SE``; the 90%
   half-width over the published MOE (``1.645 SE``); whether ``Y`` lies in the
-  90% interval; the share of draws beyond ``Y +- 2 SE`` and ``+- 3 SE``; and,
+  90% interval; the share of draws beyond ``Y +- 2 SE`` and ``+- 3 SE``; the
+  predictive ``pred_z = (mean - Y) / sqrt(SE^2 + sd^2)``, 90% predictive
+  coverage ``pred_covers`` (normal) and ``post_var_over_se2 = (sd / SE)^2``; and,
   with ``--reference``, the median and mean difference in reference sds (sd
   floored at ``compare.SD_FLOOR``), the sd ratio and the 90% width ratio. Each
   is summarised as p1/p10/p50/p90/p99 over the subset's cells (``mean`` too).
@@ -65,7 +67,11 @@ directory (``<name>_refsummary.npz``) and reused.
   with the SDR replicates' own total variation as the sampling benchmark), the
   mean ``z^2`` over sampled cells (``q``) and the geometric-mean half-width
   over MOE, each weighted by published count and not; see
-  :func:`distribution_rows`. Held-out PUMA totals (the tract estimates
+  :func:`distribution_rows`. Per table, too, the error decomposition of
+  :func:`error_decomposition` (bias, scatter, the posterior's claimed variance
+  and their ratio) and the across-area shrinkage tests of
+  :func:`shrinkage_rows` (calibration slope, smoothing ratio, coverage by
+  distance from the PUMA-wide share). Held-out PUMA totals (the tract estimates
   summed; no SE) are scored by total variation only.
 - ``--score-area`` scores against another area's tables with the same units
   and zones: a fit on ``knox-min-2024-5yr`` (``drop_small_cells.py``) against
@@ -319,9 +325,14 @@ def outcome_sets(inputs: PMEDMInputs, heldout: HeldOut | None) -> list[dict]:
     summed = np.stack([inputs.sigma_l[k * n_tracts + np.arange(n_tracts)].sum(axis=0)
                        for k in range(c_t)])
     s_p = SDR_FACTOR * np.square(summed).sum(axis=1)
+    # A category with no replicate spread in any tract (a published zero everywhere)
+    # takes its tract variances summed -- the modelled zero-cell ones -- as the
+    # model's PUMA rows do, rather than an SE of 0 (whose z is unbounded).
+    tract_v = inputs.sigma_v[:split].reshape(inputs.Y_T.shape, order="F").sum(axis=0)
+    v_p = np.where(s_p > 0, s_p, tract_v)
     Y_p = inputs.Y_T.sum(axis=0)[None, :]
     sets.append(dict(subset="constrained_puma", level="puma", X=sp.csc_matrix(inputs.X_T),
-                     Y=Y_p, se=np.sqrt(s_p)[None, :], names=list(inputs.tract_constraints),
+                     Y=Y_p, se=np.sqrt(v_p)[None, :], names=list(inputs.tract_constraints),
                      rep=summed[None], sampled=(Y_p > 0) & (s_p[None, :] > 0)))
     # Held-out PUMA totals: the tract estimates summed. No replicates, so no SE:
     # scored by the distribution measures of ``--by-table`` only.
@@ -430,6 +441,13 @@ def outcome_metrics(draws: np.ndarray, s: dict, ref: dict | None) -> dict[str, n
         dev = np.abs(draws - Y[None]) / se[None]
         out["share_beyond_2se"] = (dev > 2).mean(0).ravel()
         out["share_beyond_3se"] = (dev > 3).mean(0).ravel()
+        # The published value is the true count plus survey error, so with the
+        # posterior's own uncertainty it should sit within sqrt(SE^2 + sd^2) of
+        # the mean: a predictive z and (normal) 90% predictive coverage.
+        pred_sd = np.sqrt(np.square(se) + np.square(summary["sd"]))
+        out["pred_z"] = ((summary["mean"] - Y) / pred_sd).ravel()
+        out["pred_covers"] = (np.abs(summary["mean"] - Y) <= Z90 * pred_sd).astype(float).ravel()
+        out["post_var_over_se2"] = np.square(summary["sd"] / se).ravel()
     return out if ref is None else _ref_metrics(out, summary, draws, ref)
 
 
@@ -489,7 +507,8 @@ def rows_for(base: dict, subset: str, metric: str, values: np.ndarray, stats) ->
 
 
 #: Metrics against the published values that ``--by-table`` breaks down.
-TABLE_METRICS = ("z", "abs_z", "covers_published", "halfwidth_over_moe", "sd_over_se")
+TABLE_METRICS = ("z", "abs_z", "covers_published", "halfwidth_over_moe", "sd_over_se",
+                 "pred_z", "pred_covers", "post_var_over_se2")
 
 
 def by_table_rows(base: dict, s: dict, metrics: dict[str, np.ndarray]) -> list[dict]:
@@ -579,6 +598,8 @@ def distribution_rows(base: dict, s: dict, mean: np.ndarray,
         out += [dict(rb, metric="q", stat="weighted", value=float(np.average(z2, weights=w))),
                 dict(rb, metric="q", stat="unweighted", value=float(z2.mean())),
                 dict(rb, metric="q", stat="n", value=float(z2.size))]
+        out += error_decomposition(rb, Yt, Mt, s["se"][:, cols], mask, metrics, Y.shape, cols)
+        out += shrinkage_rows(row_base, s["subset"], Yt, Mt, s["se"][:, cols], metrics, Y.shape, cols)
         if "halfwidth_over_moe" in metrics:
             ratio = metrics["halfwidth_over_moe"].reshape(Y.shape)[:, cols][mask]
             ok = ratio > 0
@@ -588,6 +609,98 @@ def distribution_rows(base: dict, s: dict, mean: np.ndarray,
                              value=float(np.exp(np.average(log_r, weights=w[ok])))),
                         dict(rb, metric="hw_over_moe_gmean", stat="unweighted",
                              value=float(np.exp(log_r.mean())))]
+    return out
+
+
+def error_decomposition(rb: dict, Yt, Mt, se, mask, metrics, shape, cols) -> list[dict]:
+    """Over a table's sampled cells, in SE units (``z = (mean - Y) / SE``):
+    ``E z^2 = 1 + ((mean - truth) / SE)^2`` when the survey error is independent
+    of the fit (exactly so for held-out cells), so the model's own squared error
+    is ``z2 - 1``; it splits into a systematic part ``bias2 = (mean z)^2`` and
+    the rest, ``scatter``. ``claimed`` is the posterior's own variance, the mean
+    of ``(sd / SE)^2`` (and its median), and ``calib_ratio = (z2 - 1) / claimed``:
+    about 1 if the posterior is as uncertain as its error, above 1 if it is too
+    sure. ``pred_q`` is the mean predictive ``z^2``, 1 when calibrated."""
+    z = (Mt[mask] - Yt[mask]) / np.maximum(se[mask], 1e-9)
+    if z.size == 0:
+        return []
+    z2, zbar = float(np.mean(z * z)), float(z.mean())
+    rows = [("z_mean", zbar), ("z2", z2), ("bias2", zbar * zbar), ("scatter", z2 - 1 - zbar * zbar)]
+    if "post_var_over_se2" in metrics:
+        claimed = metrics["post_var_over_se2"].reshape(shape)[:, cols][mask]
+        pred = metrics["pred_z"].reshape(shape)[:, cols][mask]
+        rows += [("claimed", float(claimed.mean())), ("claimed_p50", float(np.median(claimed))),
+                 ("calib_ratio", (z2 - 1) / float(claimed.mean()) if claimed.mean() > 0 else np.nan),
+                 ("calib_ratio_p50", (z2 - 1) / float(np.median(claimed))
+                  if np.median(claimed) > 0 else np.nan),
+                 ("pred_q", float(np.mean(pred * pred)))]
+    return [dict(rb, metric="decomp", stat=name, value=float(v)) for name, v in rows] + [
+        dict(rb, metric="decomp", stat="n", value=float(z.size))]
+
+
+#: Fewest areas a category needs for its across-area slope and variance ratio.
+MIN_AREAS = 5
+
+
+def shrinkage_rows(row_base: dict, subset: str, Yt, Mt, se, metrics, shape, cols) -> list[dict]:
+    """Does the fit smooth a table across areas? Per category, over the areas
+    with a nonzero published (and fitted) table total, in shares of that total:
+
+    - ``calib_slope``: the slope of the published share on the fitted share.
+      The survey error is on the published side only (and independent of the
+      fit for held-out cells), so a correct fit gives 1; a fit pulled toward
+      the PUMA-wide share gives a slope above 1.
+    - ``smooth_ratio``: the variance of the fitted shares over the true
+      between-area variance, estimated as the published shares' variance less
+      their mean sampling variance. Below 1: smoother than the truth.
+
+    Summarised over the table's categories (median, mean, and the mean weighted
+    by each category's published total). ``covers_by_distance`` and
+    ``pred_covers_by_distance``: coverage of the published value by the 90%
+    posterior and predictive intervals, for cells grouped by how far their
+    published share lies from the PUMA-wide share, in SEs (``lt1``, ``1to2``,
+    ``ge2``)."""
+    total, fitted = Yt.sum(axis=1), Mt.sum(axis=1)
+    keep = (total > 0) & (fitted > 0)
+    if keep.sum() < MIN_AREAS or Yt.shape[1] < 2:
+        return []
+    y = Yt[keep] / total[keep, None]
+    m = Mt[keep] / fitted[keep, None]
+    s2 = np.square(se[keep] / total[keep, None])
+    slopes, ratios, weights = [], [], []
+    for k in range(Yt.shape[1]):
+        vm = m[:, k].var(ddof=1)
+        if vm <= 0:
+            continue
+        slopes.append(np.cov(y[:, k], m[:, k])[0, 1] / vm)
+        true_var = y[:, k].var(ddof=1) - s2[:, k].mean()
+        ratios.append(vm / true_var if true_var > 0 else np.nan)
+        weights.append(Yt[keep][:, k].sum())
+    out = []
+    rb = dict(row_base, cells="all", subset=subset)
+    for metric, values in (("calib_slope", slopes), ("smooth_ratio", ratios)):
+        v, w = np.asarray(values, float), np.asarray(weights, float)
+        ok = np.isfinite(v)
+        if not ok.any():
+            continue
+        out += [dict(rb, metric=metric, stat="p50", value=float(np.median(v[ok]))),
+                dict(rb, metric=metric, stat="mean", value=float(v[ok].mean())),
+                dict(rb, metric=metric, stat="wmean",
+                     value=float(np.average(v[ok], weights=w[ok])) if w[ok].sum() > 0 else np.nan),
+                dict(rb, metric=metric, stat="n", value=float(ok.sum()))]
+    puma_share = Yt[keep].sum(axis=0) / total[keep].sum()
+    distance = np.abs(y - puma_share[None]) / np.sqrt(np.maximum(s2, 1e-18))
+    bins = {"lt1": distance < 1, "1to2": (distance >= 1) & (distance < 2), "ge2": distance >= 2}
+    for metric in ("covers_published", "pred_covers"):
+        if metric not in metrics:
+            continue
+        values = metrics[metric].reshape(shape)[:, cols][keep]
+        for name, sel in bins.items():
+            if sel.any():
+                out += [dict(rb, metric=f"{metric}_by_distance", stat=name,
+                             value=float(values[sel].mean())),
+                        dict(rb, metric=f"{metric}_by_distance", stat=f"n_{name}",
+                             value=float(sel.sum()))]
     return out
 
 
