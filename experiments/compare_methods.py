@@ -199,7 +199,9 @@ def method_draws(args, inputs: PMEDMInputs, rng, h) -> tuple[dict, dict]:
     name = fit_name(args.puma, args.alpha, args.hierarchy, args.taper)
     timing: dict[str, float] = {}
     if args.method in ("ipf", "sinkhorn"):
-        with np.load(args.run / f"{args.puma}_{args.method}.npz") as saved:
+        from pmedm_vb.rake import rake_name
+
+        with np.load(args.run / f"{rake_name(args.puma, args.method, args.rollup)}.npz") as saved:
             timing["fit_seconds"] = float(saved["seconds"])
             timing["converged"] = float(saved["converged"])
             timing["n_sweeps"] = float(saved["n_sweeps"])

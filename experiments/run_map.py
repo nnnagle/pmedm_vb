@@ -501,19 +501,20 @@ def rake_one(path: Path, taper: str | None, alpha: float, out: Path, options: di
     """Worker: rake one PUMA and save. Never raises. ``taper`` and ``alpha``
     are ignored; they are in the signature to share the sweep's dispatch."""
     from pmedm_vb.assemble.inputs import PMEDMInputs
-    from pmedm_vb.rake import rake_ipf, rake_sinkhorn
+    from pmedm_vb.rake import rake_ipf, rake_name, rake_sinkhorn
 
-    puma, method = path.name, options["method"]
-    log_to_file(out / "logs" / f"{puma}_{method}.log")
+    puma, method, rollup = path.name, options["method"], options.get("rollup")
+    name = rake_name(puma, method, rollup)
+    log_to_file(out / "logs" / f"{name}.log")
     floor = options["variance_floor"]
-    row = {"puma": puma, "method": method,
+    row = {"puma": puma, "method": method, "rollup": rollup or "",
            "variance_floor": "none" if floor is None else str(floor)}
     settings = {k: options[k] for k in ("tol", "max_sweeps") if options[k] is not None}
     start = time.perf_counter()
     try:
         inputs = PMEDMInputs.load(path)
-        result = (rake_ipf(inputs, **settings) if method == "ipf"
-                  else rake_sinkhorn(inputs, variance_floor=floor, **settings))
+        result = (rake_ipf(inputs, rollup=rollup, **settings) if method == "ipf"
+                  else rake_sinkhorn(inputs, variance_floor=floor, rollup=rollup, **settings))
         row.update(
             n_constraints=inputs.n_constraints,
             converged=result.converged,
@@ -526,7 +527,7 @@ def rake_one(path: Path, taper: str | None, alpha: float, out: Path, options: di
             error="",
         )
         np.savez(
-            out / f"{puma}_{method}.npz",
+            out / f"{name}.npz",
             W=result.W, residual=result.residual, trace=result.trace,
             infeasible=result.infeasible, theta=result.theta,
             **{key: np.asarray(value) for key, value in row.items()},
@@ -547,7 +548,7 @@ SUMMARY_KEYS = {
            "converged",
            "n_iter", "elbo", "elbo_se", "gaussian_elbo", "gaussian_elbo_se", "laplace_elbo",
            "laplace_elbo_se", "gain", "seed", "map_seconds", "seconds", "error"],
-    "rake": ["puma", "method", "variance_floor", "n_constraints", "converged", "n_sweeps",
+    "rake": ["puma", "method", "rollup", "variance_floor", "n_constraints", "converged", "n_sweeps",
              "max_residual", "n_infeasible", "total", "N", "seconds", "error"],
 }
 
@@ -585,7 +586,9 @@ def run_sweep(
     for path in pumas:
         manifest = json.loads((path / "manifest.json").read_text())
         if step == "rake":  # one fit per PUMA: no Sigma, so no taper or alpha
-            done = out / f"{path.name}_{options['method']}.npz"
+            from pmedm_vb.rake import rake_name
+
+            done = out / f"{rake_name(path.name, options['method'], options.get('rollup'))}.npz"
             if done.exists():
                 rows.append(saved_row(done, step))
             else:
@@ -618,7 +621,7 @@ def run_sweep(
             for count, future in enumerate(as_completed(futures), start=1):
                 row = future.result()
                 rows.append(row)
-                label = (f"{row['puma']}_{row['method']}" if step == "rake"
+                label = (rake_name_of(row) if step == "rake"
                          else result_name(row["puma"], row["taper"], row["alpha"],
                                           row.get("hierarchy", "none")))
                 logger.info(
@@ -633,6 +636,13 @@ def run_sweep(
     write_summary(rows, out)
     failures = sum(bool(row["error"]) for row in rows)
     logger.info("summary: %s (%d failed)", out / "summary.csv", failures)
+
+
+def rake_name_of(row: dict) -> str:
+    from pmedm_vb.rake import rake_name
+
+    rollup = row.get("rollup")
+    return rake_name(row["puma"], row["method"], rollup if isinstance(rollup, str) and rollup else None)
 
 
 def write_summary(rows: list[dict], out: Path) -> None:
@@ -658,7 +668,8 @@ def main() -> None:
                    "epsilon": args.epsilon,
                    **({"hierarchy": args.hierarchy} if args.step in ("solve", "vb") else {}),
                    **({"family": args.family, "seed": args.seed} if args.step == "vb" else {}),
-                   **({"method": args.method, "tol": args.tol, "max_sweeps": args.max_sweeps}
+                   **({"method": args.method, "tol": args.tol, "max_sweeps": args.max_sweeps,
+                       "rollup": args.rollup}
                       if args.step == "rake" else {})}
         run_sweep(args, args.step, area, cores, args.alpha, args.taper, args.out, options)
 

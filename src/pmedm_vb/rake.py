@@ -99,9 +99,10 @@ class RakeResult:
     theta: np.ndarray = field(default_factory=lambda: np.zeros(0))
 
 
-def _rows(inputs: PMEDMInputs, level: str) -> list[tuple[int, sp.csc_matrix, np.ndarray, np.ndarray]]:
-    """Per constraint column at one level: stacked-row offset, loadings, the
-    zone-to-area map and the number of areas."""
+def _rows(inputs: PMEDMInputs, level: str) -> list[tuple]:
+    """Per constraint column at one level, one update: the stacked rows (one
+    per area), the carriers and their loadings, the zones it touches (``None``:
+    all) and each zone's area among those rows."""
     if level == "tract":
         X, areas, offset = sp.csc_matrix(inputs.X_T), inputs.zone_tracts(), 0
         n_areas = inputs.Y_T.shape[0]
@@ -111,7 +112,46 @@ def _rows(inputs: PMEDMInputs, level: str) -> list[tuple[int, sp.csc_matrix, np.
     out = []
     for k in range(X.shape[1]):
         start, stop = X.indptr[k], X.indptr[k + 1]
-        out.append((offset + k * n_areas, X.indices[start:stop], X.data[start:stop], areas, n_areas))
+        out.append((offset + k * n_areas + np.arange(n_areas), X.indices[start:stop],
+                    X.data[start:stop], None, areas))
+    return out
+
+
+def _cell_rows(inputs: PMEDMInputs, h, level: str) -> list[tuple]:
+    """As :func:`_rows`, over the roll-up's cells (``h`` a
+    :class:`~pmedm_vb.assemble.collapse.CollapsedHierarchy`): a cell's loading
+    is the sum of its categories', and its rows are cell indices. Cells merging
+    the same categories (in different areas) form one update, so the step stays
+    vectorised over areas."""
+    n_tracts, c_t = inputs.Y_T.shape
+    n_zones, c_b = inputs.Y_B.shape
+    split = inputs.Y_T.size
+    if level == "tract":
+        X, zone_area, n_areas = sp.csc_matrix(inputs.X_T), inputs.zone_tracts(), n_tracts
+        stacked = np.arange(split)
+        category, area = stacked // n_tracts, stacked % n_tracts
+    else:
+        X, zone_area, n_areas = sp.csc_matrix(inputs.X_B), np.arange(n_zones), n_zones
+        stacked = split + np.arange(inputs.Y_B.size)
+        category, area = (stacked - split) // n_zones, (stacked - split) % n_zones
+    cell = h.row_cell[stacked]
+    members: dict[int, list[int]] = {}
+    cell_area: dict[int, int] = {}
+    for c, k, a in zip(cell, category, area):
+        members.setdefault(int(c), []).append(int(k))
+        cell_area[int(c)] = int(a)
+    groups: dict[tuple[int, ...], list[int]] = {}
+    for c, cats in members.items():
+        groups.setdefault(tuple(sorted(cats)), []).append(c)
+    out = []
+    for cats, cells in groups.items():
+        x = np.asarray(X[:, list(cats)].sum(axis=1)).ravel()
+        carriers = np.flatnonzero(x)
+        areas = np.array([cell_area[c] for c in cells])
+        local = np.full(n_areas, -1)
+        local[areas] = np.arange(areas.size)
+        zones = np.flatnonzero(local[zone_area] >= 0)
+        out.append((np.array(cells), carriers, x[carriers], zones, local[zone_area[zones]]))
     return out
 
 
@@ -166,32 +206,33 @@ def _newton(log_w, x, groups, n_groups, log_target, theta, inv_rho, iters, tol):
 
 
 def _fit(
-    inputs: PMEDMInputs, levels: tuple[str, ...], targets: np.ndarray, rho: np.ndarray | None,
+    inputs: PMEDMInputs, columns: list[tuple], targets: np.ndarray, rho: np.ndarray | None,
     *, tol: float, max_sweeps: int, fix_total: bool, method: str, log_every: int,
 ) -> RakeResult:
+    """``columns`` from :func:`_rows` or :func:`_cell_rows`; ``targets`` (and
+    ``rho``) indexed by their rows."""
     start_time = time.perf_counter()
     with np.errstate(divide="ignore"):
         log_W = np.log(inputs.N * inputs.q)
-    m = inputs.n_constraints
+    m = targets.size
     theta = np.zeros(m)
     inv_rho = np.zeros(m) if rho is None else 1.0 / rho
     with np.errstate(divide="ignore"):
         log_targets = np.log(targets)
-    columns = [row for level in levels for row in _rows(inputs, level)]
     residual = np.full(m, np.nan)
     trace, infeasible = [], set()
     converged, sweep = False, 0
     for sweep in range(1, max_sweeps + 1):
-        for offset, carriers, x, areas, n_areas in columns:
-            rows = offset + np.arange(n_areas)
+        for rows, carriers, x, zones, areas in columns:
             if carriers.size == 0:
                 infeasible.update(rows[targets[rows] > 0].tolist())
                 continue
-            block = log_W[:, carriers]
+            at = np.ix_(zones, carriers) if zones is not None else (slice(None), carriers)
+            block = log_W[at]
             zero = ~np.isfinite(log_targets[rows])
             if zero.any():  # hard zero (IPF only): its carriers leave those areas
                 block[zero[areas]] = -np.inf
-            delta, log_m = _solve_step(block, x, areas, n_areas, log_targets[rows],
+            delta, log_m = _solve_step(block, x, areas, rows.size, log_targets[rows],
                                        theta[rows], inv_rho[rows])
             infeasible.update(rows[~np.isfinite(log_m) & ~zero].tolist())
             with np.errstate(invalid="ignore"):
@@ -199,7 +240,7 @@ def _fit(
                     zero, np.nan, log_m - log_targets[rows] - theta[rows] * inv_rho[rows]
                 )
             theta[rows] += delta
-            log_W[:, carriers] = block - delta[areas][:, None] * x
+            log_W[at] = block - delta[areas][:, None] * x
         if fix_total:
             log_W += np.log(inputs.N) - logsumexp(log_W)
         worst = float(np.nanmax(np.abs(np.where(np.isfinite(residual), residual, np.nan))))
@@ -221,7 +262,8 @@ def _fit(
 
 
 def rake_ipf(
-    inputs: PMEDMInputs, *, tol: float = 1e-3, max_sweeps: int = 2000, log_every: int = 50
+    inputs: PMEDMInputs, *, tol: float = 1e-3, max_sweeps: int = 2000, log_every: int = 50,
+    rollup=None,
 ) -> RakeResult:
     """Hard raking of ``N q`` to the block group margins.
 
@@ -230,9 +272,14 @@ def rake_ipf(
     error just before its own update, so it measures how far the other margins
     pulled it away.
     """
+    if rollup is not None:
+        h = _rolled(inputs, rollup)
+        return _fit(inputs, _cell_rows(inputs, h, "block group"), h.Y_c.astype(float).copy(),
+                    None, tol=tol, max_sweeps=max_sweeps, fix_total=False, method="ipf",
+                    log_every=log_every)
     targets = inputs.targets().astype(float).copy()
     targets[: inputs.Y_T.size] = np.nan  # tract rows are not fitted
-    return _fit(inputs, ("block group",), np.nan_to_num(targets, nan=1.0), None,
+    return _fit(inputs, _rows(inputs, "block group"), np.nan_to_num(targets, nan=1.0), None,
                 tol=tol, max_sweeps=max_sweeps, fix_total=False, method="ipf",
                 log_every=log_every)
 
@@ -245,23 +292,63 @@ def sinkhorn_penalties(inputs: PMEDMInputs, variance_floor: str | float | None =
     in the MAP and VB fits. A zero's replacement target is its published
     standard error over :data:`ZERO_TARGET_DIVISOR`.
     """
-    targets = inputs.targets().astype(float).copy()
+    return _penalties(inputs, inputs.targets().astype(float),
+                      inputs.floored_variances(variance_floor))
+
+
+def _penalties(inputs: PMEDMInputs, targets: np.ndarray, variances: np.ndarray
+               ) -> tuple[np.ndarray, np.ndarray]:
+    targets = targets.copy()
     zero = targets <= 0
-    targets[zero] = np.sqrt(inputs.sigma_v[zero]) / ZERO_TARGET_DIVISOR
-    variances = inputs.floored_variances(variance_floor)
+    targets[zero] = np.sqrt(variances[zero]) / ZERO_TARGET_DIVISOR
     rho = (inputs.N / inputs.n) * targets / variances
     return targets, rho
 
 
+def rake_name(puma: str, method: str, rollup=None) -> str:
+    """The result name of a raking run: ``<puma>_<method>``, with ``_r<spec>``
+    appended when it rakes to the roll-up's cells."""
+    if rollup is None:
+        return f"{puma}_{method}"
+    from pmedm_vb.assemble.rollup import RollupSpec
+
+    spec = rollup if isinstance(rollup, RollupSpec) else RollupSpec.parse(str(rollup))
+    return f"{puma}_{method}_r{spec}"
+
+
+def _rolled(inputs: PMEDMInputs, rollup):
+    """The roll-up's cells for raking (``rollup`` a spec or its text, e.g. ``"50h20"``)."""
+    from pmedm_vb.assemble.collapse import CollapsedHierarchy
+    from pmedm_vb.assemble.rollup import RollupSpec
+
+    spec = rollup if isinstance(rollup, RollupSpec) else RollupSpec.parse(str(rollup))
+    return CollapsedHierarchy.build(inputs, "none", spec)
+
+
+def _floored(h, variance_floor) -> np.ndarray:
+    """The cells' variances with the floor applied, as the model's ``Sigma`` does."""
+    if variance_floor == "zero":
+        return np.maximum(h.v_c, h.floor_c)
+    if variance_floor is not None:
+        return np.maximum(h.v_c, float(variance_floor))
+    return h.v_c
+
+
 def rake_sinkhorn(
     inputs: PMEDMInputs, *, variance_floor: str | float | None = "zero",
-    tol: float = 1e-6, max_sweeps: int = 5000, log_every: int = 50,
+    tol: float = 1e-6, max_sweeps: int = 5000, log_every: int = 50, rollup=None,
 ) -> RakeResult:
     """Unbalanced Sinkhorn over both levels; see the module docstring.
 
     ``tol`` is on the stationarity residual ``|log(m / Y) - theta / rho|``.
     """
-    targets, rho = sinkhorn_penalties(inputs, variance_floor)
-    return _fit(inputs, ("tract", "block group"), targets, rho,
+    if rollup is not None:
+        h = _rolled(inputs, rollup)
+        targets, rho = _penalties(inputs, h.Y_c.astype(float), _floored(h, variance_floor))
+        columns = _cell_rows(inputs, h, "tract") + _cell_rows(inputs, h, "block group")
+    else:
+        targets, rho = sinkhorn_penalties(inputs, variance_floor)
+        columns = _rows(inputs, "tract") + _rows(inputs, "block group")
+    return _fit(inputs, columns, targets, rho,
                 tol=tol, max_sweeps=max_sweeps, fix_total=True, method="sinkhorn",
                 log_every=log_every)
