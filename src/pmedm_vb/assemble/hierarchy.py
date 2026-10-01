@@ -139,7 +139,20 @@ class Hierarchy:
         ``"nullspace-c<threshold>"``, ``"nullspace-r<spec>"``) returns a
         :class:`~pmedm_vb.assemble.nullspace.NullSpaceHierarchy`, which is built
         for one ``Sigma`` and so needs ``alpha``, ``taper`` and ``variance_floor``;
-        the other levels ignore them."""
+        the other levels ignore them.
+
+        A ``+cap<ratio>x<strength>`` suffix (:mod:`pmedm_vb.assemble.ratiocap`)
+        adds the ratio cap to any level; it is held as ``.cap`` (``None``
+        without one)."""
+        from pmedm_vb.assemble.ratiocap import split_cap
+
+        level, cap = split_cap(level)
+        h = cls._build(inputs, level, alpha=alpha, taper=taper, variance_floor=variance_floor)
+        h.cap = cap
+        return h
+
+    @classmethod
+    def _build(cls, inputs: PMEDMInputs, level: str, *, alpha, taper, variance_floor) -> "Hierarchy":
         base, collapse = split_level(level)
         if base == "nullspace":
             from pmedm_vb.assemble.nullspace import NullSpaceHierarchy

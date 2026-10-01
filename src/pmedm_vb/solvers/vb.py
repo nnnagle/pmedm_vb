@@ -436,6 +436,10 @@ class _DualTarget:
         self.X_B = tensor(inputs.X_B.toarray())
         self.A_T = tensor(inputs.A_T.toarray())
         self.h = None if hierarchy is None or hierarchy.is_trivial else hierarchy.torch_maps(device)
+        self.cap = getattr(hierarchy, "cap", None)
+        self.n = inputs.n
+        self.support = torch.as_tensor(inputs.q > 0, device=device)
+        self.log_q_sum = float(np.log(inputs.q.sum()))
         self.y = tensor(inputs.targets() / inputs.N if self.h is None else hierarchy.y_ext)
         self.c = inputs.n / inputs.N**2
         self.split = inputs.Y_T.size
@@ -474,13 +478,25 @@ class _DualTarget:
         return self.log_q[None] - self.adjoint(self.data_lambda(lam))
 
     def __call__(self, lam: torch.Tensor) -> torch.Tensor:
-        logits = self.logits(lam)
+        eta = self.adjoint(self.data_lambda(lam))
+        logits = self.log_q[None] - eta
         log_z = torch.logsumexp(logits.reshape(lam.shape[0], -1), dim=1)
         if self.h is None:
-            return lam @ self.y + log_z + 0.5 * self.c * (lam * self.sigma_matvec(lam)).sum(1)
-        zeta = self.h.zeta(lam)
-        return (zeta @ self.y + log_z + 0.5 * self.c * (zeta * self.sigma_matvec(zeta)).sum(1)
-                + self.h.ridge(lam))
+            value = lam @ self.y + log_z + 0.5 * self.c * (lam * self.sigma_matvec(lam)).sum(1)
+        else:
+            zeta = self.h.zeta(lam)
+            value = (zeta @ self.y + log_z + 0.5 * self.c * (zeta * self.sigma_matvec(zeta)).sum(1)
+                     + self.h.ridge(lam))
+        if self.cap is not None:
+            value = value + self.cap_penalty(eta, log_z) / self.n
+        return value
+
+    def cap_penalty(self, eta: torch.Tensor, log_z: torch.Tensor) -> torch.Tensor:
+        """``phi`` of the ratio cap per draw; ``eta = X lambda`` is finite
+        everywhere, so the masked unit-zones carry no NaN into the gradient."""
+        log_ratio = -eta - log_z[:, None, None] + self.log_q_sum
+        over = torch.relu(log_ratio - self.cap.bound) * self.support[None]
+        return 0.5 * self.cap.strength * (over * over).sum((1, 2))
 
 
 class _Variational(torch.nn.Module):
