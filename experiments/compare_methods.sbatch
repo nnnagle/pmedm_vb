@@ -30,7 +30,8 @@ module purge
 source /sw/isaac/applications/anaconda3/2024.06/rhel8_cascadelake_binary/anaconda3-2024.06/etc/profile.d/conda.sh
 conda activate /lustre/isaac24/proj/UTK0496/envs/pmedm_vb
 set -u
-export PMEDM_VB_DATA=/lustre/isaac24/scratch/$USER/pmedm_vb_data
+# A caller (experiments/run_experiment.py) may point the job at another data directory.
+export PMEDM_VB_DATA=${PMEDM_VB_DATA:-/lustre/isaac24/scratch/$USER/pmedm_vb_data}
 export PMEDM_VB_OFFLINE=1
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 export OPENBLAS_NUM_THREADS=${SLURM_CPUS_PER_TASK}

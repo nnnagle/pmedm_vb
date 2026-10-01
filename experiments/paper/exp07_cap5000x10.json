@@ -1,0 +1,58 @@
+{
+  "name": "exp07_cap5000x10",
+  "description": "Baseline with the ratio cap: ratio 5000, strength 10.",
+  "area": {
+    "name": "knox",
+    "state": "47",
+    "counties": [
+      "093"
+    ],
+    "year": 2024,
+    "span": 5
+  },
+  "pumas": [
+    "4701501",
+    "4701502",
+    "4701503",
+    "4701504"
+  ],
+  "alphas": [
+    1.0,
+    0.1,
+    0.01
+  ],
+  "data_dir": "/lustre/isaac24/scratch/$USER/pmedm_vb_paper_data",
+  "model": {
+    "taper": "none",
+    "variance_floor": "zero",
+    "hierarchy": "puma",
+    "rollup": null,
+    "ratio_cap": 5000,
+    "cap_strength": 10
+  },
+  "rake": [
+    "ipf",
+    "sinkhorn"
+  ],
+  "vb_families": [
+    "gaussian",
+    "skewed"
+  ],
+  "hmc": {
+    "trajectory": 3.0,
+    "chains": 32,
+    "short": {
+      "warmup": 200,
+      "samples": 1000,
+      "thin": 10,
+      "seed": 2000
+    },
+    "ref": {
+      "warmup": 2000,
+      "samples": 10000,
+      "thin": 40,
+      "checkpoint": 500,
+      "seed": 1000
+    }
+  }
+}
