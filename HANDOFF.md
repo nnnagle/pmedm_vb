@@ -46,7 +46,9 @@ The unit is the household or GQ person; one problem per PUMA; alpha in (0, 1],
 alpha = 1 is classic diagonal PMEDM; tract taper is the default; n is the
 sample size (record count) wherever it appears. HMC jobs run on the
 `campus-gpu` partition and QoS, which gives a V100: elsewhere they can land on
-a T4, about 30x slower for this float64 code. The recent VB and HMC runs all
+a T4, about 30x slower for this float64 code. GPU jobs are charged to Slurm
+account `isaac-utk0496`, CPU and `short` jobs to `acf-utk0011` (README,
+**Every session**); give commands that keep to this. The recent VB and HMC runs all
 used `--variance-floor zero`; confirm with the user whether the comparison
 keeps it.
 
@@ -90,10 +92,12 @@ Every row is run afresh for every (PUMA, alpha); none has been run at alpha
 0.01 before, and only 4701502 at alpha 1 has an HMC reference so far.
 
 **Raking may not be feasible, and finding out is part of the job.** The
-constraints are published estimates at two levels that do not agree -- a
-tract estimate is not the sum of its block groups' -- and many small cells are
-published as 0 or with large SEs, so classic IPF (Deming & Stephan 1940) has
-no exact solution to converge to. Options to put to the user: rake to one
+constraints' estimates nest (block groups sum to tracts, tracts to PUMAs;
+only the MOEs do not add), so level disagreement is not the obstacle, and IPF
+fits block group margins only. But many small cells are published as 0 or with
+large SEs, and different tables may publish different totals for one
+universe, so classic IPF (Deming & Stephan 1940) may have no exact solution to
+converge to; `experiments/ipf_diagnosis.py` checks which cause applies. Options to put to the user: rake to one
 level only, rake to a reconciled set of margins, or a relaxed raking with a
 convergence tolerance. Raking has no Sigma, so its result does not depend on
 alpha, and it gives one weight matrix, so like MAP its only simulation is

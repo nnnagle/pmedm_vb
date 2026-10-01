@@ -4,7 +4,7 @@ Penalized Max Ent Dasymetric Modeling problem as a variational bayes
 The derivation of the original max ent problem is in pmedm_derivation.md.
 The Census endpoints the downloaders use -- layouts, file schemas, coverage and
 the variance formulas -- are documented in census_data_sources.md.
-The original Maximum a posteriori problem was solved using Gauss Newton optimization on the dual function with custom rcpp code to evaluate the Hessian. This is a port to PyTorch for solving the Variational Bayes Problem (as well as the original MAP/Laplacian formulation for comparison).
+The original Maximum a posteriori problem was solved on the dual function by trust-region Newton with a preconditioned conjugate-gradient inner solver (exact Hessian-vector products, preconditioned by a sparse Cholesky factorisation of the Hessian refreshed every 20 iterations), in custom Rcpp code (PMEDMrcpp). This is a port to PyTorch for solving the Variational Bayes Problem (as well as the original MAP/Laplacian formulation for comparison).
 
 This is not production code. This is research code to write a paper. The paper will present the VB method, and compare simulation accuracy usability with the original (MAP/Laplacian/Penalized MaxEnt) method.
 
@@ -36,6 +36,11 @@ This is not production code. This is research code to write a paper. The paper w
       synopsis's "Left to do" has the list.
 - [ ] end-to-end comparison of the methods across alpha -- `HANDOFF.md`
 - [ ] write experiments (`experiments/`)
+- [ ] before publishing: check `pmedm_derivation.md` against the paper's
+      notation. The paper's weights sum to `N` (survey-style sample weights,
+      the code's `W = N p`); the derivation builds its likelihood in
+      `w = n p`, the expected sample count, and writes `N p` as `w'`.
+      Rewrite it in the paper's notation, or confirm the two agree.
 
 ## Open research questions
 
@@ -193,6 +198,12 @@ export PMEDM_VB_DATA=/lustre/isaac24/scratch/$USER/pmedm_vb_data
 
 python -c "import sys; print(sys.executable)"   # must be inside the env
 ```
+
+**Slurm accounts.** GPU jobs are charged to `isaac-utk0496`; CPU and `short`
+jobs to `acf-utk0011`. The `.sbatch` headers follow this (`run_mcmc*.sbatch`
+on `isaac-utk0496`, the rest on `acf-utk0011`). A command-line `--partition`
+that moves a job between CPU and GPU needs a matching `--account` as well;
+a pending job can be moved with `scontrol update JobId=<id> Account=<account>`.
 
 **Do not `module load anaconda3`.** Source conda's shell hook from the module's
 installation path directly, as above. Loading the module prepends its own `bin`

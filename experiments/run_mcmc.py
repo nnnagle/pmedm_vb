@@ -23,7 +23,10 @@ its index; every ``--thin``-th sampling iteration also keeps ``lambda``. Every
 ``--checkpoint`` iterations the state and records are written to
 ``<out>/<name>_state.npz`` and ``<name>_trace.npz``, and a job started with
 an ``--out`` that holds them resumes where they stopped -- so a run that hits
-its time limit is resubmitted, not restarted. The settings must match.
+its time limit is resubmitted, not restarted. The settings must match. The
+trace also carries ``seconds``, the sampler's wall time summed over every job
+that contributed, and ``warmup_seconds``, the part spent in warmup, so that a
+resubmitted run still reports its total.
 
 **report** writes ``<out>/<name>_report.txt``:
 
@@ -72,6 +75,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--puma", required=True)
     parser.add_argument("--alpha", type=float, required=True)
     parser.add_argument("--taper", choices=["tract", "none"], default="tract")
+    parser.add_argument("--hierarchy", choices=["none", "tract", "puma", "nullspace"], default="none",
+                        help="the VB run's hierarchy level (pmedm_vb.assemble.hierarchy); "
+                             "names gain _h<level>")
     parser.add_argument("--area", default="knox-2024-5yr", help="assembled-inputs directory name")
     parser.add_argument(
         "--variance-floor", default="none",
@@ -95,7 +101,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default=None, help="default: cuda if available, else cpu")
-    return parser.parse_args()
+    parser.add_argument("--collapse", type=float, default=None,
+                        help="collapse each area's zero cells into one and merge small positive "
+                             "cells until each holds more than this many (pmedm_vb.assemble."
+                             "collapse); the hierarchy level becomes <level>-c<threshold>")
+    parser.add_argument("--rollup", default=None,
+                        help="the structure-aware roll-up (pmedm_vb.assemble.rollup) with this "
+                             "threshold, PERSONS or PERSONShHOUSEHOLDS (e.g. 15h10); the "
+                             "hierarchy level becomes <level>-r<spec>")
+    parser.add_argument("--ratio-cap", type=float, default=None,
+                        help="the soft cap on weight ratios w / (N q) (pmedm_vb.assemble.ratiocap) "
+                             "at this ratio; the hierarchy level gains +cap<ratio>x<strength>")
+    parser.add_argument("--cap-strength", type=float, default=None,
+                        help="the cap's strength tau (default 1)")
+    args = parser.parse_args()
+    from pmedm_vb.assemble.hierarchy import level_name
+    from pmedm_vb.assemble.ratiocap import cap_level
+
+    if getattr(args, "hierarchy", None) is not None:
+        args.hierarchy = cap_level(level_name(args.hierarchy, args.collapse, args.rollup),
+                                   args.ratio_cap, args.cap_strength)
+    return args
 
 
 def floor_spec(text: str) -> str | float | None:
@@ -107,21 +133,40 @@ def floor_spec(text: str) -> str | float | None:
 
 
 def fit_name(args: argparse.Namespace) -> str:
-    return f"{args.puma}_{args.taper}_a{args.alpha:g}"
+    suffix = "" if args.hierarchy == "none" else f"_h{args.hierarchy}"
+    return f"{args.puma}_{args.taper}_a{args.alpha:g}{suffix}"
 
 
 def load_problem(args: argparse.Namespace):
+    from pmedm_vb.assemble.hierarchy import Hierarchy
+
     inputs = PMEDMInputs.load(processed_dir() / "inputs" / args.area / args.puma)
     taper = None if args.taper == "none" else args.taper
-    sigma = inputs.sigma(args.alpha, taper, floor_spec(args.variance_floor))
+    floor = floor_spec(args.variance_floor)
+    hierarchy = Hierarchy.build(inputs, args.hierarchy, alpha=args.alpha, taper=taper,
+                                variance_floor=floor)
+    sigma = hierarchy.sigma(inputs, args.alpha, taper, floor)
     vb_path = args.vb_run / f"{fit_name(args)}.npz"
     q, _, _ = load_vb(vb_path)
     with np.load(vb_path) as saved:
         map_lam = saved["map_lam"]
-    return inputs, sigma, q, map_lam
+        saved_level = str(saved["hierarchy"]) if "hierarchy" in saved.files else "none"
+    if saved_level != args.hierarchy:
+        raise SystemExit(f"{vb_path} was fitted with hierarchy={saved_level}, not {args.hierarchy}")
+    return inputs, sigma, q, map_lam, hierarchy
 
 
 # -- sample ------------------------------------------------------------------
+
+
+def draw_arrays(draws: np.ndarray, hierarchy) -> dict[str, np.ndarray]:
+    """Kept draws for the trace: ``lam`` always in today's layout (the
+    multipliers the data see), plus ``xi`` under a hierarchy, for densities."""
+    if hierarchy.is_trivial:
+        return {"lam": draws}
+    kept, chains, size = draws.shape
+    lam = hierarchy.lambda_data(draws.reshape(-1, size).T).T.reshape(kept, chains, -1)
+    return {"lam": lam, "xi": draws}
 
 
 def sample(args: argparse.Namespace) -> None:
@@ -137,8 +182,8 @@ def sample(args: argparse.Namespace) -> None:
     state_path = args.out / f"{name}_state.npz"
     trace_path = args.out / f"{name}_trace.npz"
 
-    inputs, sigma, q, _ = load_problem(args)
-    target = _DualTarget(inputs, sigma, device)
+    inputs, sigma, q, _, hierarchy = load_problem(args)
+    target = _DualTarget(inputs, sigma, device, hierarchy)
     A = whitening_matrix(q)
     rng = np.random.default_rng(args.seed)
     x0 = starting_points(target, q.mean, A, args.chains, rng, args.init_max_share, device)
@@ -150,13 +195,18 @@ def sample(args: argparse.Namespace) -> None:
 
     trace = {key: [] for key in TRACE_KEYS}
     step_sizes, leapfrogs, draws = [], [], []
+    earlier_seconds, warmup_seconds = 0.0, float("nan")
     if state_path.exists() and trace_path.exists():
         with np.load(state_path) as state:
             sampler.load_state_dict(dict(state))
         with np.load(trace_path) as saved:
             trace = {key: list(saved[key]) for key in TRACE_KEYS}
             step_sizes, leapfrogs = list(saved["step_size"]), list(saved["n_leapfrog"])
-            draws = list(saved["lam"]) if "lam" in saved.files else []
+            key = "lam" if hierarchy.is_trivial else "xi"
+            draws = list(saved[key]) if key in saved.files else []
+            earlier_seconds = float(saved["seconds"]) if "seconds" in saved.files else 0.0
+            if "warmup_seconds" in saved.files:
+                warmup_seconds = float(saved["warmup_seconds"])
         if sampler.chains != args.chains:
             raise SystemExit(f"{state_path} has {sampler.chains} chains, not {args.chains}")
         logger.info("resuming %s at iteration %d", name, sampler.iteration)
@@ -176,7 +226,9 @@ def sample(args: argparse.Namespace) -> None:
             **{key: np.asarray(value) for key, value in trace.items()},
             step_size=np.asarray(step_sizes), n_leapfrog=np.asarray(leapfrogs),
             warmup=args.warmup, thin=args.thin, n_zones=inputs.n_zones, n_units=inputs.n_units,
-            **({"lam": np.asarray(draws)} if draws else {}),
+            seconds=earlier_seconds + time.perf_counter() - started,
+            warmup_seconds=warmup_seconds,
+            **(draw_arrays(np.asarray(draws), hierarchy) if draws else {}),
         )
 
     while sampler.iteration < total:
@@ -184,6 +236,7 @@ def sample(args: argparse.Namespace) -> None:
         stats = sampler.step(adapt=warming)
         if sampler.iteration == args.warmup:
             sampler.end_warmup()
+            warmup_seconds = earlier_seconds + time.perf_counter() - started
             logger.info("warmup done: step size fixed at %.4g", sampler.step_size)
         share, cell = sampler.largest_cell()
         for key in TRACE_KEYS[:4]:
@@ -232,7 +285,7 @@ def report(args: argparse.Namespace) -> None:
     done = trace["log_pi"].shape[0]
     if done <= warmup:
         raise SystemExit(f"{name}: {done} iterations, all warmup; nothing to report yet")
-    inputs, _, _, map_lam = load_problem(args)
+    inputs, _, _, map_lam, _ = load_problem(args)
     post = slice(warmup, None)
 
     def chains_first(key: str) -> np.ndarray:
@@ -272,16 +325,24 @@ def report(args: argparse.Namespace) -> None:
         )
     if "lam" in trace and trace["lam"].shape[0] >= 4:
         lam = np.transpose(trace["lam"], (1, 0, 2))  # (chains, kept draws, m)
-        dataset = az.convert_to_dataset({"lam": lam})
-        rhat = az.rhat(dataset)["lam"].values
-        bulk = az.ess(dataset, method="bulk")["lam"].values
-        tail = az.ess(dataset, method="tail")["lam"].values
+        # A hierarchy fixes some coordinates exactly (a lone block group's
+        # deviation from its tract is 0): no diagnostics for those.
+        varying = lam.reshape(-1, lam.shape[2]).std(axis=0) > 0
+        dataset = az.convert_to_dataset({"lam": lam[:, :, varying]})
+        rhat = np.full(lam.shape[2], np.nan)
+        bulk, tail = rhat.copy(), rhat.copy()
+        rhat[varying] = az.rhat(dataset)["lam"].values
+        bulk[varying] = az.ess(dataset, method="bulk")["lam"].values
+        tail[varying] = az.ess(dataset, method="tail")["lam"].values
+        fixed = int((~varying).sum())
+        rhat_v, bulk_v, tail_v = rhat[varying], bulk[varying], tail[varying]
         lines += [
-            f"   lambda, {lam.shape[2]:,} coordinates from {lam.shape[1]} kept draws per chain:",
-            f"     R-hat   {quantile_line(rhat)}",
-            f"     R-hat over 1.01: {int((rhat > 1.01).sum()):,}; over 1.1: {int((rhat > 1.1).sum()):,}",
-            f"     ESS bulk min {bulk.min():,.0f}, median {np.median(bulk):,.0f}; "
-            f"tail min {tail.min():,.0f}, median {np.median(tail):,.0f}",
+            f"   lambda, {lam.shape[2]:,} coordinates from {lam.shape[1]} kept draws per chain"
+            + (f" ({fixed:,} fixed by the hierarchy, left out):" if fixed else ":"),
+            f"     R-hat   {quantile_line(rhat_v)}",
+            f"     R-hat over 1.01: {int((rhat_v > 1.01).sum()):,}; over 1.1: {int((rhat_v > 1.1).sum()):,}",
+            f"     ESS bulk min {bulk_v.min():,.0f}, median {np.median(bulk_v):,.0f}; "
+            f"tail min {tail_v.min():,.0f}, median {np.median(tail_v):,.0f}",
             "     ten worst by R-hat:",
         ]
         table = constraint_table(inputs).assign(rhat=rhat, ess_bulk=bulk, ess_tail=tail,

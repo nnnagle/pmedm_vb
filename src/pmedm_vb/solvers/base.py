@@ -119,7 +119,10 @@ def weights_from_lambda(
 class DualState(NamedTuple):
     """Everything one evaluation of the dual produces, so nothing is recomputed.
 
-    ``u`` is ``X'p``, which the gradient needs and the Hessian reuses.
+    ``u`` is ``X'p``, which the gradient needs and the Hessian reuses. With a
+    hierarchy, ``lam`` is the solver's ``xi`` and ``lam_data`` the multipliers
+    the data see (:mod:`pmedm_vb.assemble.hierarchy`); without one they are the
+    same array.
     """
 
     lam: np.ndarray
@@ -127,6 +130,7 @@ class DualState(NamedTuple):
     u: np.ndarray
     objective: float
     gradient: np.ndarray
+    lam_data: np.ndarray | None = None
 
 
 def dual_state(
@@ -134,18 +138,55 @@ def dual_state(
     lam: np.ndarray,
     sigma: Sigma,
     op: ConstraintOperator | None = None,
+    hierarchy=None,
 ) -> DualState:
-    """Evaluate ``p``, ``X'p``, the objective and the gradient at ``lam``."""
+    """Evaluate ``p``, ``X'p``, the objective and the gradient at ``lam``.
+
+    With a non-trivial ``hierarchy`` (a :class:`~pmedm_vb.assemble.hierarchy.Hierarchy`),
+    ``lam`` is ``xi``, ``sigma`` must be ``hierarchy.sigma(...)`` and the
+    objective is ``f~`` of that module.
+    """
     op = op or ConstraintOperator(inputs)
     c = penalty_scale(inputs)
-    logits, total = _log_weights(inputs, lam, op)
+    cap = getattr(hierarchy, "cap", None)
+    if hierarchy is None or hierarchy.is_trivial:
+        logits, total = _log_weights(inputs, lam, op)
+        p = np.exp(logits - total)
+        u = op.forward(p)
+        y = inputs.targets() / inputs.N
+        sigma_lam = sigma.matvec(lam)
+        objective = float(y @ lam + total + 0.5 * c * (lam @ sigma_lam))
+        gradient = y + c * sigma_lam - u
+        if cap is not None:
+            phi, cap_grad = _cap_terms(inputs, cap, logits, total, u, op)
+            objective, gradient = objective + phi, gradient + cap_grad
+        return DualState(lam=lam, p=p, u=u, objective=objective, gradient=gradient, lam_data=lam)
+    h = hierarchy
+    lam_data = h.lambda_data(lam)
+    logits, total = _log_weights(inputs, lam_data, op)
     p = np.exp(logits - total)
     u = op.forward(p)
-    y = inputs.targets() / inputs.N
-    sigma_lam = sigma.matvec(lam)
-    objective = float(y @ lam + total + 0.5 * c * (lam @ sigma_lam))
-    gradient = y + c * sigma_lam - u
-    return DualState(lam=lam, p=p, u=u, objective=objective, gradient=gradient)
+    zeta = h.zeta(lam)
+    sigma_zeta = sigma.matvec(zeta)
+    ridge = h.ridge_gradient(lam)  # kappa (I - M) xi, M an orthogonal projection
+    objective = float(h.y_ext @ zeta + total + 0.5 * c * (zeta @ sigma_zeta)
+                      + 0.5 * (lam @ ridge))
+    gradient = h.zeta_T(h.y_ext + c * sigma_zeta) - h.lambda_data_T(u) + ridge
+    if cap is not None:
+        phi, cap_grad = _cap_terms(inputs, cap, logits, total, u, op)
+        objective, gradient = objective + phi, gradient + h.lambda_data_T(cap_grad)
+    return DualState(lam=lam, p=p, u=u, objective=objective, gradient=gradient, lam_data=lam_data)
+
+
+def _cap_terms(inputs: PMEDMInputs, cap, logits: np.ndarray, total: float, u: np.ndarray,
+               op: ConstraintOperator) -> tuple[float, np.ndarray]:
+    """The ratio cap's share of the objective and its gradient in the multipliers
+    the data see, both over ``n`` (:mod:`pmedm_vb.assemble.ratiocap`)."""
+    with np.errstate(divide="ignore"):
+        log_q = np.log(inputs.q)
+    phi, g = cap.terms(logits, total, log_q, float(np.log(inputs.q.sum())))
+    n = inputs.n
+    return phi / n, (g.sum() * u - op.forward(g)) / n
 
 
 def dual_objective(inputs: PMEDMInputs, lam: np.ndarray, sigma: Sigma) -> float:

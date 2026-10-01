@@ -48,6 +48,8 @@ _OPTIONAL_DENSE = ("sigma_l",)
 _FRAMES = ("units", "zones", "tracts", "block_groups")
 #: Frames written only when present: the statewide support's bookkeeping.
 _OPTIONAL_FRAMES = ("unit_members", "support_columns")
+#: The constraint tables' category trees, when written.
+TREES_FILE = "table_trees.json"
 
 
 @dataclass
@@ -129,6 +131,11 @@ class PMEDMInputs:
     unit_members: pd.DataFrame | None = None
     support: dict | None = None
     support_columns: pd.DataFrame | None = None
+    #: Per constraint table, the tree over its categories and its universe
+    #: (:mod:`pmedm_vb.assemble.rollup`), read from ``table_trees.json`` when
+    #: present; written by ``experiments/table_trees.py --write-inputs``. Only
+    #: the structure-aware roll-up (``-r`` levels) needs it.
+    trees: dict | None = None
 
     # -- shape accessors -------------------------------------------------
 
@@ -399,6 +406,8 @@ class PMEDMInputs:
         if self.support is not None:
             manifest["support"] = self.support
         (path / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        if self.trees is not None:
+            (path / TREES_FILE).write_text(json.dumps(self.trees, indent=1) + "\n")
         return path
 
     @classmethod
@@ -435,5 +444,7 @@ class PMEDMInputs:
             tract_constraints=manifest["tract_constraints"],
             bg_constraints=manifest["bg_constraints"],
             support=manifest.get("support"),
+            trees=(json.loads((path / TREES_FILE).read_text())
+                   if (path / TREES_FILE).exists() else None),
             **fields,
         )
