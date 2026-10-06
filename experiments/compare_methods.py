@@ -46,7 +46,10 @@ directory (``<name>_refsummary.npz``) and reused.
   level. Raking ignores the option.
 - ``p``: per draw, over every (block group, record) cell --
   ``p/q > R`` for ``R`` in ``--ratio``; ``W`` over a share of its block
-  group's total weight in that draw, for shares in ``--bg-share``; ``W`` over
+  group's total weight in that draw, for shares in ``--bg-share``; a household
+  record's ``W`` over the household weight of its block group in that draw (GQ
+  units left out of both), for the same shares, over the block groups with more
+  than ``--hh-min`` published occupied households (``B25003``); ``W`` over
   the reference's largest value for that cell (``--reference``); the largest
   cell over 1% and 10% of ``N``; and the p99.9 and max of ``log(p/q)``. Each
   per-draw count or value is summarised over draws: the share of draws with at
@@ -144,6 +147,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--draws", type=int, default=4000)
     parser.add_argument("--ratio", type=float, nargs="+", default=[10.0, 100.0])
     parser.add_argument("--bg-share", type=float, nargs="+", default=[0.05, 0.25])
+    parser.add_argument("--hh-min", type=float, default=100,
+                        help="the household-share counts use block groups with more than this "
+                             "many published occupied households (B25003)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--collapse", type=float, default=None,
                         help="collapse each area's zero cells into one and merge small positive "
@@ -352,8 +358,17 @@ def outcome_sets(inputs: PMEDMInputs, heldout: HeldOut | None) -> list[dict]:
 class Accumulator:
     """Per-draw outcomes and ``p`` statistics, one draw of ``W`` at a time."""
 
-    def __init__(self, inputs, sets, ratios, shares, ref_max_log_share=None):
+    def __init__(self, inputs, sets, ratios, shares, ref_max_log_share=None, hh_min=100):
         self.inputs, self.sets = inputs, sets
+        # Household records, and the block groups with more than hh_min published
+        # occupied households, for each household's share of its block group's
+        # households. None without B25003 among the block group constraints.
+        tenure = [k for k, c in enumerate(inputs.bg_constraints) if c.startswith("B25003.")]
+        if tenure and "is_group_quarters" in inputs.units:
+            self.hh_units = ~inputs.units["is_group_quarters"].to_numpy(bool)
+            self.hh_zones = inputs.Y_B[:, tenure].sum(axis=1) > hh_min
+        else:
+            self.hh_units = self.hh_zones = None
         self.A_T = sp.csr_matrix(inputs.A_T)
         self.X_all = sp.hstack([s["X"] for s in sets]).tocsc()
         self.bounds = np.cumsum([0] + [s["X"].shape[1] for s in sets])
@@ -391,6 +406,12 @@ class Accumulator:
         for share in self.shares:
             row[f"count_bg_share_gt_{share:g}"] = int((share_bg > share).sum())
         row["max_bg_share"] = float(share_bg.max())
+        if self.hh_units is not None and self.hh_zones.any():
+            W_hh = W[np.ix_(self.hh_zones, self.hh_units)]
+            share_hh = W_hh / W_hh.sum(axis=1, keepdims=True)
+            for share in self.shares:
+                row[f"count_hh_share_gt_{share:g}"] = int((share_hh > share).sum())
+            row["max_hh_share"] = float(share_hh.max())
         row["max_share_of_N"] = float(W.max() / self.inputs.N)
         if self.ref is not None:
             row["count_over_reference_max"] = int((log_p > self.ref).sum())
@@ -409,8 +430,8 @@ def log_p_of(inputs, op, lam):
     return logits - logsumexp(logits)
 
 
-def run_draws(inputs, source, sets, ratios, shares, ref_max=None) -> Accumulator:
-    acc = Accumulator(inputs, sets, ratios, shares, ref_max)
+def run_draws(inputs, source, sets, ratios, shares, ref_max=None, hh_min=100) -> Accumulator:
+    acc = Accumulator(inputs, sets, ratios, shares, ref_max, hh_min)
     if "W" in source:
         with np.errstate(divide="ignore"):
             acc.add(np.log(source["W"] / source["W"].sum()), W=source["W"])
@@ -485,7 +506,7 @@ def reference_summaries(args, inputs, sets):
                              for i in range(len(sets))]
                 return summaries, saved["max_log_share"], lam, xi
     logger.info("summarising the reference %s (cached for next time)", args.reference)
-    acc = run_draws(inputs, {"lam": lam}, sets, args.ratio, args.bg_share)
+    acc = run_draws(inputs, {"lam": lam}, sets, args.ratio, args.bg_share, hh_min=args.hh_min)
     summaries = [cell_summary(acc.draws(i)) for i in range(len(sets))]
     np.savez(cache, max_log_share=acc.max_log_share,
              **{f"{i}_{k}": v for i, s in enumerate(summaries) for k, v in s.items()})
@@ -733,7 +754,7 @@ def main() -> None:
     ref_summaries = ref_max = ref_lam = ref_xi = None
     if args.reference is not None and args.method != "hmc_ref":
         ref_summaries, ref_max, ref_lam, ref_xi = reference_summaries(args, inputs, sets)
-    acc = run_draws(inputs, source, sets, args.ratio, args.bg_share, ref_max)
+    acc = run_draws(inputs, source, sets, args.ratio, args.bg_share, ref_max, args.hh_min)
 
     base = dict(method=args.method, puma=args.puma, alpha=args.alpha,
                 n_draws=len(acc.p_rows))

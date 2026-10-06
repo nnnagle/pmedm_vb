@@ -52,6 +52,8 @@ HEADLINE = [
     ("gt1%N", "p", "largest_cell_gt_0.01_of_N", "share_of_draws"),
     ("gt10%N", "p", "largest_cell_gt_0.1_of_N", "share_of_draws"),
     ("bg25%_any", "p", "count_bg_share_gt_0.25", "share_of_draws_any"),
+    ("hh5%_any", "p", "count_hh_share_gt_0.05", "share_of_draws_any"),
+    ("hh_max_p99", "p", "max_hh_share", "p99"),
     ("maxN_p99", "p", "max_share_of_N", "p99"),
     ("khat", "joint", "psis_khat", "value"),
     ("pair_diff_p50", "joint", "pair_sd_diff_ratio", "p50"),
