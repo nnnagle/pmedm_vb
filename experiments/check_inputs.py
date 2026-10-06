@@ -10,6 +10,10 @@ under ``$PMEDM_VB_DATA/processed/inputs/knox-2024-5yr``:
   equals the sum over its block groups, for every category at both levels;
 - ``B01001`` and ``B03002``, both total population, agree in every block group;
 
+- the roll-up's category trees (``table_trees.json``) name exactly each
+  table's constrained categories, so trees built before a change to the
+  constraint set are caught;
+
 and prints when the inputs, held-out tables and table trees were written, and
 the PUMS-weighted persons beside the published total (for information: they
 are not expected to agree exactly). Exits 1 if any check fails::
@@ -32,7 +36,7 @@ def check(ok, msg):
     bad += not ok
     print(f"   {'ok  ' if ok else 'FAIL'} {msg}")
 
-for puma in sorted(p.name for p in root.iterdir() if p.is_dir()):
+for puma in sorted(p.name for p in root.iterdir() if (p / "manifest.json").exists()):
     path = root / puma
     inp = PMEDMInputs.load(path)
     print(f"\n{puma}: {inp.n_units:,} units, {inp.n_zones} block groups, {inp.A_T.shape[0]} tracts, "
@@ -73,6 +77,21 @@ for puma in sorted(p.name for p in root.iterdir() if p.is_dir()):
                           f"(max diff {worst_y:.3g})")
     if L is not None:
         check(worst_l < 1e-6, f"tract replicates = sum of their block groups' (max diff {worst_l:.3g})")
+
+    # The roll-up's category trees name exactly the categories constrained, table by table.
+    if inp.trees is None:
+        print("   info no table_trees.json: only the roll-up (exp03) needs it")
+    else:
+        from pmedm_vb.assemble.rollup import tree_categories
+        tables = {n.split(".", 1)[0] for n in [*inp.tract_constraints, *inp.bg_constraints]}
+        for table in sorted(tables):
+            ours = {n.split(".", 1)[1] for n in [*inp.tract_constraints, *inp.bg_constraints]
+                    if n.startswith(table + ".")}
+            entry = inp.trees.get(table)
+            got = set(tree_categories(entry["tree"])) if entry else set()
+            check(got == ours, f"category tree of {table} names its {len(ours)} constrained categories"
+                               + ("" if got == ours else f" (tree has {len(got)}; missing "
+                                  f"{sorted(ours - got)[:4]}, extra {sorted(got - ours)[:4]})"))
 
     # Two tables of total population agree in every block group.
     race = [k for k, n in enumerate(inp.bg_constraints) if n.startswith("B03002.")]
