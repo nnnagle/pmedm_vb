@@ -97,6 +97,20 @@ class Ratios:
         self.x_t = inputs.X_T.tocsr()
         self.x_b = inputs.X_B.tocsr()
         self.zone_tract = inputs.zone_tracts()
+        # Household size: the unit's B01001 (sex by age) counts, which cover every member.
+        age_sex = [k for k, c in enumerate(inputs.bg_constraints) if c.startswith("B01001.")]
+        self.size = (np.asarray(inputs.X_B.tocsc()[:, age_sex].sum(axis=1)).ravel()
+                     if age_sex else np.full(inputs.n_units, np.nan))
+        self.gq = inputs.units["is_group_quarters"].to_numpy(bool) \
+            if "is_group_quarters" in inputs.units else np.zeros(inputs.n_units, bool)
+        self.band = np.digitize(self.size, [s for s, _ in SIZE_BANDS[1:]])
+
+    def band_max_share(self, log_p: np.ndarray) -> dict:
+        """The largest share of N held by any cell of each household-size band."""
+        cell = np.where(self.support, log_p, -np.inf).max(axis=0)            # per unit
+        return {f"max_share_{label}": float(np.exp(cell[self.band == b].max()))
+                if (self.band == b).any() else np.nan
+                for b, (_, label) in enumerate(SIZE_BANDS)}
 
     def log_ratio(self, lam: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
         """``(l, log p, log Z)``, the first two as ``(n_zones, n_units)``."""
@@ -115,6 +129,10 @@ class Ratios:
                                self.inputs.Y_T.size + row_b.indices * n_zones + zone])
         x = np.concatenate([row_t.data, row_b.data])
         return rows, -x * lam[rows]
+
+
+#: Household-size bands for the per-band largest share: (lower size, label).
+SIZE_BANDS = ((0, "s1"), (2, "s2"), (3, "s3_4"), (5, "s5_6"), (7, "s7plus"))
 
 
 def fits_in(run: Path, family: str):
@@ -141,6 +159,7 @@ def analyse(ratios: Ratios, key: dict, source: str, lam_draws: np.ndarray, map_l
             draw_rows.append(dict(**key, source="map", draw=-1,
                                   wall=bool(np.exp(log_p_map[ratios.support].max()) > args.wall),
                                   max_log_ratio=float(l_map[ratios.support].max()),
+                                  **ratios.band_max_share(log_p_map),
                                   **{f"over_{b:g}": int((l_map > lb).sum())
                                      for b, lb in zip(args.bounds, log_bounds)}))
     for d in range(lam_draws.shape[1]):
@@ -153,6 +172,9 @@ def analyse(ratios: Ratios, key: dict, source: str, lam_draws: np.ndarray, map_l
                               top_log_ratio=float(l[zone, unit]),
                               top_share=float(np.exp(log_p[zone, unit])),
                               top_log_q_offset=float(ratios.log_q[zone, unit] - ratios.median_log_q),
+                              top_zone=int(zone), top_unit=int(unit),
+                              top_size=float(ratios.size[unit]), top_gq=bool(ratios.gq[unit]),
+                              **ratios.band_max_share(log_p),
                               **{f"over_{b:g}": int((l > lb).sum())
                                  for b, lb in zip(args.bounds, log_bounds)}))
         rows, terms = ratios.terms(zone, unit, lam)
@@ -253,6 +275,20 @@ def write_report(args, draws: pd.DataFrame, drivers: pd.DataFrame) -> None:
     cells = draws[draws.source != "map"].groupby("group")[
         ["top_log_ratio", "top_share", "top_log_q_offset"]].median()
     lines.append(cells.reindex([g for g in order if g in cells.index]).round(4).to_string())
+    if "top_size" in draws:
+        lines.append("\nHousehold size of each draw's largest cell (persons; a GQ person is 1), by group:")
+        sized = draws[draws.source != "map"]
+        sizes = sized.groupby("group")["top_size"].describe(percentiles=[0.1, 0.5, 0.9])
+        lines.append(sizes.reindex([g for g in order if g in sizes.index]).round(2).to_string())
+        bands = [f"max_share_{label}" for _, label in SIZE_BANDS]
+        lines.append("\nLargest share of N (%) held by any cell of each household-size band, per draw "
+                     "-- median and p99 over draws (MAP: its one value):")
+        for stat, fn in (("median", "median"), ("p99", lambda x: x.quantile(0.99))):
+            table = (100 * draws.groupby("group")[bands].agg(fn)).round(4)
+            table.columns = [b.removeprefix("max_share_") for b in bands]
+            lines.append(f"   {stat}:")
+            lines += ["     " + r for r in
+                      table.reindex([g for g in order if g in table.index]).to_string().splitlines()]
     if not drivers.empty:
         drivers = drivers.assign(group=group_of(drivers))
         lines.append(f"\nTop driver of each draw's largest cell (the row whose term -x lambda grew most "
