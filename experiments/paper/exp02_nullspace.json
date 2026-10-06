@@ -27,7 +27,7 @@
     "variance_floor": "zero",
     "hierarchy": "nullspace",
     "rollup": null,
-    "ratio_cap": null,
+    "share_cap": null,
     "cap_strength": null
   },
   "rake": [

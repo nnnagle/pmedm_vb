@@ -439,7 +439,9 @@ class _DualTarget:
         self.cap = getattr(hierarchy, "cap", None)
         self.n = inputs.n
         self.support = torch.as_tensor(inputs.q > 0, device=device)
-        self.log_q_sum = float(np.log(inputs.q.sum()))
+        # log q with 0 off the support: the share cap masks those unit-zones, and
+        # a finite value keeps -inf * 0 out of its gradient.
+        self.log_q_finite = torch.where(self.support, self.log_q, torch.zeros_like(self.log_q))
         self.y = tensor(inputs.targets() / inputs.N if self.h is None else hierarchy.y_ext)
         self.c = inputs.n / inputs.N**2
         self.split = inputs.Y_T.size
@@ -492,10 +494,11 @@ class _DualTarget:
         return value
 
     def cap_penalty(self, eta: torch.Tensor, log_z: torch.Tensor) -> torch.Tensor:
-        """``phi`` of the ratio cap per draw; ``eta = X lambda`` is finite
-        everywhere, so the masked unit-zones carry no NaN into the gradient."""
-        log_ratio = -eta - log_z[:, None, None] + self.log_q_sum
-        over = torch.relu(log_ratio - self.cap.bound) * self.support[None]
+        """``phi`` of the share cap per draw (:mod:`pmedm_vb.assemble.sharecap`);
+        ``log p = log q - X lambda - log Z``, with ``log q`` finite everywhere so the
+        masked unit-zones carry no NaN into the gradient."""
+        log_p = self.log_q_finite[None] - eta - log_z[:, None, None]
+        over = torch.relu(log_p - self.cap.bound) * self.support[None]
         return 0.5 * self.cap.strength * (over * over).sum((1, 2))
 
 

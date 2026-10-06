@@ -160,18 +160,19 @@ def parse_args() -> argparse.Namespace:
                         help="the structure-aware roll-up (pmedm_vb.assemble.rollup) with this "
                              "threshold, PERSONS or PERSONShHOUSEHOLDS (e.g. 15h10); the "
                              "hierarchy level becomes <level>-r<spec>")
-    parser.add_argument("--ratio-cap", type=float, default=None,
-                        help="the soft cap on weight ratios w / (N q) (pmedm_vb.assemble.ratiocap) "
-                             "at this ratio; the hierarchy level gains +cap<ratio>x<strength>")
+    parser.add_argument("--share-cap", type=float, default=None,
+                        help="the soft cap on each cell's share of the population, w / N "
+                             "(pmedm_vb.assemble.sharecap), e.g. 0.005; the hierarchy level gains "
+                             "+share<share>x<strength>")
     parser.add_argument("--cap-strength", type=float, default=None,
-                        help="the cap's strength tau (default 1)")
+                        help="the cap's strength tau (required with --share-cap)")
     args = parser.parse_args()
     from pmedm_vb.assemble.hierarchy import level_name
-    from pmedm_vb.assemble.ratiocap import cap_level
+    from pmedm_vb.assemble.sharecap import cap_level
 
     if getattr(args, "hierarchy", None) is not None:
         args.hierarchy = cap_level(level_name(args.hierarchy, args.collapse, args.rollup),
-                                   args.ratio_cap, args.cap_strength)
+                                   args.share_cap, args.cap_strength)
     return args
 
 

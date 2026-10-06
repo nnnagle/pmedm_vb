@@ -180,11 +180,9 @@ def dual_state(
 
 def _cap_terms(inputs: PMEDMInputs, cap, logits: np.ndarray, total: float, u: np.ndarray,
                op: ConstraintOperator) -> tuple[float, np.ndarray]:
-    """The ratio cap's share of the objective and its gradient in the multipliers
-    the data see, both over ``n`` (:mod:`pmedm_vb.assemble.ratiocap`)."""
-    with np.errstate(divide="ignore"):
-        log_q = np.log(inputs.q)
-    phi, g = cap.terms(logits, total, log_q, float(np.log(inputs.q.sum())))
+    """The share cap's part of the objective and its gradient in the multipliers
+    the data see, both over ``n`` (:mod:`pmedm_vb.assemble.sharecap`)."""
+    phi, g = cap.terms(logits, total)
     n = inputs.n
     return phi / n, (g.sum() * u - op.forward(g)) / n
 

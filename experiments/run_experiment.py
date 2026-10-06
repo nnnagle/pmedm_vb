@@ -2,7 +2,7 @@
 
 An experiment is a JSON file (``experiments/paper/expNN_<name>.json``): the
 study area, PUMAs and alphas, the model (taper, variance floor, hierarchy,
-roll-up, ratio cap), the raking methods, the VB families and the HMC settings.
+roll-up, share cap), the raking methods, the VB families and the HMC settings.
 Everything it produces lives under ``<root>/<name>``::
 
     <root>/<name>/
@@ -102,8 +102,14 @@ def load_experiment(path: Path) -> dict:
 
 
 def comparable(spec: dict) -> dict:
-    return {key: value for key, value in spec.items()
-            if key not in FREE_KEYS and not key.startswith("_")}
+    """The spec without its free keys, and without unset (``null``) model options,
+    so an option added or renamed later does not tell apart folders that never
+    set it."""
+    out = {key: value for key, value in spec.items()
+           if key not in FREE_KEYS and not key.startswith("_")}
+    if isinstance(out.get("model"), dict):
+        out["model"] = {k: v for k, v in out["model"].items() if v is not None}
+    return out
 
 
 def git_commit() -> str:
@@ -131,11 +137,11 @@ def data_dir(spec: dict) -> Path:
 def level(spec: dict) -> str:
     """The hierarchy level string that names the MAP, VB and HMC results."""
     from pmedm_vb.assemble.hierarchy import level_name
-    from pmedm_vb.assemble.ratiocap import cap_level
+    from pmedm_vb.assemble.sharecap import cap_level
 
     model = spec["model"]
     return cap_level(level_name(model["hierarchy"], None, model.get("rollup")),
-                     model.get("ratio_cap"), model.get("cap_strength"))
+                     model.get("share_cap"), model.get("cap_strength"))
 
 
 def fit_name(spec: dict, puma: str, alpha: float) -> str:
@@ -151,10 +157,9 @@ def model_args(spec: dict) -> list[str]:
             "--hierarchy", model["hierarchy"]]
     if model.get("rollup"):
         args += ["--rollup", str(model["rollup"])]
-    if model.get("ratio_cap") is not None:
-        args += ["--ratio-cap", f"{model['ratio_cap']:g}"]
-        if model.get("cap_strength") is not None:
-            args += ["--cap-strength", f"{model['cap_strength']:g}"]
+    if model.get("share_cap") is not None:
+        args += ["--share-cap", f"{model['share_cap']:g}",
+                 "--cap-strength", f"{model['cap_strength']:g}"]
     return args
 
 

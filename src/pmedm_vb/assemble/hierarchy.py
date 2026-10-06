@@ -141,10 +141,10 @@ class Hierarchy:
         for one ``Sigma`` and so needs ``alpha``, ``taper`` and ``variance_floor``;
         the other levels ignore them.
 
-        A ``+cap<ratio>x<strength>`` suffix (:mod:`pmedm_vb.assemble.ratiocap`)
-        adds the ratio cap to any level; it is held as ``.cap`` (``None``
+        A ``+share<share>x<strength>`` suffix (:mod:`pmedm_vb.assemble.sharecap`)
+        adds the share cap to any level; it is held as ``.cap`` (``None``
         without one)."""
-        from pmedm_vb.assemble.ratiocap import split_cap
+        from pmedm_vb.assemble.sharecap import split_cap
 
         level, cap = split_cap(level)
         h = cls._build(inputs, level, alpha=alpha, taper=taper, variance_floor=variance_floor)
