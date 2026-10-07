@@ -16,6 +16,13 @@ on a grid of thresholds, applied to nothing yet -- this only measures them:
   summed variances of the block group's B25003 rows, with the zero-count floor
   the model uses (``--variance-floor``); the rows' covariance is ignored.
 
+It also measures, to calibrate a Dirichlet-form penalty ``kappa sum_b KL(d || s_b)``,
+each block group's ``KL(d || s_b)``: ``s_b`` the household records' shares of
+block group ``b``'s allocated households, ``d`` their design shares (``q`` over
+the household records, normalised in each block group). Every block group,
+empty ones included. Per draw: the sum over block groups, the median and the
+largest; and per block group, its mean over draws (``usability_kl_bg.csv``).
+
 For each fit (PUMA x alpha) and method -- the experiment's VB families and both
 HMC runs -- it draws ``--draws`` (VB) or thins the trace to that many (HMC),
 and reports the share of draws each rule, and both, would keep; and of the VB
@@ -98,8 +105,20 @@ class Usability:
         self.published = inputs.Y_B[:, tenure].sum(axis=1)
         self.se = np.sqrt(variance[self.rows].sum(axis=1))
         self.zones = np.flatnonzero(self.published > hh_min)
+        # Design shares of the household records in each block group, as logs.
+        log_q_hh = np.where(self.support[:, self.hh], self.log_q[:, self.hh], -np.inf)
+        self.log_d = log_q_hh - logsumexp(log_q_hh, axis=1, keepdims=True)
+        self.d = np.exp(self.log_d)
 
-    def stats(self, lam: np.ndarray) -> dict:
+    def kl(self, log_p: np.ndarray) -> np.ndarray:
+        """``KL(d || s_b)`` for every block group, from the draw's ``log p``."""
+        lp = np.where(self.support[:, self.hh], log_p[:, self.hh], -np.inf)
+        log_s = lp - logsumexp(lp, axis=1, keepdims=True)
+        with np.errstate(invalid="ignore"):
+            terms = np.where(self.d > 0, self.d * (self.log_d - log_s), 0.0)
+        return terms.sum(axis=1)
+
+    def stats(self, lam: np.ndarray) -> tuple[dict, np.ndarray]:
         with np.errstate(divide="ignore"):
             logits = self.log_q - self.op.adjoint(lam)
         log_p = logits - logsumexp(logits[self.support])
@@ -123,7 +142,11 @@ class Usability:
                        min_n_eff_published=float(self.published[self.zones[j]]),
                        min_n_eff_top_share=float(s[j].max()),
                        max_hh_share=float(s.max()))
-        return row
+        kl = self.kl(log_p)
+        b = int(np.argmax(kl))
+        row.update(kl_sum=float(kl.sum()), kl_median=float(np.median(kl)), kl_max=float(kl[b]),
+                   kl_max_zone=b, kl_max_published=float(self.published[b]))
+        return row, kl
 
 
 def draws_of(exp: Path, puma: str, method: str, name: str, h, args, rng) -> np.ndarray | None:
@@ -244,6 +267,55 @@ def report(draws: pd.DataFrame, table: pd.DataFrame, args, methods: list[str]) -
     return "\n".join(lines) + "\n"
 
 
+#: Published-household bands for the per-block-group KL table.
+KL_BANDS = (-0.5, 0.5, 100, 500, np.inf)
+KL_BAND_LABELS = ("0", "1-100", "101-500", ">500")
+
+
+def kl_report(draws: pd.DataFrame, bg: pd.DataFrame | None, args, methods: list[str]) -> str:
+    """The calibration of kappa: KL(d || s_b) by method and alpha."""
+    order = {m: i for i, m in enumerate(methods)}
+    lines = ["\nKL(d || s_b), the Dirichlet-form penalty per unit kappa: d = design shares of the "
+             "household records, s_b = their shares of block group b's allocated households; every "
+             "block group. Per draw: the sum over block groups (p50, p99), the median block group "
+             "(p50), the largest (p50, p99); for VB, the sum in draws with a wall (p50). "
+             "Medians over PUMAs [min, max]."]
+
+    def cell(x: pd.Series, fmt: str = "{:.3g}") -> str:
+        x = x.dropna()
+        if x.empty:
+            return "-"
+        return (fmt.format(x.median()) if x.min() == x.max()
+                else f"{fmt.format(x.median())} [{fmt.format(x.min())},{fmt.format(x.max())}]")
+
+    for alpha in sorted(draws.alpha.unique()):
+        part = draws[draws.alpha == alpha]
+        rows = []
+        for method in sorted(part.method.unique(), key=order.get):
+            m = part[part.method == method]
+            by = m.groupby("puma")
+            walls = m[m.max_cell_share > args.wall].groupby("puma")
+            rows.append({"method": method,
+                         "sum_p50": cell(by.kl_sum.median()),
+                         "sum_p99": cell(by.kl_sum.quantile(0.99)),
+                         "bg_median_p50": cell(by.kl_median.median()),
+                         "max_p50": cell(by.kl_max.median()),
+                         "max_p99": cell(by.kl_max.quantile(0.99)),
+                         "sum_walls_p50": cell(walls.kl_sum.median()) if len(walls) else "-"})
+        lines.append(f"\n== alpha {alpha:g}")
+        lines.append(pd.DataFrame(rows).set_index("method").to_string())
+    if bg is not None:
+        lines.append("\nPer block group, the mean KL over draws, by published households: median over "
+                     "block groups (and the number of block groups), pooled over PUMAs:")
+        bg = bg.assign(band=pd.cut(bg.published, KL_BANDS, labels=KL_BAND_LABELS))
+        table = bg.groupby(["alpha", "method", "band"], observed=True).kl_mean.median().unstack("band")
+        counts = bg[(bg.alpha == bg.alpha.iloc[0]) & (bg.method == bg.method.iloc[0])
+                    ].groupby("band", observed=True).size()
+        lines.append("   block groups: " + ", ".join(f"{k} {v}" for k, v in counts.items()))
+        lines.append(table.round(3).to_string())
+    return "\n".join(lines) + "\n"
+
+
 def main() -> None:
     args = parse_args()
     exp = args.experiment.resolve()
@@ -259,11 +331,15 @@ def main() -> None:
             raise SystemExit(f"no usability_draws*.csv in {out}")
         draws = pd.concat([pd.read_csv(path, dtype={"puma": str}) for path in parts],
                           ignore_index=True)
+        bg = sorted(out.glob("usability_kl_bg_*.csv"))
+        if bg:
+            pd.concat([pd.read_csv(path, dtype={"puma": str}) for path in bg],
+                      ignore_index=True).to_csv(out / "usability_kl_bg.csv", index=False)
         write(draws, out, "", args, methods)
         return
     rng = np.random.default_rng(args.seed)
     model = spec["model"]
-    rows = []
+    rows, bg_rows = [], []
     for puma in args.pumas or spec["pumas"]:
         inputs = PMEDMInputs.load(processed_dir() / "inputs" / area_slug(spec["area"]) / puma)
         use = Usability(inputs, args.hh_min, model["variance_floor"])
@@ -279,15 +355,23 @@ def main() -> None:
                 if lam is None:
                     print(f"missing {puma} a{alpha:g} {method}", flush=True)
                     continue
+                kls = []
                 for d in range(lam.shape[1]):
-                    rows.append(dict(puma=puma, alpha=alpha, method=method, draw=d,
-                                     **use.stats(lam[:, d])))
+                    row, kl = use.stats(lam[:, d])
+                    rows.append(dict(puma=puma, alpha=alpha, method=method, draw=d, **row))
+                    kls.append(kl)
+                kls = np.array(kls)
+                bg_rows.append(pd.DataFrame(dict(
+                    puma=puma, alpha=alpha, method=method, zone=np.arange(kls.shape[1]),
+                    published=use.published, kl_mean=kls.mean(axis=0),
+                    kl_p50=np.median(kls, axis=0), kl_p99=np.quantile(kls, 0.99, axis=0))))
                 print(f"done {puma} a{alpha:g} {method}: {lam.shape[1]} draws", flush=True)
     if not rows:
         raise SystemExit("no fits found")
     draws = pd.DataFrame(rows)
     suffix = "" if args.pumas is None else "_" + "_".join(args.pumas)
     draws.to_csv(out / f"usability_draws{suffix}.csv", index=False)
+    pd.concat(bg_rows, ignore_index=True).to_csv(out / f"usability_kl_bg{suffix}.csv", index=False)
     write(draws, out, suffix, args, methods)
 
 
@@ -295,6 +379,10 @@ def write(draws: pd.DataFrame, out: Path, suffix: str, args, methods: list[str])
     table = grid(draws, args)
     table.to_csv(out / f"usability_grid{suffix}.csv", index=False)
     text = report(draws, table, args, methods)
+    bg_path = out / f"usability_kl_bg{suffix}.csv"
+    if "kl_sum" in draws:
+        text += kl_report(draws, pd.read_csv(bg_path, dtype={"puma": str})
+                          if bg_path.exists() else None, args, methods)
     (out / f"usability{suffix}.txt").write_text(text)
     print(text)
 
