@@ -119,6 +119,7 @@ from pmedm_vb.solvers.base import ConstraintOperator
 from laplace_diagnostic import batched_f, load_vb
 
 METHODS = ("ipf", "sinkhorn", "map_laplace", "vb_gaussian", "vb_skewed", "vb_sumdiff",
+           "vb_gaussian_trunc", "vb_skewed_trunc", "vb_sumdiff_trunc",
            "hmc_short", "hmc_ref")
 #: 90% interval half-width in standard errors.
 Z90 = 1.645
@@ -155,6 +156,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--draws", type=int, default=4000)
     parser.add_argument("--ratio", type=float, nargs="+", default=[10.0, 100.0])
     parser.add_argument("--bg-share", type=float, nargs="+", default=[0.05, 0.25])
+    parser.add_argument("--trunc-distinct", type=float, default=0.1,
+                        help="vb_*_trunc: reject a draw with a block group (over --hh-min "
+                             "published households) whose D / H is under this")
+    parser.add_argument("--trunc-share", type=float, default=0.01,
+                        help="vb_*_trunc: reject a draw with any cell over this share of N")
+    parser.add_argument("--trunc-max-factor", type=int, default=20,
+                        help="vb_*_trunc: give up after drawing this many times --draws")
     parser.add_argument("--hh-min", type=float, default=100,
                         help="the household-share counts use block groups with more than this "
                              "many published occupied households (B25003)")
@@ -225,6 +233,54 @@ def check_level(path: Path, saved, level: str) -> None:
 # -- draws --------------------------------------------------------------------
 
 
+def truncated_draws(args, inputs: PMEDMInputs, rng, h, q) -> tuple[np.ndarray, dict]:
+    """``vb_*_trunc``: draws from ``q`` with those the HMC reference never makes
+    turned away -- any cell over ``--trunc-share`` of N, or any block group over
+    ``--hh-min`` published households whose expected distinct household records
+    per household, ``D / H``, is under ``--trunc-distinct``. Drawn in batches until
+    ``--draws`` are kept or ``--trunc-max-factor`` times that many are spent.
+    Returns the kept draws (solver coordinates) and the acceptance counts."""
+    op = ConstraintOperator(inputs)
+    tenure = [k for k, c in enumerate(inputs.bg_constraints) if c.startswith("B25003.")]
+    hh = ~inputs.units["is_group_quarters"].to_numpy(bool)
+    published = inputs.Y_B[:, tenure].sum(axis=1)
+    zones = published > args.hh_min
+    H = published[zones]
+    log_share = np.log(args.trunc_share)
+    kept, tried, by_share, by_distinct = [], 0, 0, 0
+    batch = max(64, args.draws // 4)
+    while sum(k.shape[1] for k in kept) < args.draws and tried < args.trunc_max_factor * args.draws:
+        xi = q.sample(rng, batch)
+        lam = xi if h.is_trivial else h.lambda_data(xi)
+        keep = np.ones(batch, bool)
+        for d in range(batch):
+            log_p = log_p_of(inputs, op, lam[:, d])
+            if log_p.max() > log_share:
+                keep[d] = False
+                by_share += 1
+                continue
+            if zones.any():
+                w = np.exp(log_p[np.ix_(zones, hh)])
+                s = w / w.sum(axis=1, keepdims=True)
+                if np.any(expected_distinct(s, H) / H < args.trunc_distinct):
+                    keep[d] = False
+                    by_distinct += 1
+        kept.append(xi[:, keep])
+        tried += batch
+    draws = np.concatenate(kept, axis=1)[:, :args.draws]
+    if draws.shape[1] == 0:
+        raise SystemExit(f"truncated VB kept none of {tried} draws: every draw has a cell over "
+                         f"{args.trunc_share:g} of N or a block group under D/H "
+                         f"{args.trunc_distinct:g}")
+    if draws.shape[1] < args.draws:
+        logger.warning("truncated VB kept %d of %d draws after %d tries", draws.shape[1],
+                       args.draws, tried)
+    counts = {"trunc_tried": float(tried), "trunc_kept": float(draws.shape[1]),
+              "trunc_acceptance": float(sum(k.shape[1] for k in kept) / tried),
+              "trunc_rejected_share": float(by_share), "trunc_rejected_distinct": float(by_distinct)}
+    return draws, counts
+
+
 def method_draws(args, inputs: PMEDMInputs, rng, h) -> tuple[dict, dict]:
     """``{"W": (zones, units)}`` or ``{"lam": (m, draws), "xi": ..., "q": density
     or None}``, and the method's timing and settings. ``lam`` is always in
@@ -270,7 +326,11 @@ def method_draws(args, inputs: PMEDMInputs, rng, h) -> tuple[dict, dict]:
                 timing["vb_seconds"] = timing["fit_seconds"] - timing["map_seconds"]
             timing["converged"] = float(saved["converged"])
         start = time.perf_counter()
-        draws = q.sample(rng, args.draws)
+        if args.method.endswith("_trunc"):
+            draws, counts = truncated_draws(args, inputs, rng, h, q)
+            timing.update(counts)
+        else:
+            draws = q.sample(rng, args.draws)
         timing["draw_seconds"] = time.perf_counter() - start
         return with_lambda(h, draws, q), timing
     # HMC

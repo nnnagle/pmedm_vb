@@ -30,12 +30,14 @@ import numpy as np
 import pandas as pd
 
 ORDER = ["ipf", "sinkhorn", "map_laplace", "vb_gaussian", "vb_skewed", "vb_sumdiff",
+         "vb_gaussian_trunc", "vb_skewed_trunc", "vb_sumdiff_trunc",
          "hmc_short", "hmc_ref"]
 
 #: (label, subset, metric, stat)
 HEADLINE = [
     ("fit_s", "timing", "fit_seconds", "value"),
     ("hmc_s", "timing", "hmc_seconds", "value"),
+    ("trunc_acc", "timing", "trunc_acceptance", "value"),
     ("bg_cover", "constrained_block_group", "covers_published", "mean"),
     ("bg_absz_p90", "constrained_block_group", "abs_z", "p90"),
     ("tr_absz_p90", "constrained_tract", "abs_z", "p90"),

@@ -20,6 +20,7 @@ Usage, from the repository root on a login node::
 One ``compare_methods.sbatch`` job per (PUMA, alpha) cell, each calling
 ``compare_methods.py`` for the cell's HMC reference first (it caches its
 summaries for the rest), then short HMC, MAP + Laplace, the VB families and
+the VB families again truncated (``vb_<family>_trunc``), and
 the raking fits (raking has no alpha: each PUMA's raking is scored in every
 alpha cell, against that cell's reference). Every call names the cell's
 reference; the HMC calls also name the skewed VB fit that whitened them. Then
@@ -90,7 +91,10 @@ def cell_calls(spec: dict, exp: Path, puma: str, alpha: float, out: Path, draws:
                           "--whiten", str(whiten)])
         else:
             missing.append(f"{cell}: hmc_{kind}")
-    fits = [("map_laplace", "map")] + [(f"vb_{f}", f"vb_{f}") for f in spec["vb_families"]]
+    # Each VB family is scored as fitted and truncated (vb_<family>_trunc: the same
+    # fit, with the draws the HMC reference never makes turned away).
+    fits = ([("map_laplace", "map")] + [(f"vb_{f}", f"vb_{f}") for f in spec["vb_families"]]
+            + [(f"vb_{f}_trunc", f"vb_{f}") for f in spec["vb_families"]])
     for method, folder in fits:
         run = exp / puma / folder
         if (run / f"{name}.npz").exists():
@@ -204,7 +208,8 @@ def combine(args: argparse.Namespace) -> None:
 
     # Every (method, PUMA, alpha) the scoring was meant to have, against what it has.
     methods = (["hmc_ref", "hmc_short", "map_laplace"]
-               + [f"vb_{f}" for f in spec["vb_families"]] + list(spec["rake"]))
+               + [f"vb_{f}" for f in spec["vb_families"]]
+               + [f"vb_{f}_trunc" for f in spec["vb_families"]] + list(spec["rake"]))
     have = set(zip(frame["method"], frame["puma"], frame["alpha"].round(12)))
     lines = list(record.get("missing", []))
     for puma in spec["pumas"]:
