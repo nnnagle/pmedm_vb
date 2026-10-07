@@ -53,7 +53,11 @@ directory (``<name>_refsummary.npz``) and reused.
   block groups, each one's effective number of household records,
   ``n_eff = 1 / sum_i s_i^2`` with ``s_i`` a record's share of its households
   (Kish's effective sample size within the block group), as the smallest, p10
-  and median over block groups and the count under each ``--neff-floor``; ``W`` over
+  and median over block groups and the count under each ``--neff-floor``; and
+  the expected number of distinct records among the block group's ``H``
+  published households drawn from those shares, ``D = sum_i 1 - (1 - s_i)^H``
+  (at most ``H``), as the smallest ``D``, the smallest and median ``D / H`` and the
+  count of block groups with ``D / H`` under each ``--distinct-floor``; ``W`` over
   the reference's largest value for that cell (``--reference``); the largest
   cell over 1% and 10% of ``N``; and the p99.9 and max of ``log(p/q)``. Each
   per-draw count or value is summarised over draws: the share of draws with at
@@ -157,6 +161,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--neff-floor", type=float, nargs="+", default=[20, 50],
                         help="count, per draw, the block groups whose effective number of "
                              "household records is under each of these")
+    parser.add_argument("--distinct-floor", type=float, nargs="+", default=[0.1, 0.2],
+                        help="count, per draw, the block groups whose expected distinct records "
+                             "per published household, D / H, is under each of these")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--collapse", type=float, default=None,
                         help="collapse each area's zero cells into one and merge small positive "
@@ -366,18 +373,20 @@ class Accumulator:
     """Per-draw outcomes and ``p`` statistics, one draw of ``W`` at a time."""
 
     def __init__(self, inputs, sets, ratios, shares, ref_max_log_share=None, hh_min=100,
-                 neff_floors=(20, 50)):
+                 neff_floors=(20, 50), distinct_floors=(0.1, 0.2)):
         self.inputs, self.sets = inputs, sets
-        self.neff_floors = neff_floors
+        self.neff_floors, self.distinct_floors = neff_floors, distinct_floors
         # Household records, and the block groups with more than hh_min published
         # occupied households, for each household's share of its block group's
         # households. None without B25003 among the block group constraints.
         tenure = [k for k, c in enumerate(inputs.bg_constraints) if c.startswith("B25003.")]
         if tenure and "is_group_quarters" in inputs.units:
             self.hh_units = ~inputs.units["is_group_quarters"].to_numpy(bool)
-            self.hh_zones = inputs.Y_B[:, tenure].sum(axis=1) > hh_min
+            published = inputs.Y_B[:, tenure].sum(axis=1)
+            self.hh_zones = published > hh_min
+            self.hh_H = published[self.hh_zones]
         else:
-            self.hh_units = self.hh_zones = None
+            self.hh_units = self.hh_zones = self.hh_H = None
         self.A_T = sp.csr_matrix(inputs.A_T)
         self.X_all = sp.hstack([s["X"] for s in sets]).tocsc()
         self.bounds = np.cumsum([0] + [s["X"].shape[1] for s in sets])
@@ -427,6 +436,13 @@ class Accumulator:
             row["median_bg_n_eff"] = float(np.median(n_eff))
             for floor in self.neff_floors:
                 row[f"count_bg_n_eff_lt_{floor:g}"] = int((n_eff < floor).sum())
+            distinct = expected_distinct(share_hh, self.hh_H)
+            per_hh = distinct / self.hh_H
+            row["min_bg_distinct"] = float(distinct.min())
+            row["min_bg_distinct_per_hh"] = float(per_hh.min())
+            row["median_bg_distinct_per_hh"] = float(np.median(per_hh))
+            for floor in self.distinct_floors:
+                row[f"count_bg_distinct_per_hh_lt_{floor:g}"] = int((per_hh < floor).sum())
         row["max_share_of_N"] = float(W.max() / self.inputs.N)
         if self.ref is not None:
             row["count_over_reference_max"] = int((log_p > self.ref).sum())
@@ -439,6 +455,14 @@ class Accumulator:
         return np.stack(self.outcomes[i])  # (draws, areas, cells)
 
 
+def expected_distinct(shares: np.ndarray, H: np.ndarray) -> np.ndarray:
+    """``D_j = sum_i 1 - (1 - s_ij)^H_j``: the expected number of distinct records
+    among ``H_j`` households drawn with replacement from block group ``j``'s
+    shares (rows of ``shares``). At most ``H_j`` and the number of records."""
+    with np.errstate(divide="ignore"):
+        return -np.expm1(H[:, None] * np.log1p(-np.minimum(shares, 1.0))).sum(axis=1)
+
+
 def log_p_of(inputs, op, lam):
     with np.errstate(divide="ignore"):
         logits = np.log(inputs.q) - op.adjoint(lam)
@@ -446,8 +470,8 @@ def log_p_of(inputs, op, lam):
 
 
 def run_draws(inputs, source, sets, ratios, shares, ref_max=None, hh_min=100,
-              neff_floors=(20, 50)) -> Accumulator:
-    acc = Accumulator(inputs, sets, ratios, shares, ref_max, hh_min, neff_floors)
+              neff_floors=(20, 50), distinct_floors=(0.1, 0.2)) -> Accumulator:
+    acc = Accumulator(inputs, sets, ratios, shares, ref_max, hh_min, neff_floors, distinct_floors)
     if "W" in source:
         with np.errstate(divide="ignore"):
             acc.add(np.log(source["W"] / source["W"].sum()), W=source["W"])
@@ -523,7 +547,7 @@ def reference_summaries(args, inputs, sets):
                 return summaries, saved["max_log_share"], lam, xi
     logger.info("summarising the reference %s (cached for next time)", args.reference)
     acc = run_draws(inputs, {"lam": lam}, sets, args.ratio, args.bg_share, hh_min=args.hh_min,
-                    neff_floors=args.neff_floor)
+                    neff_floors=args.neff_floor, distinct_floors=args.distinct_floor)
     summaries = [cell_summary(acc.draws(i)) for i in range(len(sets))]
     np.savez(cache, max_log_share=acc.max_log_share,
              **{f"{i}_{k}": v for i, s in enumerate(summaries) for k, v in s.items()})
@@ -772,7 +796,7 @@ def main() -> None:
     if args.reference is not None and args.method != "hmc_ref":
         ref_summaries, ref_max, ref_lam, ref_xi = reference_summaries(args, inputs, sets)
     acc = run_draws(inputs, source, sets, args.ratio, args.bg_share, ref_max, args.hh_min,
-                    args.neff_floor)
+                    args.neff_floor, args.distinct_floor)
 
     base = dict(method=args.method, puma=args.puma, alpha=args.alpha,
                 n_draws=len(acc.p_rows))
@@ -796,7 +820,8 @@ def main() -> None:
             rows.append(dict(base, subset="p", metric=column, stat="share_of_draws_any",
                              value=float((values > 0).mean())))
         # A diversity measure's bad side is its low end: its lower quantiles too.
-        low = column.endswith("_n_eff") and not column.startswith("count_")
+        low = (column.endswith(("_n_eff", "_distinct", "_distinct_per_hh"))
+               and not column.startswith("count_"))
         rows += rows_for(base, "p", column, values, (0.0, 0.01, 0.10) + DRAW_STATS if low
                          else DRAW_STATS)
     for share in (0.01, 0.10):

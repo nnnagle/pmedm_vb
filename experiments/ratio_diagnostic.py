@@ -108,7 +108,9 @@ class Ratios:
         # than HH_MIN published occupied households (B25003); None without B25003.
         tenure = [k for k, c in enumerate(inputs.bg_constraints) if c.startswith("B25003.")]
         self.hh = ~self.gq
-        self.hh_zones = (inputs.Y_B[:, tenure].sum(axis=1) > HH_MIN) if tenure else None
+        published = inputs.Y_B[:, tenure].sum(axis=1) if tenure else None
+        self.hh_zones = (published > HH_MIN) if tenure else None
+        self.hh_H = published[self.hh_zones] if tenure else None
 
     def bg_diversity(self, log_p: np.ndarray) -> dict:
         """Per draw: each large block group's effective number of household records,
@@ -125,7 +127,17 @@ class Ratios:
         sum_sq = np.square(s).sum(axis=1)
         n_eff, top = 1.0 / sum_sq, s.max(axis=1)
         j = int(np.argmin(n_eff))
+        # Expected distinct records among the block group's H published households
+        # drawn from its shares: sum_i 1 - (1 - s_i)^H, at most H.
+        with np.errstate(divide="ignore"):
+            distinct = -np.expm1(self.hh_H[:, None] * np.log1p(-np.minimum(s, 1.0))).sum(axis=1)
+        per_hh = distinct / self.hh_H
+        k = int(np.argmin(per_hh))
         return dict(min_bg_n_eff=float(n_eff[j]), min_bg_zone=int(zones[j]),
+                    min_bg_distinct_per_hh=float(per_hh[k]), min_bg_distinct=float(distinct[k]),
+                    min_distinct_zone=int(zones[k]),
+                    median_bg_distinct_per_hh=float(np.median(per_hh)),
+                    bgs_distinct_per_hh_lt_0_2=int((per_hh < 0.2).sum()),
                     min_bg_top_share=float(top[j]),
                     min_bg_dominance=float(top[j] ** 2 / sum_sq[j]),
                     median_bg_n_eff=float(np.median(n_eff)),
@@ -285,7 +297,9 @@ def diversity_lines(draws: pd.DataFrame, order: list[str]) -> list[str]:
     lines = [f"\nBlock-group diversity (households only, block groups over {HH_MIN} published "
              "households): per draw, the smallest n_eff = 1 / sum s^2 over block groups; "
              "dominance = the top record's part of that block group's sum s^2 (1: one record "
-             "makes the low n_eff; near 0: many share it). Medians, and p10/p1 of the smallest:"]
+             "makes the low n_eff; near 0: many share it); D/H = expected distinct records among "
+             "the block group's H published households drawn from its shares, per household "
+             "(at most 1). Medians, and p10/p1 of the smallest:"]
     agg = draws.groupby("group").agg(
         draws=("min_bg_n_eff", "size"),
         min_neff_p50=("min_bg_n_eff", "median"),
@@ -294,23 +308,33 @@ def diversity_lines(draws: pd.DataFrame, order: list[str]) -> list[str]:
         median_neff=("median_bg_n_eff", "median"),
         bgs_under_50=("bgs_n_eff_lt_50", "mean"),
         dominance_p50=("min_bg_dominance", "median"),
+        min_D_per_hh_p50=("min_bg_distinct_per_hh", "median"),
+        min_D_per_hh_p1=("min_bg_distinct_per_hh", lambda x: x.quantile(0.01)),
+        median_D_per_hh=("median_bg_distinct_per_hh", "median"),
+        bgs_D_per_hh_under_0p2=("bgs_distinct_per_hh_lt_0_2", "mean"),
         top_share_p50=("min_bg_top_share", "median"),
         max_hh_share_p50=("max_hh_share", "median"))
     lines.append(agg.reindex([g for g in order if g in agg.index]).round(3).to_string())
     lines.append("\nDo low-n_eff draws have walls? Per fit and source: draws, wall share among draws "
-                 "whose smallest n_eff is under 50 and over it, the rank correlation of the "
+                 "whose smallest n_eff is under 50 and over it (and whose smallest D/H is under "
+                 "0.2), the rank correlations of the "
                  "largest cell's share of N with the smallest n_eff, and the share of wall draws "
                  "whose wall is in the least diverse block group:")
     rows = []
     for (puma, alpha, level, source), part in draws[draws.source != "map"].groupby(
             ["puma", "alpha", "level", "source"], sort=True):
         low = part.min_bg_n_eff < 50
+        low_d = part.min_bg_distinct_per_hh < 0.2
         walls = part[part.wall]
         rows.append(dict(puma=puma, alpha=alpha, source=source, draws=len(part),
                          low_draws=int(low.sum()),
                          wall_if_low=part.wall[low].mean() if low.any() else np.nan,
                          wall_if_not=part.wall[~low].mean() if (~low).any() else np.nan,
                          spearman=part.top_share.corr(part.min_bg_n_eff, method="spearman"),
+                         low_D_draws=int(low_d.sum()),
+                         wall_if_low_D=part.wall[low_d].mean() if low_d.any() else np.nan,
+                         spearman_D=part.top_share.corr(part.min_bg_distinct_per_hh,
+                                                        method="spearman"),
                          wall_in_min_bg=(walls.top_zone == walls.min_bg_zone).mean()
                          if len(walls) else np.nan))
     lines.append(pd.DataFrame(rows).round(3).to_string(index=False))
