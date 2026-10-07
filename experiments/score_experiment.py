@@ -8,6 +8,8 @@ changes, without touching them: each run of this script writes a new tag
       scoring.json             commit, date, options, the jobs
       specs/<puma>_a<alpha>.txt   one compare_methods.py call per method
       per_cell/<puma>_a<alpha>.csv, <puma>_a<alpha>_tables.csv
+      detail/<puma>_a<alpha>/<method>_cells.parquet, <method>_draws.parquet
+                               every cell's and every draw's values, for exact pooling
       logs/
       all_scores.csv, all_tables.csv     (the combine step)
       score_summary.txt, table_summary.txt, distribution_summary.txt,
@@ -82,7 +84,8 @@ def cell_calls(spec: dict, exp: Path, puma: str, alpha: float, out: Path, draws:
               "--area", area_slug(spec["area"]), "--draws", str(draws),
               "--reference", str(reference),
               "--out", str(out / "per_cell" / f"{cell}.csv"),
-              "--by-table", str(out / "per_cell" / f"{cell}_tables.csv")]
+              "--by-table", str(out / "per_cell" / f"{cell}_tables.csv"),
+              "--detail", str(out / "detail" / cell)]
     calls, missing = [], []
     for kind in ("ref", "short"):
         run = exp / puma / f"hmc_{kind}"

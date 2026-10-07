@@ -65,6 +65,15 @@ directory (``<name>_refsummary.npz``) and reused.
 - ``joint``: PSIS k-hat (Laplace and VB, which have a density), and with
   ``--whiten`` and ``--reference`` the whitened-coordinate sd ratio and the
   tract/block group pair statistics.
+- ``p`` also carries, per draw, the household consistency of the block groups:
+  the largest ``|z|`` of a block group's allocated occupied households (its
+  ``B25003`` cells summed) against the published total, with the SE from the
+  cells' summed variances under ``--variance-floor`` (covariance ignored), and
+  the counts of block groups beyond 3 and 5.
+- With ``--detail DIR``, ``DIR/<method>_cells.parquet`` (every scored cell's
+  metrics, one row per area and cell) and ``DIR/<method>_draws.parquet`` (every
+  draw's ``p`` statistics), so that pooled statistics -- quantiles over cells
+  included -- can be computed exactly across PUMAs.
 - With ``--by-table``, a second long CSV, one row per ``(method, puma,
   alpha, subset, table, cells, metric, stat)``: the outcome metrics against
   the published values (``z``, ``abs_z``, ``covers_published``,
@@ -142,6 +151,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", type=Path, required=True, help="long CSV to append to")
     parser.add_argument("--by-table", type=Path, default=None,
                         help="also append per-table summaries to this CSV (see module docstring)")
+    parser.add_argument("--detail", type=Path, default=None,
+                        help="a directory for <method>_cells.parquet (every scored cell's "
+                             "metrics) and <method>_draws.parquet (every draw's p statistics), "
+                             "so that statistics can be pooled exactly across PUMAs")
     parser.add_argument("--area", default="knox-2024-5yr")
     parser.add_argument("--score-area", default=None,
                         help="score against this area's tables instead of --area's: same units "
@@ -586,6 +599,46 @@ def _ref_metrics(out: dict, summary: dict, draws: np.ndarray, ref: dict) -> dict
     return out
 
 
+def cell_frame(base: dict, s: dict, shape: tuple, metrics: dict[str, np.ndarray]) -> pd.DataFrame:
+    """One subset's per-cell metrics, one row per (area, cell), for ``--detail``."""
+    n_areas, k = shape
+    frame = pd.DataFrame({key: base[key] for key in ("method", "puma", "alpha")}, index=range(n_areas * k))
+    frame["subset"] = s["subset"]
+    frame["area"] = np.repeat(np.arange(n_areas), k).astype(np.int32)
+    names = s.get("names")
+    frame["cell"] = np.tile(np.asarray(names if names is not None else [str(c) for c in range(k)]),
+                            n_areas)
+    if s.get("Y") is not None:
+        frame["published"] = np.asarray(s["Y"], dtype=np.float32).ravel()
+        frame["sampled"] = np.asarray(s["sampled"], dtype=bool).ravel()
+    for metric, values in metrics.items():
+        frame[metric] = np.asarray(values, dtype=np.float32)
+    return frame
+
+
+def household_consistency(inputs, sets, acc, variance_floor) -> dict[str, np.ndarray] | None:
+    """Per draw, the largest |z| of a block group's allocated occupied households
+    (its B25003 cells summed) against the published total, with the SE the square
+    root of the cells' summed variances under the model's variance floor (their
+    covariance ignored); and the published households of that block group."""
+    tenure = [k for k, c in enumerate(inputs.bg_constraints) if c.startswith("B25003.")]
+    index = next((i for i, s in enumerate(sets) if s["subset"] == "constrained_block_group"), None)
+    if not tenure or index is None:
+        return None
+    n_zones = inputs.Y_B.shape[0]
+    rows = inputs.Y_T.size + np.array(tenure)[None, :] * n_zones + np.arange(n_zones)[:, None]
+    variance = inputs.floored_variances(floor_spec(variance_floor))
+    published = inputs.Y_B[:, tenure].sum(axis=1)
+    se = np.sqrt(variance[rows].sum(axis=1))
+    allocated = acc.draws(index)[:, :, tenure].sum(axis=2)          # (draws, zones)
+    z = (allocated - published[None, :]) / se[None, :]
+    worst = np.argmax(np.abs(z), axis=1)
+    return {"max_abs_hh_z": np.abs(z).max(axis=1),
+            "max_abs_hh_z_published": published[worst],
+            "count_hh_abs_z_gt_3": (np.abs(z) > 3).sum(axis=1),
+            "count_hh_abs_z_gt_5": (np.abs(z) > 5).sum(axis=1)}
+
+
 # -- reference ----------------------------------------------------------------
 
 
@@ -863,17 +916,23 @@ def main() -> None:
     rows = [dict(base, subset="timing", metric=k, stat="value", value=float(v))
             for k, v in timing.items()]
 
-    table_rows = []
+    table_rows, cell_frames = [], []
     for i, s in enumerate(sets):
         metrics = outcome_metrics(acc.draws(i), s, ref_summaries[i] if ref_summaries else None)
         for metric, values in metrics.items():
             rows += rows_for(base, s["subset"], metric, values, CELL_STATS)
+        if args.detail is not None:
+            cell_frames.append(cell_frame(base, s, acc.draws(i).shape[1:], metrics))
         if args.by_table is not None and s["Y"] is not None:
             table_rows += by_table_rows(base, s, metrics)
             table_rows += distribution_rows(base, s, metrics["mean"].reshape(s["Y"].shape),
                                             metrics)
 
     p = pd.DataFrame(acc.p_rows)
+    consistency = household_consistency(inputs, sets, acc, args.variance_floor)
+    if consistency is not None:
+        for column, values in consistency.items():
+            p[column] = values
     for column in p.columns:
         values = p[column].to_numpy(float)
         if column.startswith("count_"):
@@ -920,6 +979,12 @@ def main() -> None:
 
     rows.append(dict(base, subset="timing", metric="scoring_seconds", stat="value",
                      value=time.perf_counter() - started))
+    if args.detail is not None:
+        args.detail.mkdir(parents=True, exist_ok=True)
+        pd.concat(cell_frames, ignore_index=True).to_parquet(
+            args.detail / f"{args.method}_cells.parquet", index=False, compression="zstd")
+        p.assign(**base, draw=np.arange(len(p))).to_parquet(
+            args.detail / f"{args.method}_draws.parquet", index=False, compression="zstd")
     frame = pd.DataFrame(rows)[["method", "puma", "alpha", "n_draws", "subset", "metric",
                                 "stat", "value"]]
     frame.to_csv(args.out, mode="a", header=not args.out.exists(), index=False)
