@@ -47,8 +47,10 @@ from run_experiment import (  # noqa: E402
     EXPERIMENTS, area_slug, data_dir, fit_name, git_commit, model_args, rake_output,
 )
 
-SCORE_SLURM: list[str] = []
-COMBINE_SLURM = ["--cpus-per-task=4", "--mem=32G", "--time=01:00:00"]
+#: The short partition, capped at 1 hour, allocates quickly.
+SCORE_SLURM = ["--partition=short", "--qos=short", "--time=01:00:00"]
+COMBINE_SLURM = ["--partition=short", "--qos=short", "--cpus-per-task=4", "--mem=32G",
+                 "--time=01:00:00"]
 
 
 def parse_args() -> argparse.Namespace:

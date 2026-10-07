@@ -153,7 +153,7 @@ running:
 |---|---|---|---|
 | rake | `run_map.sbatch rake`, one per (PUMA, method) | short, 1 h, 4 CPUs | `ipf/`, `sinkhorn/` |
 | fits | `run_map_bundle.sbatch`, one per PUMA: MAP, then VB Gaussian and skewed, every alpha | short, 1 h, 48 CPUs | `map/`, `vb_*/` |
-| hmc | `run_mcmc_bundle.sbatch`, one per PUMA: three short runs, then three references | campus-gpu, 12 h | `hmc_short/`, `hmc_ref/` |
+| hmc | `run_mcmc_bundle.sbatch`, one per PUMA: three short runs, then three references | campus-gpu, 24 h | `hmc_short/`, `hmc_ref/` |
 
 So the way to run an experiment is to **call the same command again** until
 `--status` shows every output:

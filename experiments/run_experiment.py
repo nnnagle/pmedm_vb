@@ -63,7 +63,7 @@ DEFAULT_ROOT = Path("/lustre/isaac24/proj/UTK0496/pmedm_vb_runs/paper")
 #: Slurm options per stage, on top of each script's header.
 RAKE_SLURM = ["--partition=short", "--qos=short", "--time=01:00:00", "--cpus-per-task=4"]
 FITS_SLURM = ["--cpus-per-task=48"]
-HMC_SLURM: list[str] = []
+HMC_SLURM = ["--time=24:00:00"]
 GPU_PARTITION = "campus-gpu"
 
 #: Keys whose difference does not make a different experiment.
