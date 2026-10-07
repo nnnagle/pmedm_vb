@@ -154,15 +154,28 @@ def submit(args: argparse.Namespace) -> None:
                              f"--job-name={spec['name']}-{args.tag}-{cell}", *SCORE_SLURM,
                              str(EXPERIMENTS / "compare_methods.sbatch"), str(spec_file)],
                             args.dry_run)
-    combine = sbatch(["sbatch", "--parsable", export, log,
-                      f"--job-name={spec['name']}-{args.tag}-combine", *COMBINE_SLURM,
-                      f"--dependency=afterany:{':'.join(jobs.values())}",
-                      str(EXPERIMENTS / "run_python.sbatch"), "score_experiment.py", str(exp),
-                      "--tag", args.tag, "--combine"], args.dry_run)
     record = {"tag": args.tag, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
               "commit": git_commit(), "draws": args.draws, "experiment": str(exp),
               "level": spec.get("_level"), "missing": missing, "jobs": jobs,
-              "combine_job": combine}
+              "combine_job": None}
+    # Recorded before the combine job is submitted, so that a failure there still
+    # leaves what --combine needs once the scoring jobs are done.
+    if not args.dry_run:
+        (out / "scoring.json").write_text(json.dumps(record, indent=2) + "\n")
+    try:
+        combine = sbatch(["sbatch", "--parsable", export, log,
+                          f"--job-name={spec['name']}-{args.tag}-combine", *COMBINE_SLURM,
+                          f"--dependency=afterany:{':'.join(jobs.values())}",
+                          str(EXPERIMENTS / "run_python.sbatch"), "score_experiment.py", str(exp),
+                          "--tag", args.tag, "--combine"], args.dry_run)
+    except SystemExit as error:
+        record["combine_error"] = str(error)
+        (out / "scoring.json").write_text(json.dumps(record, indent=2) + "\n")
+        raise SystemExit(f"{len(jobs)} scoring job(s) submitted, but the combine job was not:\n"
+                         f"{error}\nWhen they finish, combine on this node with\n"
+                         f"  {sys.executable} {EXPERIMENTS / 'score_experiment.py'} {exp} "
+                         f"--tag {args.tag} --combine")
+    record["combine_job"] = combine
     if args.dry_run:
         print(json.dumps(record, indent=2))
         return
