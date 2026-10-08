@@ -17,8 +17,11 @@ experiment. Pooling:
 - Over cells (Tables 2-4): every cell of every PUMA together, so quantiles are
   quantiles of the pooled cells. z and coverage use the *sampled* cells only
   (a nonzero published estimate whose variance is a sampling variance, not a
-  zero cell's modelled one). Coverage is predictive: the published value within
-  ``mean +- 1.645 sqrt(SE^2 + sd^2)``, 90% nominal under the model.
+  zero cell's modelled one). Table 2 (the published values the model was fitted
+  to) reports whether the posterior 90% interval contains the published value,
+  as a description: in-sample it has no nominal level. Table 3 (held-out) uses
+  predictive coverage: the published value within ``mean +- 1.645 sqrt(SE^2 +
+  sd^2)``.
 - Over draws (Table 5): the draws of every PUMA together; each draw is one
   PUMA's, so "any block group" means any in that PUMA.
 - Not poolable: PSIS k-hat, one value per fit, as the median [min, max] over
@@ -51,6 +54,7 @@ ALPHAS = (0.01, 0.1, 1.0)
 
 #: Cell columns read from the detail files.
 CELL_COLUMNS = ["method", "puma", "alpha", "subset", "sampled", "abs_z", "pred_covers",
+                "covers_published",
                 "halfwidth_over_moe", "median_diff_ref_sd", "width_ratio_ref"]
 CELL_SUBSETS = ("constrained_block_group", "constrained_tract",
                 "heldout_related_block_group", "heldout_less_related_block_group")
@@ -127,7 +131,8 @@ def cell_statistics(cells: pd.DataFrame) -> list[dict]:
                              value=fn(group[column]), n=int(group[column].notna().sum())))
 
     for table, subset in (("2", "constrained_block_group"), ("2t", "constrained_tract")):
-        add(table, "cover", "Pred. coverage", subset, "pred_covers", mean, True)
+        add(table, "post_cover", "Posterior 90% interval contains published", subset,
+            "covers_published", mean, True)
         add(table, "absz_p90", "|z| p90", subset, "abs_z", quantile(0.90), True)
         add(table, "hw_p50", "Half-width / MOE", subset, "halfwidth_over_moe", quantile(0.50), True)
     for kind, subset in (("rel", "heldout_related_block_group"),
@@ -205,7 +210,7 @@ def scores_statistics(scores: pd.DataFrame) -> list[dict]:
 
 #: Decimals per statistic; "min" is whole minutes, "khat" median [min, max].
 DIGITS = {"fit": "min", "sampling": "min", "total": "min",
-          "cover": 2, "absz_p90": 2, "hw_p50": 2,
+          "post_cover": 2, "absz_p90": 2, "hw_p50": 2,
           "rel_cover": 2, "rel_absz_p90": 2, "less_cover": 2, "less_absz_p90": 2,
           "mdiff_p50": 2, "mdiff_p99": 2, "width_p10": 2, "width_p50": 2, "khat": "khat",
           "walls": 3, "neff_min_p50": 1, "neff_lt": 3, "hhz_gt": 3, "hhz_p50": 2}
@@ -229,14 +234,24 @@ TITLES = {
                   "nodes, HMC on one GPU; county totals are in the CSV."),
     "2": ("Fit to the published block-group constraints",
           "All block-group constraint cells of the four PUMAs pooled; sampled cells only "
-          "(nonzero estimates with a sampling variance). Predictive 90% coverage of the "
-          "published value, mean +- 1.645 sqrt(SE^2 + sd^2); |z| = |mean - published| / SE; "
-          "half-width of the 90% interval over the published MOE, median over cells."),
+          "(nonzero estimates with a sampling variance). Posterior 90% interval contains "
+          "published: the share of cells whose published estimate lies between the 5th and "
+          "95th percentiles of the method's draws. The published values were used in "
+          "fitting, so this describes the fit and has no nominal level: even for the exact "
+          "posterior it depends on how strongly each cell's own estimate determines its "
+          "posterior. |z| = |posterior mean - published| / SE, 90th percentile over cells; "
+          "half-width of the posterior 90% interval over the published MOE, median over "
+          "cells. Calibration of the fitted cells is assessed against the reference "
+          "posterior in Table 4."),
     "2t": ("Fit to the published tract constraints", "As Table 2, for tract cells."),
     "3": ("Held-out block-group accuracy",
           "Held-out ACS tables at block-group level, related and less related to the "
-          "constraints; cells of the four PUMAs pooled, sampled cells only; predictive 90% "
-          "coverage and |z| as in Table 2."),
+          "constraints; cells of the four PUMAs pooled, sampled cells only. Predictive "
+          "coverage: the share of cells whose published estimate lies within posterior mean "
+          "+- 1.645 sqrt(SE^2 + sd^2), adding the survey's sampling error to the posterior's "
+          "uncertainty; |z| as in Table 2. The held-out tables come from the same ACS sample "
+          "as the constraints, so their sampling errors may be correlated with the "
+          "constraints'; coverage above 0.90 may partly reflect that."),
     "4": ("Agreement with the reference HMC",
           "Block-group constraint cells of the four PUMAs pooled. Median diff.: |median - "
           "reference median| in reference sds; width ratio: 90% interval width over the "
