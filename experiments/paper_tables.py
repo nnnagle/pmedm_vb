@@ -17,11 +17,10 @@ experiment. Pooling:
 - Over cells (Tables 2-4): every cell of every PUMA together, so quantiles are
   quantiles of the pooled cells. z and coverage use the *sampled* cells only
   (a nonzero published estimate whose variance is a sampling variance, not a
-  zero cell's modelled one). Table 2 (the published values the model was fitted
-  to) reports whether the posterior 90% interval contains the published value,
-  as a description: in-sample it has no nominal level. Table 3 (held-out) uses
-  predictive coverage: the published value within ``mean +- 1.645 sqrt(SE^2 +
-  sd^2)``.
+  zero cell's modelled one). Coverage, in Tables 2 and 3, is whether the
+  posterior 90% interval (the draws' 5th to 95th percentiles) contains the
+  published value; it has no nominal level, since the interval is for the true
+  count and the published value also carries sampling error.
 - Over draws (Table 5): the draws of every PUMA together; each draw is one
   PUMA's, so "any block group" means any in that PUMA.
 - Not poolable: PSIS k-hat, one value per fit, as the median [min, max] over
@@ -53,7 +52,7 @@ METHODS = [("ipf", "IPF"), ("sinkhorn", "Sinkhorn"), ("map_laplace", "MAP + Lapl
 ALPHAS = (0.01, 0.1, 1.0)
 
 #: Cell columns read from the detail files.
-CELL_COLUMNS = ["method", "puma", "alpha", "subset", "sampled", "abs_z", "pred_covers",
+CELL_COLUMNS = ["method", "puma", "alpha", "subset", "sampled", "abs_z",
                 "covers_published",
                 "halfwidth_over_moe", "median_diff_ref_sd", "width_ratio_ref"]
 CELL_SUBSETS = ("constrained_block_group", "constrained_tract",
@@ -138,7 +137,8 @@ def cell_statistics(cells: pd.DataFrame) -> list[dict]:
     for kind, subset in (("rel", "heldout_related_block_group"),
                          ("less", "heldout_less_related_block_group")):
         name = "Related" if kind == "rel" else "Less related"
-        add("3", f"{kind}_cover", f"{name}: pred. coverage", subset, "pred_covers", mean, True)
+        add("3", f"{kind}_cover", f"{name}: posterior 90% interval contains published", subset,
+            "covers_published", mean, True)
         add("3", f"{kind}_absz_p90", f"{name}: |z| p90", subset, "abs_z", quantile(0.90), True)
     subset = "constrained_block_group"
     add("4", "mdiff_p50", "Median diff. p50", subset, "median_diff_ref_sd", quantile(0.50), False)
@@ -246,12 +246,10 @@ TITLES = {
     "2t": ("Fit to the published tract constraints", "As Table 2, for tract cells."),
     "3": ("Held-out block-group accuracy",
           "Held-out ACS tables at block-group level, related and less related to the "
-          "constraints; cells of the four PUMAs pooled, sampled cells only. Predictive "
-          "coverage: the share of cells whose published estimate lies within posterior mean "
-          "+- 1.645 sqrt(SE^2 + sd^2), adding the survey's sampling error to the posterior's "
-          "uncertainty; |z| as in Table 2. The held-out tables come from the same ACS sample "
-          "as the constraints, so their sampling errors may be correlated with the "
-          "constraints'; coverage above 0.90 may partly reflect that."),
+          "constraints; cells of the four PUMAs pooled, sampled cells only. Posterior 90% "
+          "interval contains published, and |z|, as in Table 2. The interval is for the true "
+          "count, while the published value also carries sampling error, so coverage below "
+          "0.90 is expected even for a correct model."),
     "4": ("Agreement with the reference HMC",
           "Block-group constraint cells of the four PUMAs pooled. Median diff.: |median - "
           "reference median| in reference sds; width ratio: 90% interval width over the "
