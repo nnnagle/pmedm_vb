@@ -321,7 +321,7 @@ def markdown(stats, table, experiments) -> str:
     lines = [f"### Table {table}. {title}", "", "| " + " | ".join(header) + " |",
              "|" + "---|" + "---:|" * (len(header) - 1)]
     for alpha, rows in panels:
-        lines.append(f"| *α = {alpha:g}* |" + " |" * (len(header) - 1))
+        lines.append(f"| $\\alpha = {alpha:g}$ |" + " |" * (len(header) - 1))
         lines += ["| " + " | ".join([label] + values) + " |" for label, values in rows]
     lines += ["", note, ""]
     return "\n".join(lines) + "\n"
