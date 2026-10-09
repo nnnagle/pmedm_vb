@@ -287,6 +287,12 @@ class StructuredGaussian:
         y = y + self.W @ (self.V.T @ y)                   # (I + W V') ...
         return self._block_apply(y, transpose=False)      # L ...
 
+    def whiten(self, x: np.ndarray) -> np.ndarray:
+        """``G' x``, the inverse of :meth:`gaussian_part`: offsets from ``mean``
+        to the standard normal ``eps`` the Gaussian part maps to them."""
+        y = self._block_apply(x, transpose=True)          # L' x
+        return y + self.V @ (self.W.T @ y)                # (I + V W') L' x
+
     def gaussian_part(self, eps: np.ndarray) -> np.ndarray:
         """``G'^{-1} eps``, the zero-mean Gaussian offsets before any skewing."""
         r = self.W.shape[1]
