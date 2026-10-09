@@ -1,6 +1,6 @@
 {
   "name": "exp03_rollup",
-  "description": "Baseline with the structure-aware roll-up at 50 persons / 20 households; raking targets the rolled-up cells.",
+  "description": "Baseline with the structure-aware roll-up at 50 persons / 20 households; raking targets the rolled-up cells. Run at alphas 1 and 0.01 (subset of the grid).",
   "area": {
     "name": "knox",
     "state": "47",
@@ -27,7 +27,7 @@
     "variance_floor": "zero",
     "hierarchy": "puma",
     "rollup": "50h20",
-    "ratio_cap": null,
+    "share_cap": null,
     "cap_strength": null
   },
   "rake": [
@@ -54,5 +54,11 @@
       "checkpoint": 500,
       "seed": 1000
     }
+  },
+  "subset": {
+    "alphas": [
+      1.0,
+      0.01
+    ]
   }
 }

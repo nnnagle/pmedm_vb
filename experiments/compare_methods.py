@@ -46,7 +46,18 @@ directory (``<name>_refsummary.npz``) and reused.
   level. Raking ignores the option.
 - ``p``: per draw, over every (block group, record) cell --
   ``p/q > R`` for ``R`` in ``--ratio``; ``W`` over a share of its block
-  group's total weight in that draw, for shares in ``--bg-share``; ``W`` over
+  group's total weight in that draw, for shares in ``--bg-share``; a household
+  record's ``W`` over the household weight of its block group in that draw (GQ
+  units left out of both), for the same shares, over the block groups with more
+  than ``--hh-min`` published occupied households (``B25003``); over the same
+  block groups, each one's effective number of household records,
+  ``n_eff = 1 / sum_i s_i^2`` with ``s_i`` a record's share of its households
+  (Kish's effective sample size within the block group), as the smallest, p10
+  and median over block groups and the count under each ``--neff-floor``; and
+  the expected number of distinct records among the block group's ``H``
+  published households drawn from those shares, ``D = sum_i 1 - (1 - s_i)^H``
+  (at most ``H``), as the smallest ``D``, the smallest and median ``D / H`` and the
+  count of block groups with ``D / H`` under each ``--distinct-floor``; ``W`` over
   the reference's largest value for that cell (``--reference``); the largest
   cell over 1% and 10% of ``N``; and the p99.9 and max of ``log(p/q)``. Each
   per-draw count or value is summarised over draws: the share of draws with at
@@ -54,6 +65,15 @@ directory (``<name>_refsummary.npz``) and reused.
 - ``joint``: PSIS k-hat (Laplace and VB, which have a density), and with
   ``--whiten`` and ``--reference`` the whitened-coordinate sd ratio and the
   tract/block group pair statistics.
+- ``p`` also carries, per draw, the household consistency of the block groups:
+  the largest ``|z|`` of a block group's allocated occupied households (its
+  ``B25003`` cells summed) against the published total, with the SE from the
+  cells' summed variances under ``--variance-floor`` (covariance ignored), and
+  the counts of block groups beyond 3 and 5.
+- With ``--detail DIR``, ``DIR/<method>_cells.parquet`` (every scored cell's
+  metrics, one row per area and cell) and ``DIR/<method>_draws.parquet`` (every
+  draw's ``p`` statistics), so that pooled statistics -- quantiles over cells
+  included -- can be computed exactly across PUMAs.
 - With ``--by-table``, a second long CSV, one row per ``(method, puma,
   alpha, subset, table, cells, metric, stat)``: the outcome metrics against
   the published values (``z``, ``abs_z``, ``covers_published``,
@@ -108,6 +128,7 @@ from pmedm_vb.solvers.base import ConstraintOperator
 from laplace_diagnostic import batched_f, load_vb
 
 METHODS = ("ipf", "sinkhorn", "map_laplace", "vb_gaussian", "vb_skewed", "vb_sumdiff",
+           "vb_gaussian_trunc", "vb_skewed_trunc", "vb_sumdiff_trunc",
            "hmc_short", "hmc_ref")
 #: 90% interval half-width in standard errors.
 Z90 = 1.645
@@ -130,6 +151,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", type=Path, required=True, help="long CSV to append to")
     parser.add_argument("--by-table", type=Path, default=None,
                         help="also append per-table summaries to this CSV (see module docstring)")
+    parser.add_argument("--detail", type=Path, default=None,
+                        help="a directory for <method>_cells.parquet (every scored cell's "
+                             "metrics) and <method>_draws.parquet (every draw's p statistics), "
+                             "so that statistics can be pooled exactly across PUMAs")
     parser.add_argument("--area", default="knox-2024-5yr")
     parser.add_argument("--score-area", default=None,
                         help="score against this area's tables instead of --area's: same units "
@@ -144,6 +169,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--draws", type=int, default=4000)
     parser.add_argument("--ratio", type=float, nargs="+", default=[10.0, 100.0])
     parser.add_argument("--bg-share", type=float, nargs="+", default=[0.05, 0.25])
+    parser.add_argument("--trunc-distinct", type=float, default=0.1,
+                        help="vb_*_trunc: reject a draw with a block group (over --hh-min "
+                             "published households) whose D / H is under this")
+    parser.add_argument("--trunc-share", type=float, default=0.01,
+                        help="vb_*_trunc: reject a draw with any cell over this share of N")
+    parser.add_argument("--trunc-max-factor", type=int, default=20,
+                        help="vb_*_trunc: give up after drawing this many times --draws")
+    parser.add_argument("--hh-min", type=float, default=100,
+                        help="the household-share counts use block groups with more than this "
+                             "many published occupied households (B25003)")
+    parser.add_argument("--neff-floor", type=float, nargs="+", default=[20, 50],
+                        help="count, per draw, the block groups whose effective number of "
+                             "household records is under each of these")
+    parser.add_argument("--distinct-floor", type=float, nargs="+", default=[0.1, 0.2],
+                        help="count, per draw, the block groups whose expected distinct records "
+                             "per published household, D / H, is under each of these")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--collapse", type=float, default=None,
                         help="collapse each area's zero cells into one and merge small positive "
@@ -153,18 +194,19 @@ def parse_args() -> argparse.Namespace:
                         help="the structure-aware roll-up (pmedm_vb.assemble.rollup) with this "
                              "threshold, PERSONS or PERSONShHOUSEHOLDS (e.g. 15h10); the "
                              "hierarchy level becomes <level>-r<spec>")
-    parser.add_argument("--ratio-cap", type=float, default=None,
-                        help="the soft cap on weight ratios w / (N q) (pmedm_vb.assemble.ratiocap) "
-                             "at this ratio; the hierarchy level gains +cap<ratio>x<strength>")
+    parser.add_argument("--share-cap", type=float, default=None,
+                        help="the soft cap on each cell's share of the population, w / N "
+                             "(pmedm_vb.assemble.sharecap), e.g. 0.005; the hierarchy level gains "
+                             "+share<share>x<strength>")
     parser.add_argument("--cap-strength", type=float, default=None,
-                        help="the cap's strength tau (default 1)")
+                        help="the cap's strength tau (required with --share-cap)")
     args = parser.parse_args()
     from pmedm_vb.assemble.hierarchy import level_name
-    from pmedm_vb.assemble.ratiocap import cap_level
+    from pmedm_vb.assemble.sharecap import cap_level
 
     if getattr(args, "hierarchy", None) is not None:
         args.hierarchy = cap_level(level_name(args.hierarchy, args.collapse, args.rollup),
-                                   args.ratio_cap, args.cap_strength)
+                                   args.share_cap, args.cap_strength)
     return args
 
 
@@ -202,6 +244,54 @@ def check_level(path: Path, saved, level: str) -> None:
 
 
 # -- draws --------------------------------------------------------------------
+
+
+def truncated_draws(args, inputs: PMEDMInputs, rng, h, q) -> tuple[np.ndarray, dict]:
+    """``vb_*_trunc``: draws from ``q`` with those the HMC reference never makes
+    turned away -- any cell over ``--trunc-share`` of N, or any block group over
+    ``--hh-min`` published households whose expected distinct household records
+    per household, ``D / H``, is under ``--trunc-distinct``. Drawn in batches until
+    ``--draws`` are kept or ``--trunc-max-factor`` times that many are spent.
+    Returns the kept draws (solver coordinates) and the acceptance counts."""
+    op = ConstraintOperator(inputs)
+    tenure = [k for k, c in enumerate(inputs.bg_constraints) if c.startswith("B25003.")]
+    hh = ~inputs.units["is_group_quarters"].to_numpy(bool)
+    published = inputs.Y_B[:, tenure].sum(axis=1)
+    zones = published > args.hh_min
+    H = published[zones]
+    log_share = np.log(args.trunc_share)
+    kept, tried, by_share, by_distinct = [], 0, 0, 0
+    batch = max(64, args.draws // 4)
+    while sum(k.shape[1] for k in kept) < args.draws and tried < args.trunc_max_factor * args.draws:
+        xi = q.sample(rng, batch)
+        lam = xi if h.is_trivial else h.lambda_data(xi)
+        keep = np.ones(batch, bool)
+        for d in range(batch):
+            log_p = log_p_of(inputs, op, lam[:, d])
+            if log_p.max() > log_share:
+                keep[d] = False
+                by_share += 1
+                continue
+            if zones.any():
+                w = np.exp(log_p[np.ix_(zones, hh)])
+                s = w / w.sum(axis=1, keepdims=True)
+                if np.any(expected_distinct(s, H) / H < args.trunc_distinct):
+                    keep[d] = False
+                    by_distinct += 1
+        kept.append(xi[:, keep])
+        tried += batch
+    draws = np.concatenate(kept, axis=1)[:, :args.draws]
+    if draws.shape[1] == 0:
+        raise SystemExit(f"truncated VB kept none of {tried} draws: every draw has a cell over "
+                         f"{args.trunc_share:g} of N or a block group under D/H "
+                         f"{args.trunc_distinct:g}")
+    if draws.shape[1] < args.draws:
+        logger.warning("truncated VB kept %d of %d draws after %d tries", draws.shape[1],
+                       args.draws, tried)
+    counts = {"trunc_tried": float(tried), "trunc_kept": float(draws.shape[1]),
+              "trunc_acceptance": float(sum(k.shape[1] for k in kept) / tried),
+              "trunc_rejected_share": float(by_share), "trunc_rejected_distinct": float(by_distinct)}
+    return draws, counts
 
 
 def method_draws(args, inputs: PMEDMInputs, rng, h) -> tuple[dict, dict]:
@@ -249,11 +339,15 @@ def method_draws(args, inputs: PMEDMInputs, rng, h) -> tuple[dict, dict]:
                 timing["vb_seconds"] = timing["fit_seconds"] - timing["map_seconds"]
             timing["converged"] = float(saved["converged"])
         start = time.perf_counter()
-        draws = q.sample(rng, args.draws)
+        if args.method.endswith("_trunc"):
+            draws, counts = truncated_draws(args, inputs, rng, h, q)
+            timing.update(counts)
+        else:
+            draws = q.sample(rng, args.draws)
         timing["draw_seconds"] = time.perf_counter() - start
         return with_lambda(h, draws, q), timing
     # HMC
-    import arviz as az
+    az = compare.import_arviz()
 
     with np.load(args.run / f"{name}_trace.npz") as saved:
         kept = saved["lam"]
@@ -351,8 +445,21 @@ def outcome_sets(inputs: PMEDMInputs, heldout: HeldOut | None) -> list[dict]:
 class Accumulator:
     """Per-draw outcomes and ``p`` statistics, one draw of ``W`` at a time."""
 
-    def __init__(self, inputs, sets, ratios, shares, ref_max_log_share=None):
+    def __init__(self, inputs, sets, ratios, shares, ref_max_log_share=None, hh_min=100,
+                 neff_floors=(20, 50), distinct_floors=(0.1, 0.2)):
         self.inputs, self.sets = inputs, sets
+        self.neff_floors, self.distinct_floors = neff_floors, distinct_floors
+        # Household records, and the block groups with more than hh_min published
+        # occupied households, for each household's share of its block group's
+        # households. None without B25003 among the block group constraints.
+        tenure = [k for k, c in enumerate(inputs.bg_constraints) if c.startswith("B25003.")]
+        if tenure and "is_group_quarters" in inputs.units:
+            self.hh_units = ~inputs.units["is_group_quarters"].to_numpy(bool)
+            published = inputs.Y_B[:, tenure].sum(axis=1)
+            self.hh_zones = published > hh_min
+            self.hh_H = published[self.hh_zones]
+        else:
+            self.hh_units = self.hh_zones = self.hh_H = None
         self.A_T = sp.csr_matrix(inputs.A_T)
         self.X_all = sp.hstack([s["X"] for s in sets]).tocsc()
         self.bounds = np.cumsum([0] + [s["X"].shape[1] for s in sets])
@@ -390,6 +497,25 @@ class Accumulator:
         for share in self.shares:
             row[f"count_bg_share_gt_{share:g}"] = int((share_bg > share).sum())
         row["max_bg_share"] = float(share_bg.max())
+        if self.hh_units is not None and self.hh_zones.any():
+            W_hh = W[np.ix_(self.hh_zones, self.hh_units)]
+            share_hh = W_hh / W_hh.sum(axis=1, keepdims=True)
+            for share in self.shares:
+                row[f"count_hh_share_gt_{share:g}"] = int((share_hh > share).sum())
+            row["max_hh_share"] = float(share_hh.max())
+            n_eff = 1.0 / np.square(share_hh).sum(axis=1)
+            row["min_bg_n_eff"] = float(n_eff.min())
+            row["p10_bg_n_eff"] = float(np.quantile(n_eff, 0.10))
+            row["median_bg_n_eff"] = float(np.median(n_eff))
+            for floor in self.neff_floors:
+                row[f"count_bg_n_eff_lt_{floor:g}"] = int((n_eff < floor).sum())
+            distinct = expected_distinct(share_hh, self.hh_H)
+            per_hh = distinct / self.hh_H
+            row["min_bg_distinct"] = float(distinct.min())
+            row["min_bg_distinct_per_hh"] = float(per_hh.min())
+            row["median_bg_distinct_per_hh"] = float(np.median(per_hh))
+            for floor in self.distinct_floors:
+                row[f"count_bg_distinct_per_hh_lt_{floor:g}"] = int((per_hh < floor).sum())
         row["max_share_of_N"] = float(W.max() / self.inputs.N)
         if self.ref is not None:
             row["count_over_reference_max"] = int((log_p > self.ref).sum())
@@ -402,14 +528,23 @@ class Accumulator:
         return np.stack(self.outcomes[i])  # (draws, areas, cells)
 
 
+def expected_distinct(shares: np.ndarray, H: np.ndarray) -> np.ndarray:
+    """``D_j = sum_i 1 - (1 - s_ij)^H_j``: the expected number of distinct records
+    among ``H_j`` households drawn with replacement from block group ``j``'s
+    shares (rows of ``shares``). At most ``H_j`` and the number of records."""
+    with np.errstate(divide="ignore"):
+        return -np.expm1(H[:, None] * np.log1p(-np.minimum(shares, 1.0))).sum(axis=1)
+
+
 def log_p_of(inputs, op, lam):
     with np.errstate(divide="ignore"):
         logits = np.log(inputs.q) - op.adjoint(lam)
     return logits - logsumexp(logits)
 
 
-def run_draws(inputs, source, sets, ratios, shares, ref_max=None) -> Accumulator:
-    acc = Accumulator(inputs, sets, ratios, shares, ref_max)
+def run_draws(inputs, source, sets, ratios, shares, ref_max=None, hh_min=100,
+              neff_floors=(20, 50), distinct_floors=(0.1, 0.2)) -> Accumulator:
+    acc = Accumulator(inputs, sets, ratios, shares, ref_max, hh_min, neff_floors, distinct_floors)
     if "W" in source:
         with np.errstate(divide="ignore"):
             acc.add(np.log(source["W"] / source["W"].sum()), W=source["W"])
@@ -464,6 +599,46 @@ def _ref_metrics(out: dict, summary: dict, draws: np.ndarray, ref: dict) -> dict
     return out
 
 
+def cell_frame(base: dict, s: dict, shape: tuple, metrics: dict[str, np.ndarray]) -> pd.DataFrame:
+    """One subset's per-cell metrics, one row per (area, cell), for ``--detail``."""
+    n_areas, k = shape
+    frame = pd.DataFrame({key: base[key] for key in ("method", "puma", "alpha")}, index=range(n_areas * k))
+    frame["subset"] = s["subset"]
+    frame["area"] = np.repeat(np.arange(n_areas), k).astype(np.int32)
+    names = s.get("names")
+    frame["cell"] = np.tile(np.asarray(names if names is not None else [str(c) for c in range(k)]),
+                            n_areas)
+    if s.get("Y") is not None:
+        frame["published"] = np.asarray(s["Y"], dtype=np.float32).ravel()
+        frame["sampled"] = np.asarray(s["sampled"], dtype=bool).ravel()
+    for metric, values in metrics.items():
+        frame[metric] = np.asarray(values, dtype=np.float32)
+    return frame
+
+
+def household_consistency(inputs, sets, acc, variance_floor) -> dict[str, np.ndarray] | None:
+    """Per draw, the largest |z| of a block group's allocated occupied households
+    (its B25003 cells summed) against the published total, with the SE the square
+    root of the cells' summed variances under the model's variance floor (their
+    covariance ignored); and the published households of that block group."""
+    tenure = [k for k, c in enumerate(inputs.bg_constraints) if c.startswith("B25003.")]
+    index = next((i for i, s in enumerate(sets) if s["subset"] == "constrained_block_group"), None)
+    if not tenure or index is None:
+        return None
+    n_zones = inputs.Y_B.shape[0]
+    rows = inputs.Y_T.size + np.array(tenure)[None, :] * n_zones + np.arange(n_zones)[:, None]
+    variance = inputs.floored_variances(floor_spec(variance_floor))
+    published = inputs.Y_B[:, tenure].sum(axis=1)
+    se = np.sqrt(variance[rows].sum(axis=1))
+    allocated = acc.draws(index)[:, :, tenure].sum(axis=2)          # (draws, zones)
+    z = (allocated - published[None, :]) / se[None, :]
+    worst = np.argmax(np.abs(z), axis=1)
+    return {"max_abs_hh_z": np.abs(z).max(axis=1),
+            "max_abs_hh_z_published": published[worst],
+            "count_hh_abs_z_gt_3": (np.abs(z) > 3).sum(axis=1),
+            "count_hh_abs_z_gt_5": (np.abs(z) > 5).sum(axis=1)}
+
+
 # -- reference ----------------------------------------------------------------
 
 
@@ -484,7 +659,8 @@ def reference_summaries(args, inputs, sets):
                              for i in range(len(sets))]
                 return summaries, saved["max_log_share"], lam, xi
     logger.info("summarising the reference %s (cached for next time)", args.reference)
-    acc = run_draws(inputs, {"lam": lam}, sets, args.ratio, args.bg_share)
+    acc = run_draws(inputs, {"lam": lam}, sets, args.ratio, args.bg_share, hh_min=args.hh_min,
+                    neff_floors=args.neff_floor, distinct_floors=args.distinct_floor)
     summaries = [cell_summary(acc.draws(i)) for i in range(len(sets))]
     np.savez(cache, max_log_share=acc.max_log_share,
              **{f"{i}_{k}": v for i, s in enumerate(summaries) for k, v in s.items()})
@@ -732,30 +908,41 @@ def main() -> None:
     ref_summaries = ref_max = ref_lam = ref_xi = None
     if args.reference is not None and args.method != "hmc_ref":
         ref_summaries, ref_max, ref_lam, ref_xi = reference_summaries(args, inputs, sets)
-    acc = run_draws(inputs, source, sets, args.ratio, args.bg_share, ref_max)
+    acc = run_draws(inputs, source, sets, args.ratio, args.bg_share, ref_max, args.hh_min,
+                    args.neff_floor, args.distinct_floor)
 
     base = dict(method=args.method, puma=args.puma, alpha=args.alpha,
                 n_draws=len(acc.p_rows))
     rows = [dict(base, subset="timing", metric=k, stat="value", value=float(v))
             for k, v in timing.items()]
 
-    table_rows = []
+    table_rows, cell_frames = [], []
     for i, s in enumerate(sets):
         metrics = outcome_metrics(acc.draws(i), s, ref_summaries[i] if ref_summaries else None)
         for metric, values in metrics.items():
             rows += rows_for(base, s["subset"], metric, values, CELL_STATS)
+        if args.detail is not None:
+            cell_frames.append(cell_frame(base, s, acc.draws(i).shape[1:], metrics))
         if args.by_table is not None and s["Y"] is not None:
             table_rows += by_table_rows(base, s, metrics)
             table_rows += distribution_rows(base, s, metrics["mean"].reshape(s["Y"].shape),
                                             metrics)
 
     p = pd.DataFrame(acc.p_rows)
+    consistency = household_consistency(inputs, sets, acc, args.variance_floor)
+    if consistency is not None:
+        for column, values in consistency.items():
+            p[column] = values
     for column in p.columns:
         values = p[column].to_numpy(float)
         if column.startswith("count_"):
             rows.append(dict(base, subset="p", metric=column, stat="share_of_draws_any",
                              value=float((values > 0).mean())))
-        rows += rows_for(base, "p", column, values, DRAW_STATS)
+        # A diversity measure's bad side is its low end: its lower quantiles too.
+        low = (column.endswith(("_n_eff", "_distinct", "_distinct_per_hh"))
+               and not column.startswith("count_"))
+        rows += rows_for(base, "p", column, values, (0.0, 0.01, 0.10) + DRAW_STATS if low
+                         else DRAW_STATS)
     for share in (0.01, 0.10):
         rows.append(dict(base, subset="p", metric=f"largest_cell_gt_{share:g}_of_N",
                          stat="share_of_draws", value=float((p["max_share_of_N"] > share).mean())))
@@ -792,6 +979,12 @@ def main() -> None:
 
     rows.append(dict(base, subset="timing", metric="scoring_seconds", stat="value",
                      value=time.perf_counter() - started))
+    if args.detail is not None:
+        args.detail.mkdir(parents=True, exist_ok=True)
+        pd.concat(cell_frames, ignore_index=True).to_parquet(
+            args.detail / f"{args.method}_cells.parquet", index=False, compression="zstd")
+        p.assign(**base, draw=np.arange(len(p))).to_parquet(
+            args.detail / f"{args.method}_draws.parquet", index=False, compression="zstd")
     frame = pd.DataFrame(rows)[["method", "puma", "alpha", "n_draws", "subset", "metric",
                                 "stat", "value"]]
     frame.to_csv(args.out, mode="a", header=not args.out.exists(), index=False)

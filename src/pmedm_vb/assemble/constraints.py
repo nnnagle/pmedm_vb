@@ -478,22 +478,24 @@ def age_sex(
     boundaries: Sequence[int] | None = None,
     geography: str = "block group",
 ) -> ConstraintTable:
-    """``B01001``: sex crossed with collapsed age bands, over persons.
+    """``B01001``: sex crossed with age bands, over persons.
 
-    ``boundaries`` are the collapsed breaks, each of which **must** be one
-    ``B01001`` publishes -- a collapse is exact only where it merges whole
-    published cells, and no break inside one can be recovered. Passing ``None``
-    uses :func:`b01001_boundaries`, the preferred bands snapped onto this
-    table: 0-4, 5-14, 15-17, 18-34, 35-49, 50-64, 65+.
+    ``boundaries`` are the age breaks, each of which **must** be one ``B01001``
+    publishes -- a collapse is exact only where it merges whole published
+    cells, and no break inside one can be recovered. Passing ``None`` (the
+    constraint set's choice) keeps every published break: the table as
+    published, 23 age bands per sex. Passing :func:`b01001_boundaries` gives
+    the earlier collapse, the preferred bands snapped onto this table: 0-4,
+    5-14, 15-17, 18-34, 35-49, 50-64, 65+.
 
-    Two requested splits are not available here, and neither is approximated
-    silently. A break at 14 falls inside the published 10-14 cell, so the
-    preferred 5-13 / 14-17 becomes 5-14 / 15-17 -- one year off, with the split
-    preserved. A break at 6, wanted to separate preschool from school-age
-    children, falls inside "5 to 9 years" and has no near alternative at all;
-    0-4 is the closest exact band. Category names are generated from the
-    boundaries actually used, so they cannot describe a band the cells do not
-    contain.
+    In that collapse two requested splits are not available, and neither is
+    approximated silently. A break at 14 falls inside the published 10-14
+    cell, so the preferred 5-13 / 14-17 becomes 5-14 / 15-17 -- one year off,
+    with the split preserved. A break at 6, wanted to separate preschool from
+    school-age children, falls inside "5 to 9 years" and has no near
+    alternative at all; 0-4 is the closest exact band. Category names are
+    generated from the boundaries actually used, so they cannot describe a band
+    the cells do not contain.
 
     Which cells make up each band is *derived* from :data:`B01001_BANDS` rather
     than written out, for the reason given on :func:`household_income`: a
@@ -506,9 +508,9 @@ def age_sex(
     by ``PWGTP``; weighting by ``WGTP`` alone would leave those people
     unplaceable while the published counts still included them.
     """
-    if boundaries is None:
-        boundaries = b01001_boundaries()
     published_edges = {upper for _, upper in B01001_BANDS if upper is not None}
+    if boundaries is None:
+        boundaries = sorted(published_edges)
     unknown = sorted(set(boundaries) - published_edges)
     if unknown:
         raise ValueError(

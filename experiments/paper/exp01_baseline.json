@@ -27,7 +27,7 @@
     "variance_floor": "zero",
     "hierarchy": "puma",
     "rollup": null,
-    "ratio_cap": null,
+    "share_cap": null,
     "cap_strength": null
   },
   "rake": [

@@ -24,12 +24,13 @@ from pmedm_vb.data.variance import (
     POPULATION_TABLE,
     SUMMARY_LEVELS,
     average_weight,
+    download_national_replicates,
     download_replicates,
 )
 from pmedm_vb.progress import stage
 
 
-def prefetch(area: StudyArea, tables: Sequence) -> list[Path]:
+def prefetch(area: StudyArea, tables: Sequence, national: Sequence[str] = ()) -> list[Path]:
     """Fetch every file :func:`~pmedm_vb.assemble.build.build_all` reads.
 
     Parameters
@@ -37,6 +38,9 @@ def prefetch(area: StudyArea, tables: Sequence) -> list[Path]:
     tables:
         The :class:`~pmedm_vb.assemble.constraints.ConstraintTable` set the run
         will use; one replicate file is fetched per table and geography.
+    national:
+        Table ids whose national (summary level 010) replicate file is fetched
+        too, for ``experiments/table_trees.py``, so that it can run offline.
 
     Returns
     -------
@@ -59,5 +63,7 @@ def prefetch(area: StudyArea, tables: Sequence) -> list[Path]:
         wanted |= {(table.table, table.geography) for table in tables}
         for table, level in sorted(wanted):
             paths.append(download_replicates(area, table, geography=level))
+        for table in sorted(set(national)):
+            paths.append(download_national_replicates(area, table))
         step.detail = f"{len(paths)} data files"
     return paths

@@ -97,6 +97,59 @@ class Ratios:
         self.x_t = inputs.X_T.tocsr()
         self.x_b = inputs.X_B.tocsr()
         self.zone_tract = inputs.zone_tracts()
+        # Household size: the unit's B01001 (sex by age) counts, which cover every member.
+        age_sex = [k for k, c in enumerate(inputs.bg_constraints) if c.startswith("B01001.")]
+        self.size = (np.asarray(inputs.X_B.tocsc()[:, age_sex].sum(axis=1)).ravel()
+                     if age_sex else np.full(inputs.n_units, np.nan))
+        self.gq = inputs.units["is_group_quarters"].to_numpy(bool) \
+            if "is_group_quarters" in inputs.units else np.zeros(inputs.n_units, bool)
+        self.band = np.digitize(self.size, [s for s, _ in SIZE_BANDS[1:]])
+        # Block-group diversity: household records only, in the block groups with more
+        # than HH_MIN published occupied households (B25003); None without B25003.
+        tenure = [k for k, c in enumerate(inputs.bg_constraints) if c.startswith("B25003.")]
+        self.hh = ~self.gq
+        published = inputs.Y_B[:, tenure].sum(axis=1) if tenure else None
+        self.hh_zones = (published > HH_MIN) if tenure else None
+        self.hh_H = published[self.hh_zones] if tenure else None
+
+    def bg_diversity(self, log_p: np.ndarray) -> dict:
+        """Per draw: each large block group's effective number of household records,
+        ``n_eff = 1 / sum s^2`` over the records' shares ``s`` of its households; the
+        smallest, which block group it is, how much of its ``sum s^2`` the top record
+        makes (``dominance``: 1 when one record is all of it, near 0 when many share
+        it), and the largest household share anywhere."""
+        if self.hh_zones is None or not self.hh_zones.any():
+            return {}
+        zones = np.flatnonzero(self.hh_zones)
+        lp = log_p[np.ix_(zones, self.hh)]
+        w = np.exp(lp - lp.max(axis=1, keepdims=True))
+        s = w / w.sum(axis=1, keepdims=True)
+        sum_sq = np.square(s).sum(axis=1)
+        n_eff, top = 1.0 / sum_sq, s.max(axis=1)
+        j = int(np.argmin(n_eff))
+        # Expected distinct records among the block group's H published households
+        # drawn from its shares: sum_i 1 - (1 - s_i)^H, at most H.
+        with np.errstate(divide="ignore"):
+            distinct = -np.expm1(self.hh_H[:, None] * np.log1p(-np.minimum(s, 1.0))).sum(axis=1)
+        per_hh = distinct / self.hh_H
+        k = int(np.argmin(per_hh))
+        return dict(min_bg_n_eff=float(n_eff[j]), min_bg_zone=int(zones[j]),
+                    min_bg_distinct_per_hh=float(per_hh[k]), min_bg_distinct=float(distinct[k]),
+                    min_distinct_zone=int(zones[k]),
+                    median_bg_distinct_per_hh=float(np.median(per_hh)),
+                    bgs_distinct_per_hh_lt_0_2=int((per_hh < 0.2).sum()),
+                    min_bg_top_share=float(top[j]),
+                    min_bg_dominance=float(top[j] ** 2 / sum_sq[j]),
+                    median_bg_n_eff=float(np.median(n_eff)),
+                    bgs_n_eff_lt_50=int((n_eff < 50).sum()),
+                    max_hh_share=float(top.max()))
+
+    def band_max_share(self, log_p: np.ndarray) -> dict:
+        """The largest share of N held by any cell of each household-size band."""
+        cell = np.where(self.support, log_p, -np.inf).max(axis=0)            # per unit
+        return {f"max_share_{label}": float(np.exp(cell[self.band == b].max()))
+                if (self.band == b).any() else np.nan
+                for b, (_, label) in enumerate(SIZE_BANDS)}
 
     def log_ratio(self, lam: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
         """``(l, log p, log Z)``, the first two as ``(n_zones, n_units)``."""
@@ -115,6 +168,14 @@ class Ratios:
                                self.inputs.Y_T.size + row_b.indices * n_zones + zone])
         x = np.concatenate([row_t.data, row_b.data])
         return rows, -x * lam[rows]
+
+
+#: Block groups with more than this many published occupied households enter the
+#: block-group diversity measures.
+HH_MIN = 100
+
+#: Household-size bands for the per-band largest share: (lower size, label).
+SIZE_BANDS = ((0, "s1"), (2, "s2"), (3, "s3_4"), (5, "s5_6"), (7, "s7plus"))
 
 
 def fits_in(run: Path, family: str):
@@ -141,6 +202,8 @@ def analyse(ratios: Ratios, key: dict, source: str, lam_draws: np.ndarray, map_l
             draw_rows.append(dict(**key, source="map", draw=-1,
                                   wall=bool(np.exp(log_p_map[ratios.support].max()) > args.wall),
                                   max_log_ratio=float(l_map[ratios.support].max()),
+                                  **ratios.band_max_share(log_p_map),
+                                  **ratios.bg_diversity(log_p_map),
                                   **{f"over_{b:g}": int((l_map > lb).sum())
                                      for b, lb in zip(args.bounds, log_bounds)}))
     for d in range(lam_draws.shape[1]):
@@ -153,6 +216,10 @@ def analyse(ratios: Ratios, key: dict, source: str, lam_draws: np.ndarray, map_l
                               top_log_ratio=float(l[zone, unit]),
                               top_share=float(np.exp(log_p[zone, unit])),
                               top_log_q_offset=float(ratios.log_q[zone, unit] - ratios.median_log_q),
+                              top_zone=int(zone), top_unit=int(unit),
+                              top_size=float(ratios.size[unit]), top_gq=bool(ratios.gq[unit]),
+                              **ratios.band_max_share(log_p),
+                              **ratios.bg_diversity(log_p),
                               **{f"over_{b:g}": int((l > lb).sum())
                                  for b, lb in zip(args.bounds, log_bounds)}))
         rows, terms = ratios.terms(zone, unit, lam)
@@ -225,6 +292,55 @@ def main() -> None:
     write_report(args, draws, drivers)
 
 
+def diversity_lines(draws: pd.DataFrame, order: list[str]) -> list[str]:
+    """Block-group diversity by group, and how it goes with walls, per fit."""
+    lines = [f"\nBlock-group diversity (households only, block groups over {HH_MIN} published "
+             "households): per draw, the smallest n_eff = 1 / sum s^2 over block groups; "
+             "dominance = the top record's part of that block group's sum s^2 (1: one record "
+             "makes the low n_eff; near 0: many share it); D/H = expected distinct records among "
+             "the block group's H published households drawn from its shares, per household "
+             "(at most 1). Medians, and p10/p1 of the smallest:"]
+    agg = draws.groupby("group").agg(
+        draws=("min_bg_n_eff", "size"),
+        min_neff_p50=("min_bg_n_eff", "median"),
+        min_neff_p10=("min_bg_n_eff", lambda x: x.quantile(0.10)),
+        min_neff_p1=("min_bg_n_eff", lambda x: x.quantile(0.01)),
+        median_neff=("median_bg_n_eff", "median"),
+        bgs_under_50=("bgs_n_eff_lt_50", "mean"),
+        dominance_p50=("min_bg_dominance", "median"),
+        min_D_per_hh_p50=("min_bg_distinct_per_hh", "median"),
+        min_D_per_hh_p1=("min_bg_distinct_per_hh", lambda x: x.quantile(0.01)),
+        median_D_per_hh=("median_bg_distinct_per_hh", "median"),
+        bgs_D_per_hh_under_0p2=("bgs_distinct_per_hh_lt_0_2", "mean"),
+        top_share_p50=("min_bg_top_share", "median"),
+        max_hh_share_p50=("max_hh_share", "median"))
+    lines.append(agg.reindex([g for g in order if g in agg.index]).round(3).to_string())
+    lines.append("\nDo low-n_eff draws have walls? Per fit and source: draws, wall share among draws "
+                 "whose smallest n_eff is under 50 and over it (and whose smallest D/H is under "
+                 "0.2), the rank correlations of the "
+                 "largest cell's share of N with the smallest n_eff, and the share of wall draws "
+                 "whose wall is in the least diverse block group:")
+    rows = []
+    for (puma, alpha, level, source), part in draws[draws.source != "map"].groupby(
+            ["puma", "alpha", "level", "source"], sort=True):
+        low = part.min_bg_n_eff < 50
+        low_d = part.min_bg_distinct_per_hh < 0.2
+        walls = part[part.wall]
+        rows.append(dict(puma=puma, alpha=alpha, source=source, draws=len(part),
+                         low_draws=int(low.sum()),
+                         wall_if_low=part.wall[low].mean() if low.any() else np.nan,
+                         wall_if_not=part.wall[~low].mean() if (~low).any() else np.nan,
+                         spearman=part.top_share.corr(part.min_bg_n_eff, method="spearman"),
+                         low_D_draws=int(low_d.sum()),
+                         wall_if_low_D=part.wall[low_d].mean() if low_d.any() else np.nan,
+                         spearman_D=part.top_share.corr(part.min_bg_distinct_per_hh,
+                                                        method="spearman"),
+                         wall_in_min_bg=(walls.top_zone == walls.min_bg_zone).mean()
+                         if len(walls) else np.nan))
+    lines.append(pd.DataFrame(rows).round(3).to_string(index=False))
+    return lines
+
+
 def group_of(frame: pd.DataFrame) -> pd.Series:
     return np.where(frame.source == "map", "MAP",
                     np.where(frame.source == "hmc", np.where(frame.wall, "HMC, wall", "HMC, no wall"),
@@ -253,6 +369,22 @@ def write_report(args, draws: pd.DataFrame, drivers: pd.DataFrame) -> None:
     cells = draws[draws.source != "map"].groupby("group")[
         ["top_log_ratio", "top_share", "top_log_q_offset"]].median()
     lines.append(cells.reindex([g for g in order if g in cells.index]).round(4).to_string())
+    if "top_size" in draws:
+        lines.append("\nHousehold size of each draw's largest cell (persons; a GQ person is 1), by group:")
+        sized = draws[draws.source != "map"]
+        sizes = sized.groupby("group")["top_size"].describe(percentiles=[0.1, 0.5, 0.9])
+        lines.append(sizes.reindex([g for g in order if g in sizes.index]).round(2).to_string())
+        bands = [f"max_share_{label}" for _, label in SIZE_BANDS]
+        lines.append("\nLargest share of N (%) held by any cell of each household-size band, per draw "
+                     "-- median and p99 over draws (MAP: its one value):")
+        for stat, fn in (("median", "median"), ("p99", lambda x: x.quantile(0.99))):
+            table = (100 * draws.groupby("group")[bands].agg(fn)).round(4)
+            table.columns = [b.removeprefix("max_share_") for b in bands]
+            lines.append(f"   {stat}:")
+            lines += ["     " + r for r in
+                      table.reindex([g for g in order if g in table.index]).to_string().splitlines()]
+    if "min_bg_n_eff" in draws:
+        lines += diversity_lines(draws, order)
     if not drivers.empty:
         drivers = drivers.assign(group=group_of(drivers))
         lines.append(f"\nTop driver of each draw's largest cell (the row whose term -x lambda grew most "

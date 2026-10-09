@@ -2,7 +2,7 @@
 
 An experiment is a JSON file (``experiments/paper/expNN_<name>.json``): the
 study area, PUMAs and alphas, the model (taper, variance floor, hierarchy,
-roll-up, ratio cap), the raking methods, the VB families and the HMC settings.
+roll-up, share cap), the raking methods, the VB families and the HMC settings.
 Everything it produces lives under ``<root>/<name>``::
 
     <root>/<name>/
@@ -63,7 +63,7 @@ DEFAULT_ROOT = Path("/lustre/isaac24/proj/UTK0496/pmedm_vb_runs/paper")
 #: Slurm options per stage, on top of each script's header.
 RAKE_SLURM = ["--partition=short", "--qos=short", "--time=01:00:00", "--cpus-per-task=4"]
 FITS_SLURM = ["--cpus-per-task=48"]
-HMC_SLURM: list[str] = []
+HMC_SLURM = ["--time=24:00:00"]
 GPU_PARTITION = "campus-gpu"
 
 #: Keys whose difference does not make a different experiment.
@@ -91,6 +91,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_experiment(path: Path) -> dict:
+    """The experiment, with ``pumas`` and ``alphas`` narrowed to its ``subset``.
+
+    ``pumas`` and ``alphas`` are the experiment's grid; an optional ``subset``
+    (``{"pumas": [...], "alphas": [...]}``, each a subset of the grid) is what is
+    run, scored and tabled. The grid is kept as ``_grid``: it is what tells one
+    experiment from another (so a subset of an experiment run on the whole grid
+    reuses its fits), and it fixes the HMC seeds, which therefore do not depend
+    on the subset.
+    """
     spec = json.loads(path.read_text())
     for key in ("name", "area", "pumas", "alphas", "model", "data_dir", "rake", "vb_families",
                 "hmc"):
@@ -98,12 +107,32 @@ def load_experiment(path: Path) -> dict:
             raise SystemExit(f"{path}: missing '{key}'")
     if "skewed" not in spec["vb_families"] and spec["hmc"]:
         raise SystemExit(f"{path}: HMC is whitened by the skewed VB fit; add 'skewed' to vb_families")
+    spec["_grid"] = {"pumas": list(spec["pumas"]), "alphas": list(spec["alphas"])}
+    subset = spec.get("subset") or {}
+    for key in ("pumas", "alphas"):
+        if key in subset:
+            extra = [v for v in subset[key] if v not in spec[key]]
+            if extra:
+                raise SystemExit(f"{path}: subset {key} {extra} not in the grid's {key}")
+            spec[key] = [v for v in spec[key] if v in subset[key]]
     return spec
 
 
+def grid(spec: dict) -> dict:
+    """The experiment's whole grid of PUMAs and alphas (a folder's record may predate ``_grid``)."""
+    return spec.get("_grid") or {"pumas": spec["pumas"], "alphas": spec["alphas"]}
+
+
 def comparable(spec: dict) -> dict:
-    return {key: value for key, value in spec.items()
-            if key not in FREE_KEYS and not key.startswith("_")}
+    """The spec without its free keys, and without unset (``null``) model options,
+    so an option added or renamed later does not tell apart folders that never
+    set it."""
+    out = {key: value for key, value in spec.items()
+           if key not in FREE_KEYS and key != "subset" and not key.startswith("_")}
+    out.update(grid(spec))
+    if isinstance(out.get("model"), dict):
+        out["model"] = {k: v for k, v in out["model"].items() if v is not None}
+    return out
 
 
 def git_commit() -> str:
@@ -131,11 +160,11 @@ def data_dir(spec: dict) -> Path:
 def level(spec: dict) -> str:
     """The hierarchy level string that names the MAP, VB and HMC results."""
     from pmedm_vb.assemble.hierarchy import level_name
-    from pmedm_vb.assemble.ratiocap import cap_level
+    from pmedm_vb.assemble.sharecap import cap_level
 
     model = spec["model"]
     return cap_level(level_name(model["hierarchy"], None, model.get("rollup")),
-                     model.get("ratio_cap"), model.get("cap_strength"))
+                     model.get("share_cap"), model.get("cap_strength"))
 
 
 def fit_name(spec: dict, puma: str, alpha: float) -> str:
@@ -151,10 +180,9 @@ def model_args(spec: dict) -> list[str]:
             "--hierarchy", model["hierarchy"]]
     if model.get("rollup"):
         args += ["--rollup", str(model["rollup"])]
-    if model.get("ratio_cap") is not None:
-        args += ["--ratio-cap", f"{model['ratio_cap']:g}"]
-        if model.get("cap_strength") is not None:
-            args += ["--cap-strength", f"{model['cap_strength']:g}"]
+    if model.get("share_cap") is not None:
+        args += ["--share-cap", f"{model['share_cap']:g}",
+                 "--cap-strength", f"{model['cap_strength']:g}"]
     return args
 
 
@@ -346,8 +374,9 @@ def hmc_spec_lines(spec: dict, exp: Path, puma: str) -> list[str]:
     lines = []
     for kind, alpha, out in hmc_runs(spec, exp, puma):
         settings = hmc[kind]
-        seed = (settings["seed"] + 10 * spec["pumas"].index(puma)
-                + spec["alphas"].index(alpha))
+        full = grid(spec)
+        seed = (settings["seed"] + 10 * full["pumas"].index(puma)
+                + full["alphas"].index(alpha))
         args = ["--puma", puma, "--alpha", f"{alpha:g}", *model_args(spec),
                 "--area", area_slug(spec["area"]), "--vb-run", str(exp / puma / "vb_skewed"),
                 "--trajectory", f"{hmc['trajectory']:g}", "--chains", str(hmc["chains"]),
@@ -417,36 +446,66 @@ def live(active: dict, key: tuple) -> str:
     return f"job {job['job_id']} {job['state'].lower()}" if job else "-"
 
 
+def active_for(exp: Path) -> dict:
+    """The experiment's last job per (stage, PUMA, method), where still queued or running."""
+    jobs = latest_jobs(read_jobs(exp))
+    states = active_jobs([job["job_id"] for job in jobs.values()])
+    return {key: {**job, "state": states[job["job_id"]]}
+            for key, job in jobs.items() if job["job_id"] in states}
+
+
+def is_complete(spec: dict, exp: Path) -> bool:
+    """Whether every raking, MAP, VB and HMC output exists."""
+    for puma in spec["pumas"]:
+        paths = [rake_output(spec, exp, puma, m) for m in spec["rake"]] + fit_outputs(spec, exp, puma)
+        if spec["hmc"]:
+            paths += hmc_outputs(spec, exp, puma)
+        if not all(path.exists() for path in paths):
+            return False
+    return True
+
+
+def advance(spec: dict, root: Path, stages=("rake", "fits", "hmc"), max_gpu_jobs: int = 6,
+            dry_run: bool = False) -> int:
+    """Submit, for every PUMA, whatever is neither finished nor queued or running; the
+    number of jobs submitted. A refused ``sbatch`` (a queue limit) ends the call
+    early, keeping what was submitted: the next call goes on from there."""
+    exp = root / spec["name"]
+    active = active_for(exp)
+    problems = check_inputs(spec)
+    if problems:
+        print("the data directory is not ready:\n  " + "\n  ".join(problems))
+        if not dry_run:
+            return 0
+    prepare(exp, spec, dry_run)
+    sub = Submitter(exp, spec, dry_run)
+    slots = [max_gpu_jobs - gpu_jobs_in_queue()]
+    try:
+        for puma in spec["pumas"]:
+            print(f"{puma}:")
+            if "rake" in stages:
+                stage_rake(sub, spec, exp, puma, active)
+            fits_job = (stage_fits(sub, spec, exp, puma, active) if "fits" in stages
+                        else (active.get(("fits", puma, None)) or {}).get("job_id"))
+            if "hmc" in stages and spec["hmc"]:
+                stage_hmc(sub, spec, exp, puma, active, fits_job, slots)
+    except SystemExit as error:
+        print(f"stopped early: {error}")
+    return sub.count
+
+
 def main() -> None:
     args = parse_args()
     spec = load_experiment(args.experiment)
     exp = args.root / spec["name"]
-    jobs = latest_jobs(read_jobs(exp))
-    states = active_jobs([job["job_id"] for job in jobs.values()])
-    active = {key: {**job, "state": states[job["job_id"]]}
-              for key, job in jobs.items() if job["job_id"] in states}
     if args.status:
-        status(spec, exp, active)
+        status(spec, exp, active_for(exp))
         return
-
-    problems = check_inputs(spec)
-    if problems:
-        print("the data directory is not ready:\n  " + "\n  ".join(problems))
-        if not args.dry_run:
-            raise SystemExit(1)
-    prepare(exp, spec, args.dry_run)
-    sub = Submitter(exp, spec, args.dry_run)
-    slots = [args.max_gpu_jobs - gpu_jobs_in_queue()]
-    for puma in spec["pumas"]:
-        print(f"{puma}:")
-        if "rake" in args.stage:
-            stage_rake(sub, spec, exp, puma, active)
-        fits_job = (stage_fits(sub, spec, exp, puma, active) if "fits" in args.stage
-                    else (active.get(("fits", puma, None)) or {}).get("job_id"))
-        if "hmc" in args.stage and spec["hmc"]:
-            stage_hmc(sub, spec, exp, puma, active, fits_job, slots)
-    print(f"{sub.count} job(s) {'would be ' if args.dry_run else ''}submitted; "
-          f"see --status")
+    if check_inputs(spec) and not args.dry_run:
+        print("the data directory is not ready:\n  " + "\n  ".join(check_inputs(spec)))
+        raise SystemExit(1)
+    count = advance(spec, args.root, args.stage, args.max_gpu_jobs, args.dry_run)
+    print(f"{count} job(s) {'would be ' if args.dry_run else ''}submitted; see --status")
 
 
 if __name__ == "__main__":

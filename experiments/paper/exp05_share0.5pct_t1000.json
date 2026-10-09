@@ -1,6 +1,6 @@
 {
-  "name": "exp07_cap5000x10",
-  "description": "Baseline with the ratio cap: ratio 5000, strength 10.",
+  "name": "exp05_share0.5pct_t1000",
+  "description": "Baseline with the share cap: each cell's weight held under 0.5% of N (w / N <= 0.005), strength 1000.",
   "area": {
     "name": "knox",
     "state": "47",
@@ -27,8 +27,8 @@
     "variance_floor": "zero",
     "hierarchy": "puma",
     "rollup": null,
-    "ratio_cap": 5000,
-    "cap_strength": 10
+    "share_cap": 0.005,
+    "cap_strength": 1000
   },
   "rake": [
     "ipf",

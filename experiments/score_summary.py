@@ -30,12 +30,14 @@ import numpy as np
 import pandas as pd
 
 ORDER = ["ipf", "sinkhorn", "map_laplace", "vb_gaussian", "vb_skewed", "vb_sumdiff",
+         "vb_gaussian_trunc", "vb_skewed_trunc", "vb_sumdiff_trunc",
          "hmc_short", "hmc_ref"]
 
 #: (label, subset, metric, stat)
 HEADLINE = [
     ("fit_s", "timing", "fit_seconds", "value"),
     ("hmc_s", "timing", "hmc_seconds", "value"),
+    ("trunc_acc", "timing", "trunc_acceptance", "value"),
     ("bg_cover", "constrained_block_group", "covers_published", "mean"),
     ("bg_absz_p90", "constrained_block_group", "abs_z", "p90"),
     ("tr_absz_p90", "constrained_tract", "abs_z", "p90"),
@@ -52,6 +54,18 @@ HEADLINE = [
     ("gt1%N", "p", "largest_cell_gt_0.01_of_N", "share_of_draws"),
     ("gt10%N", "p", "largest_cell_gt_0.1_of_N", "share_of_draws"),
     ("bg25%_any", "p", "count_bg_share_gt_0.25", "share_of_draws_any"),
+    ("hh5%_any", "p", "count_hh_share_gt_0.05", "share_of_draws_any"),
+    ("hh_max_p99", "p", "max_hh_share", "p99"),
+    ("neff_min_p50", "p", "min_bg_n_eff", "p50"),
+    ("neff_min_p1", "p", "min_bg_n_eff", "p1"),
+    ("neff_med_p50", "p", "median_bg_n_eff", "p50"),
+    ("neff<20_any", "p", "count_bg_n_eff_lt_20", "share_of_draws_any"),
+    ("neff<50_any", "p", "count_bg_n_eff_lt_50", "share_of_draws_any"),
+    ("D/H_min_p50", "p", "min_bg_distinct_per_hh", "p50"),
+    ("D/H_min_p1", "p", "min_bg_distinct_per_hh", "p1"),
+    ("D/H_med_p50", "p", "median_bg_distinct_per_hh", "p50"),
+    ("D/H<0.1_any", "p", "count_bg_distinct_per_hh_lt_0.1", "share_of_draws_any"),
+    ("D/H<0.2_any", "p", "count_bg_distinct_per_hh_lt_0.2", "share_of_draws_any"),
     ("maxN_p99", "p", "max_share_of_N", "p99"),
     ("khat", "joint", "psis_khat", "value"),
     ("pair_diff_p50", "joint", "pair_sd_diff_ratio", "p50"),
