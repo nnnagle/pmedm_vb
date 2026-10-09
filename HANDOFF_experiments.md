@@ -237,8 +237,19 @@ From the per-experiment tables (old layout, before this file's table changes):
   (p10 width ratio 0.19-0.60 null space, 0.45-0.89 roll-up), k-hat 3.8-14 (>>
   0.7), walls (a cell > 1% of N) in 3-43% of draws, and far less within-block-
   group variety than HMC. It matches HMC on typical-cell fit (Tables 2-3).
-- **Truncated VB** (rejecting wall draws, or D/H < 0.1) removes the walls,
-  barely changes k-hat or widths, and leaves draws piled against the cutoff.
+- **Truncated VB is kept, and is the cheap way to usable VB draws.** It is the
+  same VB fit with the draws the reference never makes turned away (any cell
+  over 1% of N, or any block group over 100 households with D/H < 0.1):
+  `truncated_draws` in `compare_methods.py`, methods `vb_<family>_trunc`,
+  options `--trunc-share 0.01`, `--trunc-distinct 0.1`, `--trunc-max-factor 20`;
+  acceptance is reported (`trunc_acceptance`). It costs only extra draws (the
+  fit is unchanged). It removes every wall, and on held-out and in-sample fit
+  it matches HMC (exp01 s04, alpha 0.01: block-group |z| p90 0.705 untruncated,
+  0.641 truncated, 0.640 HMC; acceptance 0.61 skewed). It cannot fix VB's
+  shape: k-hat and the narrowest widths barely change, draws pile up against
+  the cutoff, and within-block-group variety stays below HMC's. So: usable VB
+  draws for point summaries and typical-cell uncertainty; HMC for the
+  posterior's tails and variety.
 - **alpha 0.01** (the replicate correlations) gives the best held-out accuracy
   in every experiment, but the least variety: reference draws with a block
   group under n_eff 10 - exp01 about 22% (diagnostic), null space 40%, roll-up
@@ -266,7 +277,10 @@ From the per-experiment tables (old layout, before this file's table changes):
   produces them.
 - **Ratio cap, then share cap** (w/N, `--share-cap`, `sharecap.py`): planned as
   exp04-07; never run. Bounded penalties of p are not convex in lambda.
-- **Truncated VB** (`--trunc-share`, `--trunc-distinct`): dropped (above).
+- **Changing the truncation rule** (n_eff floors instead of the wall and D/H
+  rules, or truncating the HMC reference and short HMC as well, a posterior
+  conditioned on usable draws): explored with `usability_diagnostic.py`, not
+  adopted. Truncated VB itself stays as above.
 - **D/H floor**: nearly redundant with the wall rule; D ignores dominance.
 - **Usability rules** (`usability_diagnostic.py`): an n_eff >= 5 floor keeps
   99-100% of the posterior and catches 76-86% of walls; n_eff >= 10 binds on the
