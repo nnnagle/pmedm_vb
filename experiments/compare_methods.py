@@ -347,7 +347,7 @@ def method_draws(args, inputs: PMEDMInputs, rng, h) -> tuple[dict, dict]:
         timing["draw_seconds"] = time.perf_counter() - start
         return with_lambda(h, draws, q), timing
     # HMC
-    import arviz as az
+    az = compare.import_arviz()
 
     with np.load(args.run / f"{name}_trace.npz") as saved:
         kept = saved["lam"]

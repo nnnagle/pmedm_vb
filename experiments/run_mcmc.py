@@ -277,7 +277,9 @@ def quantile_line(x: np.ndarray, scale: float = 1.0, fmt: str = "{:.3f}") -> str
 
 
 def report(args: argparse.Namespace) -> None:
-    import arviz as az
+    from pmedm_vb.compare import import_arviz
+
+    az = import_arviz()
 
     name = fit_name(args)
     with np.load(args.out / f"{name}_trace.npz") as saved:

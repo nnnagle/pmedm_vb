@@ -175,10 +175,30 @@ def cell_log_shares(inputs: PMEDMInputs, lam: np.ndarray, cells: Sequence[tuple[
     return out
 
 
+def import_arviz():
+    """``import arviz``, tried a second time if the first fails on a missing file.
+
+    On its first import of the day arviz writes a stamp file through a temporary
+    file of a fixed name (``~/.cache/arviz``), so jobs that start together can
+    race: one renames the temporary file away from under another, whose import
+    then fails with ``FileNotFoundError``. The second attempt finds the stamp
+    written and does not touch the file.
+    """
+    import sys
+
+    try:
+        import arviz
+    except FileNotFoundError:
+        for name in [m for m in sys.modules if m == "arviz" or m.startswith("arviz.")]:
+            del sys.modules[name]
+        import arviz
+    return arviz
+
+
 def psis_khat(log_ratio: np.ndarray) -> float:
     """Pareto-``k`` of the importance ratios ``log pi - log q`` (Yao et al.
     2018): under 0.5 good, 0.5-0.7 acceptable, above 0.7 unreliable."""
-    import arviz as az
+    az = import_arviz()
 
     _, khat = az.psislw(np.asarray(log_ratio, dtype=float))
     return float(khat)
