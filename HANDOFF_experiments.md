@@ -1,210 +1,321 @@
-# Handoff: the paper's final experiments
+# Handoff: the paper's experiments, from the downloads to the tables
 
-**Everything here runs from scratch, in clean folders.** A new data directory
-(inputs and tables rebuilt from the downloads) and a new results root. Nothing
-reads the earlier runs under `pmedm_vb_runs/<jobid>`, `rollup50_grid`,
-`nullspace_grid`, `cap_4701502` or the old `scores/`; they stay as they are,
-for reference only.
+Branch `claude/beautiful-goldberg-jqcrwy`. This replaces the earlier version of
+this file. `HANDOFF_paper.md` is older background on the paper; where the two
+disagree (for example its "CPU fits on 18 cores"), this file is current.
 
-Two drivers do the work:
+## 1. Status
 
-- `experiments/run_experiment.py EXP.json`: submits the fits of one experiment
-  (raking, MAP + VB, HMC) into `<root>/<name>/`.
-- `experiments/score_experiment.py <root>/<name> --tag sNN`: scores them into
-  `<root>/<name>/scores/sNN/`, a new folder for each scoring, so the scoring
-  can be redone as its code changes without touching the fits.
+- **exp01_baseline** (4 PUMAs x alpha 1, 0.1, 0.01), **exp02_nullspace** and
+  **exp03_rollup** are fitted, scored (tag `paper1`, with per-cell detail files)
+  and combined on ISAAC. exp02 and exp03 were fitted on the whole grid, but the
+  paper now uses them at alpha 1 and 0.01 only (section 3).
+- The final tables have been produced per experiment in the old layout. The
+  final layout (two table sets, IPF in a no-alpha panel, Sinkhorn left out) has
+  **not yet been run on ISAAC**: `run_paper.py tick` will make it (section 4).
+- `run_paper.py` (the one-command pipeline) is tested locally against fake
+  `sbatch`/`squeue` and fake outputs, stage by stage to the end, but **not yet
+  on ISAAC**.
+- exp04-07 JSONs in `experiments/paper/` (a share cap on w/N) are **not part of
+  the paper** and are not run by the pipeline (section 9).
 
-## Fixed for every experiment
-
-Study area Knox County, ACS 2020–2024 5-year (`knox-2024-5yr`), PUMAs 4701501–4701504,
-alphas 1, 0.1, 0.01. The model:
-
-- PUMA rows (`--hierarchy puma`), untapered (`--taper none`), the zero-count
-  variance floor (`--variance-floor zero`);
-- methods: IPF and Sinkhorn raking; MAP + Laplace; VB Gaussian and skewed (64
-  draws per step); HMC short (200 warmup + 1,000 samples, thin 10) and
-  reference (2,000 + 10,000, thin 40, checkpoint every 500); 32 chains,
-  trajectory 3.0, whitened by the skewed VB fit;
-- left out: VB sum-difference, `--collapse`.
-
-HMC seeds: `seed + 10 × (PUMA index) + (alpha index)`, from 2000 (short) and
-1000 (reference), the same in every experiment.
-
-## The experiments
-
-The JSON files are in `experiments/paper/`.
-
-| name | differs from the baseline |
-|---|---|
-| `exp01_baseline` | nothing |
-| `exp02_nullspace` | `--hierarchy nullspace`: also removes every consistent direction the data cannot see |
-| `exp03_rollup` | roll-up at 50 persons / 20 households (`--rollup 50h20`, level `puma-r50h20`); raking targets the rolled-up cells |
-| `exp04_cap1000x1` | ratio cap at 1,000, strength 1 (level `puma+cap1000x1`) |
-| `exp05_cap1000x10` | ratio cap at 1,000, strength 10 |
-| `exp06_cap5000x1` | ratio cap at 5,000, strength 1 |
-| `exp07_cap5000x10` | ratio cap at 5,000, strength 10 |
-
-The caps have fixed strength and are applied to the plain `puma` level, with no
-roll-up and no null space. Raking does not depend on the hierarchy or the cap, so
-its results are identical in every experiment except exp03. Each experiment
-still rakes for itself, which keeps each folder self-contained.
-
-## Folder layout
-
-```
-<root>/                                  default /lustre/isaac24/proj/UTK0496/pmedm_vb_runs/paper
-  expNN_<name>/
-    experiment.json                      the JSON + commit, data directory, level, start time
-    jobs.jsonl                           every job submitted: id, stage, PUMA, commit, command
-    logs/slurm-<jobid>.log
-    <puma>/
-      ipf/  sinkhorn/                    raking
-      map/  vb_gaussian/  vb_skewed/     every alpha in each (+ vb_<family>.log)
-      hmc_short/  hmc_ref/               every alpha in each; hmc_spec.txt beside them
-    scores/
-      s01/
-        scoring.json                     commit, date, draws, jobs, what was missing
-        specs/<puma>_a<alpha>.txt        the compare_methods.py calls
-        per_cell/<puma>_a<alpha>.csv, <puma>_a<alpha>_tables.csv
-        all_scores.csv  all_tables.csv
-        score_summary.txt  table_summary.txt  distribution_summary.txt
-        calibration_summary.txt  missing.txt
-        logs/
-```
-
-Result files are named as before: `<puma>_none_a<alpha>_h<level>.npz` (MAP, VB),
-`..._trace.npz` / `..._report.txt` (HMC), and `<puma>_<method>[_r50h20].npz` (raking).
-
-## Step 0: code and folders
-
-On a login node, from the repository at `/lustre/isaac24/proj/UTK0496/pmedm_vb`
-(the job scripts run the code from there):
+## 2. Setup on ISAAC
 
 ```bash
 cd /lustre/isaac24/proj/UTK0496/pmedm_vb
-git fetch origin claude/practical-volta-ybxa07
-git checkout claude/practical-volta-ybxa07 && git pull
-git status            # should be clean: experiment.json records the commit (with -dirty if not)
+git fetch origin claude/beautiful-goldberg-jqcrwy
+git checkout claude/beautiful-goldberg-jqcrwy && git pull
 conda activate /lustre/isaac24/proj/UTK0496/envs/pmedm_vb
 PY=$CONDA_PREFIX/bin/python
-
-export PMEDM_VB_DATA=/lustre/isaac24/scratch/$USER/pmedm_vb_paper_data   # the JSONs' data_dir
-mkdir -p $PMEDM_VB_DATA /lustre/isaac24/proj/UTK0496/pmedm_vb_runs/paper
+export PMEDM_VB_DATA=/lustre/isaac24/scratch/$USER/pmedm_vb_paper_data
+PAPER=/lustre/isaac24/proj/UTK0496/pmedm_vb_runs/paper
 ```
 
-`data_dir` in every JSON is `/lustre/isaac24/scratch/$USER/pmedm_vb_paper_data`.
-If you change it, change it in all seven files before the first submission. A
-folder refuses a JSON that differs from the one it was started with.
+A new login loses these variables (an empty `$PAPER` gives paths like
+`/exp01_baseline/...`); putting the last three lines in `~/.bashrc` avoids it.
+Jobs run the code from the repository on Lustre, so `git pull` before
+submitting.
 
-Optional, to skip downloading again: the downloads in `raw/` are never edited in
-place, so hard links to the old cache are safe and take no space on the same
-file system. Leave out `interim/` and `processed/`, which are rebuilt:
+| what | where |
+|---|---|
+| data directory (downloads, assembled inputs, table trees) | `/lustre/isaac24/scratch/$USER/pmedm_vb_paper_data` |
+| results root | `/lustre/isaac24/proj/UTK0496/pmedm_vb_runs/paper` |
+| one experiment | `<root>/expNN_<name>/` |
+| the driver's own jobs and logs | `<root>/run_paper/` |
+| tables | `<root>/tables/`, `<root>/tables_compare/` |
+
+## 3. The experiments
+
+Study area Knox County, ACS 2020-2024 5-year (`knox-2024-5yr`), PUMAs
+4701501-4701504. Common model: PUMA rows (`--hierarchy puma`), untapered Sigma
+(`--taper none`), zero-count variance floor, all 46 B01001 sex-by-age categories
+(`age_sex()` now defaults to every published break; the old collapse is
+`age_sex(b01001_boundaries())`).
+
+| experiment | differs from the baseline | run on |
+|---|---|---|
+| exp01_baseline | nothing | 4 PUMAs x alpha 1, 0.1, 0.01 |
+| exp02_nullspace | `--hierarchy nullspace` (removes every consistent direction the data cannot see) | 4 PUMAs x alpha 1, 0.01 |
+| exp03_rollup | roll-up at 50 persons / 20 households (`--rollup 50h20`); raking targets the rolled-up cells; **scored on the original cells** | 4 PUMAs x alpha 1, 0.01 |
+
+**Subsets.** An experiment JSON's `pumas`/`alphas` are its grid; an optional
+`"subset": {"pumas": [...], "alphas": [...]}` narrows what is run, scored and
+tabled. exp02 and exp03 have `"subset": {"alphas": [1.0, 0.01]}`. The grid still
+identifies the experiment (a folder fitted on the whole grid is reused, not
+refused) and fixes the HMC seeds (`seed + 10 x PUMA index + alpha index` in the
+grid), so a subset run uses the same seeds.
+
+**alpha.** `Sigma(alpha) = D^1/2 [(1-alpha) R + alpha I] D^1/2`, R the
+replicate-estimated correlation: alpha only shrinks the correlations; alpha = 1
+is classic diagonal PMEDM; alpha cannot reach 0 (80 replicates leave R
+rank-deficient), so 0.01 is the smallest used.
+
+**Methods** per (PUMA, alpha): IPF and Sinkhorn raking (no alpha: one fit per
+PUMA); MAP + Laplace; VB Gaussian and skewed (64 draws per step); both VB
+families truncated (`vb_<family>_trunc`, scoring only); short HMC (200 warmup +
+1,000 samples, thin 10) and reference HMC (2,000 + 10,000, thin 40), 32 chains,
+integration time 3.0, whitened by and started from the skewed VB fit.
+
+## 4. The workflow: one command
+
+`experiments/run_paper.py` runs everything for exp01-03 and resumes from any
+point.
 
 ```bash
-cp -al /lustre/isaac24/scratch/$USER/pmedm_vb_data/raw $PMEDM_VB_DATA/raw
+$PY experiments/run_paper.py start     # login node: downloads, first pass, starts the driver job
+$PY experiments/run_paper.py status    # anywhere: where every stage stands
+$PY experiments/run_paper.py tick      # one pass now, and schedule the driver (no downloads)
+$PY experiments/run_paper.py advance --dry-run   # what one pass would submit
 ```
 
-## Step 1: rebuild the inputs and tables
+Options: `--root`, `--data-dir` (new folders = from scratch; existing ones =
+resume), `--tag paper1`, `--draws 4000`, `--every 30` (minutes between passes),
+`--max-gpu-jobs 6`, `--max-attempts 4`, `--dry-run`.
 
-Steps 1a and 1d need the network, so run them on a login node. The rest run as jobs.
+**Stages.** Each pass submits, per stage, only work that is due and has no job
+queued or running; every stage is idempotent.
+
+1. **prefetch** (`start` only; compute nodes are offline): every file assembly,
+   held-out tables and table trees read, including the constraint tables'
+   national (summary level 010) replicate files.
+2. **assemble** (`run_map.sbatch assemble`), then **heldout**
+   (`run_map.sbatch heldout`), then **trees** (`table_trees.py --write-inputs`,
+   needed by the roll-up) into the data directory. Done when every PUMA has
+   `manifest.json`, `heldout/`, `table_trees.json`.
+3. **fits**, per experiment: `run_experiment.advance()` submits raking (short),
+   MAP + VB bundles (short, 48 CPUs) and HMC bundles (campus-gpu, 24 h; afterok
+   on the PUMA's fits), keeping the user's campus-gpu jobs at 6 or fewer.
+   Done when every raking, MAP, VB and HMC output (HMC: `_report.txt`) exists.
+4. **score**, per experiment once its fits are complete:
+   `score_experiment.py --resume --no-combine` over the experiment's subset.
+   Only calls without scores are submitted.
+5. **combine**, once every call has scores and no scoring job is live.
+   Done when `all_scores.csv` is newer than every cell's CSV.
+6. **tables**: `tables/` (exp01 alone, whole grid) and `tables_compare/`
+   (exp01-03 on the PUMAs and alphas they share: 4 PUMAs x alpha 1, 0.01, so the
+   columns pool the same cells). Done when each `tables.md` is newer than the
+   `all_scores.csv` files it reads.
+
+**The driver job.** `start`/`tick` end by submitting `run_paper.sbatch` (short,
+2 CPUs, 30 min), which runs one pass and resubmits itself `--every` minutes
+later while work remains. When everything is done it submits a one-line job
+whose only purpose is the "done" e-mail. A stage submitted `--max-attempts`
+times without finishing stops the run: the pass prints `NEEDS ATTENTION`, the
+driver job fails and Slurm mails the failure. Fix the cause, then `tick`. A
+lock (`<root>/run_paper/lock`, stale after 2 h) keeps two drivers apart.
+
+**Queue limits.** campus-gpu takes 6 submitted jobs per user; `short` also
+limits submissions per user (this cut off a scoring submission once). A refused
+`sbatch` ends that pass's submissions early; the next pass continues.
+
+**Time.** From scratch, at least a day: the null-space HMC bundles (six runs in
+sequence per PUMA) are the longest part.
+
+**To produce the final tables now** (everything is already fitted and scored):
+`git pull`, `run_paper.py status` (all stages done except the two table sets),
+then `run_paper.py tick`.
+
+## 5. The workflow by hand (what the driver calls)
+
+For debugging one stage, or running part of it:
 
 ```bash
-# a. download what the cache lacks (login node; compute nodes are offline)
+# data (prefetch on a login node; the rest as jobs)
 env -u PMEDM_VB_OFFLINE $PY experiments/run_map.py prefetch
+sbatch --export=ALL,PMEDM_VB_DATA=$PMEDM_VB_DATA experiments/run_map.sbatch assemble
+sbatch --export=ALL,PMEDM_VB_DATA=$PMEDM_VB_DATA experiments/run_map.sbatch heldout
+sbatch --export=ALL,PMEDM_VB_DATA=$PMEDM_VB_DATA experiments/run_python.sbatch table_trees.py \
+    --write-inputs knox-2024-5yr --out $PMEDM_VB_DATA/table_trees
+$PY experiments/check_inputs.py              # checks the assembly (46 B01001 cells, nesting, totals)
 
-# b. assemble every PUMA from scratch, then c. the held-out tables
-a=$(sbatch --parsable --export=ALL,PMEDM_VB_DATA=$PMEDM_VB_DATA \
-      experiments/run_map.sbatch assemble --rebuild)
-sbatch --dependency=afterok:$a --export=ALL,PMEDM_VB_DATA=$PMEDM_VB_DATA \
-      experiments/run_map.sbatch heldout --rebuild
+# fits (call again until --status shows every output)
+$PY experiments/run_experiment.py experiments/paper/exp01_baseline.json [--dry-run|--status]
 
-# d. after both finish: the table trees from the national files, checked on Knox
-#    and written into each PUMA's inputs (login node: it downloads the US files)
-env -u PMEDM_VB_OFFLINE $PY experiments/table_trees.py \
-      --write-inputs knox-2024-5yr --out $PMEDM_VB_DATA/table_trees
+# scoring, combining (a tag is a folder under <exp>/scores/)
+$PY experiments/score_experiment.py $PAPER/exp01_baseline --tag paper1 [--resume] [--alphas 1 0.01]
+$PY experiments/score_experiment.py $PAPER/exp01_baseline --tag paper1 --combine
+
+# tables (a job: it reads ~600 MB of parquet)
+J=$(sbatch --parsable --partition=short --qos=short --time=01:00:00 \
+  --export=ALL,PMEDM_VB_DATA=$PMEDM_VB_DATA --output=$PAPER/tables-%j.log \
+  experiments/run_python.sbatch paper_tables.py --root $PAPER --tag paper1 \
+    --experiments exp01_baseline exp02_nullspace exp03_rollup --alphas 1 0.01 \
+    --out $PAPER/tables_compare)
 ```
 
-Step 1d refuses to write if any table fails its check on Knox. Read
-`$PMEDM_VB_DATA/table_trees/` before going on. Only exp03 needs the trees, and
-`run_experiment.py` will not submit exp03 without them.
+`sbatch --parsable` prints only the job ID; capture it as above to find the log.
 
-Optional record of what the roll-up does, cells before and after, per table:
+## 6. Scoring
 
-```bash
-sbatch --export=ALL,PMEDM_VB_DATA=$PMEDM_VB_DATA experiments/run_python.sbatch rollup_report.py \
-      --puma 4701501 4701502 4701503 4701504 --rollup 50h20 \
-      --out /lustre/isaac24/proj/UTK0496/pmedm_vb_runs/paper/exp03_rollup/rollup_report
-```
+`compare_methods.py` scores one method in one (PUMA, alpha) cell against that
+cell's reference HMC; `score_experiment.py` runs one `compare_methods.sbatch`
+job per cell (short), each calling every method in turn (`hmc_ref` first, which
+caches the reference's summaries).
 
-## Step 2: run the experiments
+- **Outputs** under `<exp>/scores/<tag>/`: `scoring.json` (written before the
+  first job and after each), `specs/`, `per_cell/<cell>.csv` (long: method,
+  subset, metric, stat, value), `detail/<cell>/<method>_cells.parquet` (every
+  scored cell's metrics) and `<method>_draws.parquet` (every draw's statistics),
+  `all_scores.csv`, `score_summary.txt`, `missing.txt`. About 206 MB of detail
+  per experiment.
+- **Resuming.** `--resume` submits only calls whose method has no rows in the
+  cell's CSV and skips cells with a live job. `--max-jobs`, `--no-combine`,
+  `--pumas`, `--alphas`.
+- **Per-draw statistics** include: largest cell share of N (walls: > 1% of N),
+  household shares and Kish n_eff = 1/sum s^2 in block groups over 100
+  published households, D = sum_i 1 - (1 - s_i)^H (expected distinct records
+  among H households), and household consistency: the largest |z| of a block
+  group's allocated occupied households (B25003 cells summed) against the
+  published total, SE from the summed variances with the zero-count floor.
+- **arviz race.** Jobs starting together could fail `import arviz` on its daily
+  stamp file; `compare.import_arviz()` retries once (fixed).
 
-For each experiment, on a login node:
+## 7. The tables (`experiments/paper_tables.py`)
 
-```bash
-$PY experiments/run_experiment.py experiments/paper/exp01_baseline.json --dry-run   # look first
-$PY experiments/run_experiment.py experiments/paper/exp01_baseline.json
-$PY experiments/run_experiment.py experiments/paper/exp01_baseline.json --status
-```
+Rows: IPF, MAP + Laplace, VB Gaussian, VB skewed, both truncated, HMC short,
+HMC reference. Sinkhorn is still fitted and scored but left out of the tables
+(remove from `METHODS` to restore). One panel per alpha; IPF has no alpha and
+is shown once in a "Raking (no alpha)" panel, except in Table 4, where it is
+compared with each alpha's reference. Outputs: `tables.md`, one `.tex`
+(booktabs) and one long `.csv` per table (unrounded, with `n`).
 
-Each call submits, per PUMA, whatever is neither finished nor already queued or
-running:
+Pooling: every cell (or draw) of every PUMA together, so quantiles are exact
+over the pooled cells. z and coverage over *sampled* cells only (nonzero
+estimate with a sampling variance). k-hat (one per fit): median [min, max] over
+PUMAs. Cost: minutes per PUMA, mean over PUMAs (county totals in the CSV).
+`--pumas`/`--alphas` filter; the notes are worded for the PUMAs pooled.
 
-| stage | job | partition | outputs |
-|---|---|---|---|
-| rake | `run_map.sbatch rake`, one per (PUMA, method) | short, 1 h, 4 CPUs | `ipf/`, `sinkhorn/` |
-| fits | `run_map_bundle.sbatch`, one per PUMA: MAP, then VB Gaussian and skewed, every alpha | short, 1 h, 48 CPUs | `map/`, `vb_*/` |
-| hmc | `run_mcmc_bundle.sbatch`, one per PUMA: three short runs, then three references | campus-gpu, 24 h | `hmc_short/`, `hmc_ref/` |
+| table | content |
+|---|---|
+| 1 Cost | fit, sampling, total minutes. HMC's fit is the skewed VB fit that whitens it (VB's time includes its MAP); sampling is HMC warmup + sampling |
+| 2 (2t tract) | constrained block-group cells: posterior 90% interval contains published; \|z\| p90, z = (posterior mean - published)/SE; half-width / MOE, median |
+| 3 Held-out | the same for held-out tables: related (B25044, C17002, C24030, B12001, B15002) and less related (B25040) |
+| 4 Agreement with reference | median diff. in reference sds (p50, p99); 90% width ratio (p10, p50); PSIS k-hat |
+| 5 Usability | draws with a wall; smallest n_eff (median); draws with n_eff < 10; draws with households \|z\| > 5; largest households \|z\| (median); IPF's shares as counts of its 4 draws |
 
-So the way to run an experiment is to **call the same command again** until
-`--status` shows every output:
+**Coverage decisions.** Coverage is computed per cell once, from all draws:
+does the 5th-95th percentile interval contain the published value; then
+averaged over cells. It is *not* repeated-sampling coverage of a known truth.
+Predictive coverage (adding SE^2 to sd^2) was dropped: in-sample it counts the
+published SE twice (the posterior was fitted to that value), giving ~100% even
+for HMC. In-sample (Table 2) coverage and |z| have no nominal level (normal
+example: residual variance B SE^2, posterior variance (1-B) SE^2, B the
+shrinkage weight). Held-out (Table 3) coverage below 0.90 is expected, since
+the published value also carries sampling error (if sd = SE and the mean is
+right, about 0.75); held-out tables share the ACS sample with the constraints,
+so their errors may be correlated with them.
 
-- **HMC jobs wait on the fits.** An HMC job depends (`afterok`) on its PUMA's
-  fits job while that job is live. If the fits job fails, the HMC job stays
-  pending (DependencyNeverSatisfied): cancel it, then call again.
-- **The GPU limit.** campus-gpu takes 6 submitted jobs per user, so the driver
-  submits only `--max-gpu-jobs` (default 6) less what you already have there.
-  The other PUMAs are submitted on later calls. 7 experiments × 4 PUMAs make 28
-  HMC jobs in all.
-- **Jobs that run out of time resume.** A rake or fits job that times out leaves
-  its finished fits, and the next call resubmits only what is missing. An HMC
-  bundle that times out resumes from its checkpoints when it is resubmitted.
-- **Nothing is checked yet.** None of these time limits has been checked against
-  these settings. Read the first rake, fits and HMC jobs' logs before
-  submitting the rest. To change a limit or the CPUs, edit `RAKE_SLURM`,
-  `FITS_SLURM` or `HMC_SLURM` at the top of `run_experiment.py`.
+## 8. Findings so far
 
-`--stage rake fits` (or `hmc`) limits a call to some stages. A sensible order is
-to submit rake and fits for all seven experiments first (CPU, 56 + 28 jobs), then
-call again with `--stage hmc` as the GPU queue frees up.
+From the per-experiment tables (old layout, before this file's table changes):
 
-## Step 3: score
+- **Short HMC reproduces the reference** in every experiment (median diff. p99
+  0.06-0.14, width ratio p10 0.88-0.95) at about a tenth of its cost.
+- **MAP + Laplace is unusable**: walls in essentially every draw, collapsed
+  intervals, k-hat infinite or huge.
+- **VB is not a substitute for HMC's draws**: too narrow in its narrowest cells
+  (p10 width ratio 0.19-0.60 null space, 0.45-0.89 roll-up), k-hat 3.8-14 (>>
+  0.7), walls (a cell > 1% of N) in 3-43% of draws, and far less within-block-
+  group variety than HMC. It matches HMC on typical-cell fit (Tables 2-3).
+- **Truncated VB** (rejecting wall draws, or D/H < 0.1) removes the walls,
+  barely changes k-hat or widths, and leaves draws piled against the cutoff.
+- **alpha 0.01** (the replicate correlations) gives the best held-out accuracy
+  in every experiment, but the least variety: reference draws with a block
+  group under n_eff 10 - exp01 about 22% (diagnostic), null space 40%, roll-up
+  20%.
+- **Null space** fixes most of the leakage of households into empty block
+  groups at alpha 1 (reference draws with households |z| > 5: 10%, against most
+  draws in exp01) and the tightest fit at alpha 1; it is 2-3x the baseline's
+  cost (skewed VB 37-40 min, reference HMC 2.6-5 h per PUMA).
+- **Roll-up** is the cheapest (skewed VB 5-9 min, short HMC 8-16 min total per
+  PUMA), gives a much better VB and more usable draws, at a small cost in
+  fine-cell fit and held-out accuracy (less-related |z| p90 2.13-2.64 against
+  2.00-2.25 null space).
+- **On held-out point accuracy the posterior mean only matches IPF** (null
+  space related |z| p90 1.52 vs IPF 1.54); the Bayesian methods add calibrated
+  uncertainty and usable draws, not a better point estimate.
+- **In-sample**, half-width / MOE ~ 1: each cell's own estimate dominates its
+  posterior. The fit loosens at alpha 1 (exp01 |z| p90 1.48 vs 0.60 at 0.01).
 
-When an experiment's `--status` is complete:
+## 9. What was tried and set aside
 
-```bash
-$PY experiments/score_experiment.py /lustre/isaac24/proj/UTK0496/pmedm_vb_runs/paper/exp01_baseline \
-      --tag s01 --dry-run
-$PY experiments/score_experiment.py /lustre/isaac24/proj/UTK0496/pmedm_vb_runs/paper/exp01_baseline --tag s01
-```
+- **Walls.** VB draws where one (record x block group) cell takes > 1% of N;
+  driven by published-zero cells in rare categories (zero-count SE 8.49), not by
+  large households; local, not low-rank (`wall_subspace.py`); mostly
+  over-allocation of a block group's total rather than crowding out. HMC never
+  produces them.
+- **Ratio cap, then share cap** (w/N, `--share-cap`, `sharecap.py`): planned as
+  exp04-07; never run. Bounded penalties of p are not convex in lambda.
+- **Truncated VB** (`--trunc-share`, `--trunc-distinct`): dropped (above).
+- **D/H floor**: nearly redundant with the wall rule; D ignores dominance.
+- **Usability rules** (`usability_diagnostic.py`): an n_eff >= 5 floor keeps
+  99-100% of the posterior and catches 76-86% of walls; n_eff >= 10 binds on the
+  posterior at alpha 0.01; a household-count |z| rule fails the posterior at
+  alpha >= 0.1 (leakage into empty block groups), so it is a model diagnostic,
+  not a truncation rule.
+- **Dirichlet-form prior** kappa KL(d || s_b) (convex in lambda): rejected; its
+  sum is dominated by legitimate exclusions (median block group ~5 nats at
+  alpha 0.01) and does not separate wall draws. The diagnostic's KL section
+  remains in `usability_diagnostic.py`.
+- **Ideas not pursued**: hinge priors on n_eff and household |z| with a
+  curvature check; tighter B25003 variances (convex); VB draws moved by
+  annealed/SMC HMC (Neal 2001; Del Moral, Doucet & Jasra 2006), which would
+  handle walls by reweighting; a representation layer (factor prior on lambda_B).
 
-This submits:
+## 10. Diagnostic scripts added on this branch
 
-- one `compare_methods.sbatch` job per (PUMA, alpha). Each job scores, in order,
-  the HMC reference, short HMC, MAP + Laplace, both VB families and both raking
-  fits. Every one is scored against that cell's HMC reference, and the HMC runs
-  are also scored with the skewed VB fit that whitened them. Each job uses
-  4,000 draws.
-- one combine job after them (`afterany`). It concatenates the cells' results
-  into `all_scores.csv` and `all_tables.csv`, writes the four `score_summary.py`
-  views, and lists in `missing.txt` any (method, PUMA, alpha) without scores.
+`check_inputs.py` (assembly checks), `ratio_diagnostic.py` (largest cells,
+drivers, n_eff/D), `wall_subspace.py` (are walls low-rank), `usability_diagnostic.py`
+(n_eff and household-|z| rules, KL calibration; one job per PUMA, then
+`--combine`), `paper_tables.py`, `run_paper.py` + `run_paper.sbatch`.
 
-It submits nothing if any result is missing, unless you pass
-`--allow-missing`. A cell without its HMC reference is left out whole. It also
-refuses a tag that already exists. When the scoring code changes, score again
-under the next tag (`s02`, ...); `scoring.json` records the commit of each.
+## 11. Computation, for the paper
 
-## Not yet done
+- **MAP + VB**: one job per PUMA on 48 CPU cores of one `short` node. The three
+  stand-alone MAP solves (one per alpha) run in parallel, 16 threads each; then
+  the two VB families run concurrently, 24 cores each, each fitting its three
+  alphas in parallel at 8 threads per fit. A VB fit: its own MAP (damped Newton:
+  per-tract Cholesky + Woodbury), the Gaussian stage started at the Laplace
+  approximation (Adam, 64 reparameterised draws per step, window-stall
+  learning-rate halving, at most 1,000 steps), for skewed a sinh-arcsinh stage,
+  ELBOs from 400 draws. CPU only. Whether a Slurm CPU on ISAAC is a core or a
+  hyperthread is unchecked (`scontrol show node`).
+- **HMC**: one NVIDIA V100S per job, 4 CPU cores; the 32 chains are advanced as
+  one batch; a PUMA's six runs run in sequence in one job; checkpoints every 500
+  iterations. Leapfrog steps per iteration = jittered integration time / step
+  size (tuned by dual averaging toward acceptance 0.8), capped at 1,000.
+- **Times (exp01, s04 medians over PUMAs)**: VB Gaussian 7-10 min, skewed 12-17
+  min per fit including MAP; short HMC 5-16 min, reference 51 min - 2.6 h of GPU
+  time, plus the skewed VB fit.
 
-- No cross-experiment folder: comparing experiments is the `all_*.csv` of
-  each, read side by side (in R, or a later `compare/` script).
-- The cube and TRS integerisation comparison is on hold.
+## 12. Open items
+
+- Run `run_paper.py tick` on ISAAC and read `tables/` and `tables_compare/`.
+- exp03 Sinkhorn: median diff. p99 ~22 reference sds, far above IPF's 2.5;
+  check which cells (query in the exp03 detail files) before any Sinkhorn
+  result is cited.
+- IPF in PUMA 4701502 gives a block group a zero total (`max_bg_share`
+  undefined there); cosmetic, scoring summary only.
+- exp04-07 JSONs and the share-cap code are unused; delete or keep as a record.
+- `usability_diagnostic.py`'s KL section documents a rejected idea.
+- `HANDOFF_paper.md` predates this work (e.g. 18 cores).
