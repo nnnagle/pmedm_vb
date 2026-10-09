@@ -243,7 +243,9 @@ def run_prefetch(area: StudyArea) -> None:
     from pmedm_vb.data.prefetch import prefetch
 
     heldout = [*heldout_tables(area, "tract"), *heldout_tables(area, "block group")]
-    prefetch(area, [*default_tables(area), *heldout])
+    constraints = default_tables(area)
+    # The constraint tables' national files too, so table_trees.py runs offline.
+    prefetch(area, [*constraints, *heldout], national=[t.table for t in constraints])
 
 
 # -- assemble ----------------------------------------------------------------

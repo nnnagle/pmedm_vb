@@ -38,8 +38,9 @@ national file (summary level 010), where almost no line is zero:
 Writes ``<out>/table_trees.txt``: per table, the tree (indented, with titles
 and national totals), then per level the check and the sibling groups of our
 categories with their county counts; and ``<out>/table_trees.csv``, one row per
-line and level; and ``<out>/category_trees.json``. Reads the cached replicate files, fetching any missing ones
-(so run it where the network is available, e.g. a login node)::
+line and level; and ``<out>/category_trees.json``. Reads the cached replicate files, fetching any missing ones; ``run_map.py
+prefetch`` caches them all, national files included, so after it this runs
+offline, as a job::
 
     $CONDA_PREFIX/bin/python experiments/table_trees.py --out $RUNS/table_trees
 """
@@ -59,9 +60,8 @@ from pmedm_vb.assemble.constraints import default_tables
 from pmedm_vb.assemble.inputs import TREES_FILE
 from pmedm_vb.assemble.rollup import category_tree, tree_categories
 from pmedm_vb.config import StudyArea, processed_dir
-from pmedm_vb.data.cache import fetch_cached
-from pmedm_vb.data.variance import (REPLICATE_COLUMNS, VRE_BASE, _read_replicate_file,
-                                    _span_label, fetch_replicates)
+from pmedm_vb.data.variance import (REPLICATE_COLUMNS, _read_replicate_file,
+                                    download_national_replicates, fetch_replicates)
 
 
 def parse_args() -> argparse.Namespace:
@@ -350,8 +350,7 @@ def level_report(cells, titles, V, children, table_spec, tol) -> tuple[list[str]
 
 def fetch_us(area: StudyArea, table: str) -> pd.DataFrame:
     """The national (summary level 010) replicate file, named ``{table}.csv.zip``."""
-    url = f"{VRE_BASE}/{area.year}/data/{_span_label(area)}/010/{table}.csv.zip"
-    frame = _read_replicate_file(fetch_cached(url, subdir=f"vre/{area.year}/010"))
+    frame = _read_replicate_file(download_national_replicates(area, table))
     return frame.assign(geoid="US").set_index(["geoid", "cell"])
 
 

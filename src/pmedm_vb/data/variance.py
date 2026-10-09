@@ -242,6 +242,22 @@ def is_available(area: StudyArea, table: str, *, geography: str) -> bool:
     return response.status_code in (200, 206)
 
 
+#: Summary level of the national (US) replicate files, from which
+#: ``experiments/table_trees.py`` reads each table's line structure.
+NATION_LEVEL = "010"
+
+
+def national_replicate_url(area: StudyArea, table: str) -> str:
+    """URL of one table's national (summary level 010) replicate file."""
+    return f"{VRE_BASE}/{area.year}/data/{_span_label(area)}/{NATION_LEVEL}/{table}.csv.zip"
+
+
+def download_national_replicates(area: StudyArea, table: str, *, force: bool = False) -> Path:
+    """Download one table's national replicate file and return its cached path."""
+    return fetch_cached(national_replicate_url(area, table),
+                        subdir=f"vre/{area.year}/{NATION_LEVEL}", force=force)
+
+
 def download_replicates(
     area: StudyArea,
     table: str,
