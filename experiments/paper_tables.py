@@ -43,13 +43,22 @@ EXPERIMENTS = [("exp01_baseline", "Baseline"), ("exp02_nullspace", "Null space")
                ("exp03_rollup", "Roll-up")]
 
 #: (method, label), in the tables' order.
-METHODS = [("ipf", "IPF"), ("sinkhorn", "Sinkhorn"), ("map_laplace", "MAP + Laplace"),
+METHODS = [("ipf", "IPF"), ("map_laplace", "MAP + Laplace"),
            ("vb_gaussian", "VB Gaussian"), ("vb_skewed", "VB skewed"),
            ("vb_gaussian_trunc", "VB Gaussian, truncated"),
            ("vb_skewed_trunc", "VB skewed, truncated"),
            ("hmc_short", "HMC short"), ("hmc_ref", "HMC reference")]
 
 ALPHAS = (0.01, 0.1, 1.0)
+
+#: Methods without an alpha (raking): one fit per PUMA, scored in every alpha
+#: cell. They are shown once, in their own panel, except in Table 4, where they
+#: are compared with each alpha's reference.
+NO_ALPHA = ("ipf",)
+
+#: Table 5's statistics that are shares of draws: for a method without an alpha,
+#: one draw per PUMA, shown as a count of draws.
+SHARE_KEYS = ("walls", "neff_lt", "hhz_gt")
 
 #: Cell columns read from the detail files.
 CELL_COLUMNS = ["method", "puma", "alpha", "subset", "sampled", "abs_z",
@@ -220,6 +229,8 @@ def fmt(row: pd.Series | None, key: str) -> str:
     if row is None or pd.isna(row["value"]):
         return "--"
     v, d = row["value"], DIGITS[key]
+    if key in SHARE_KEYS and row["method"] in NO_ALPHA:
+        return f"{round(v * row['n']):d}/{int(row['n'])}"
     if d == "min":
         return "<1" if v < 0.5 else f"{v:,.0f}"
     if d == "khat":
@@ -264,6 +275,15 @@ TITLES = {
 }
 
 
+#: The sentence each table's note gains about the raking (no-alpha) rows.
+RAKING_NOTES = {
+    "default": " IPF has no alpha: one fit per PUMA, shown once.",
+    "4": " IPF has no alpha; it is compared with each alpha's reference.",
+    "5": " IPF has no alpha: one fit per PUMA, shown once; its shares of draws are counts "
+         "of its four draws, one per PUMA.",
+}
+
+
 def wide(stats: pd.DataFrame, table: str, experiments: list[tuple[str, str]]) -> tuple[list, list, list]:
     """Column groups (key, label), the experiment labels, and the panels of rows."""
     part = stats[stats.table == table]
@@ -271,9 +291,24 @@ def wide(stats: pd.DataFrame, table: str, experiments: list[tuple[str, str]]) ->
     labels = {k: part[part.key == k].label.iloc[0] for k in keys}
     index = {(r.experiment, r.alpha, r.method, r.key): r for _, r in part.iterrows()}
     panels = []
+    per_alpha = table == "4"
+    if not per_alpha:
+        rows = []
+        for method, method_label in METHODS:
+            if method not in NO_ALPHA:
+                continue
+            # The same fit in every alpha cell: read it from the first.
+            values = [fmt(index.get((e, ALPHAS[0], method, k)), k) for k in keys
+                      for e, _ in experiments]
+            if not all(v == "--" for v in values):
+                rows.append((method_label, values))
+        if rows:
+            panels.append((None, rows))
     for alpha in ALPHAS:
         rows = []
         for method, method_label in METHODS:
+            if method in NO_ALPHA and not per_alpha:
+                continue
             values = [fmt(index.get((e, alpha, method, k)), k) for k in keys for e, _ in experiments]
             if all(v == "--" for v in values):
                 continue
@@ -287,6 +322,7 @@ def latex(stats, table, experiments) -> str:
     groups, exps, panels = wide(stats, table, experiments)
     n = len(exps)
     title, note = TITLES[table]
+    note = note + RAKING_NOTES.get(table, RAKING_NOTES["default"])
     lines = ["% requires \\usepackage{booktabs}",
              "\\begin{table}", "\\centering", f"\\caption{{{title}}}",
              f"\\label{{tab:{table}}}",
@@ -298,7 +334,8 @@ def latex(stats, table, experiments) -> str:
     for i, (alpha, rows) in enumerate(panels):
         if i:
             lines.append("\\addlinespace")
-        lines.append(f"\\multicolumn{{{1 + n * len(groups)}}}{{l}}{{\\textit{{$\\alpha = {alpha:g}$}}}} \\\\")
+        label = "Raking (no $\\alpha$)" if alpha is None else f"$\\alpha = {alpha:g}$"
+        lines.append(f"\\multicolumn{{{1 + n * len(groups)}}}{{l}}{{\\textit{{{label}}}}} \\\\")
         lines += [f"{tex(label)} & " + " & ".join(tex(v) for v in values) + " \\\\"
                   for label, values in rows]
     lines += ["\\bottomrule", "\\end{tabular}", "\\par\\smallskip",
@@ -311,17 +348,21 @@ def tex(text: str) -> str:
     text = text.replace("n_eff", "$n_{\\mathrm{eff}}$").replace("<1", "$<$1")
     text = re.sub(r"sqrt\(SE\^2 \+ sd\^2\)", r"$\\sqrt{\\mathrm{SE}^2 + \\mathrm{sd}^2}$", text)
     text = text.replace("sum s^2", "$\\sum s^2$").replace("SE^2", "SE$^2$")
+    text = text.replace("no alpha", "no $\\alpha$").replace("each alpha's", "each $\\alpha$'s")
     return text.replace(" < ", " $<$ ").replace(" > ", " $>$ ")
 
 
 def markdown(stats, table, experiments) -> str:
     groups, exps, panels = wide(stats, table, experiments)
     title, note = TITLES[table]
+    note = (note + RAKING_NOTES.get(table, RAKING_NOTES["default"])).replace(
+        "no alpha", "no $\\alpha$").replace("each alpha's", "each $\\alpha$'s")
     header = ["Method"] + [f"{label}: {e}".replace("|", "\\|") for _, label in groups for e in exps]
     lines = [f"### Table {table}. {title}", "", "| " + " | ".join(header) + " |",
              "|" + "---|" + "---:|" * (len(header) - 1)]
     for alpha, rows in panels:
-        lines.append(f"| $\\alpha = {alpha:g}$ |" + " |" * (len(header) - 1))
+        label = "*Raking (no $\\alpha$)*" if alpha is None else f"$\\alpha = {alpha:g}$"
+        lines.append(f"| {label} |" + " |" * (len(header) - 1))
         lines += ["| " + " | ".join([label] + values) + " |" for label, values in rows]
     lines += ["", note, ""]
     return "\n".join(lines) + "\n"
