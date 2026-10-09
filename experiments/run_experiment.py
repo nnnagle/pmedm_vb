@@ -422,36 +422,66 @@ def live(active: dict, key: tuple) -> str:
     return f"job {job['job_id']} {job['state'].lower()}" if job else "-"
 
 
+def active_for(exp: Path) -> dict:
+    """The experiment's last job per (stage, PUMA, method), where still queued or running."""
+    jobs = latest_jobs(read_jobs(exp))
+    states = active_jobs([job["job_id"] for job in jobs.values()])
+    return {key: {**job, "state": states[job["job_id"]]}
+            for key, job in jobs.items() if job["job_id"] in states}
+
+
+def is_complete(spec: dict, exp: Path) -> bool:
+    """Whether every raking, MAP, VB and HMC output exists."""
+    for puma in spec["pumas"]:
+        paths = [rake_output(spec, exp, puma, m) for m in spec["rake"]] + fit_outputs(spec, exp, puma)
+        if spec["hmc"]:
+            paths += hmc_outputs(spec, exp, puma)
+        if not all(path.exists() for path in paths):
+            return False
+    return True
+
+
+def advance(spec: dict, root: Path, stages=("rake", "fits", "hmc"), max_gpu_jobs: int = 6,
+            dry_run: bool = False) -> int:
+    """Submit, for every PUMA, whatever is neither finished nor queued or running; the
+    number of jobs submitted. A refused ``sbatch`` (a queue limit) ends the call
+    early, keeping what was submitted: the next call goes on from there."""
+    exp = root / spec["name"]
+    active = active_for(exp)
+    problems = check_inputs(spec)
+    if problems:
+        print("the data directory is not ready:\n  " + "\n  ".join(problems))
+        if not dry_run:
+            return 0
+    prepare(exp, spec, dry_run)
+    sub = Submitter(exp, spec, dry_run)
+    slots = [max_gpu_jobs - gpu_jobs_in_queue()]
+    try:
+        for puma in spec["pumas"]:
+            print(f"{puma}:")
+            if "rake" in stages:
+                stage_rake(sub, spec, exp, puma, active)
+            fits_job = (stage_fits(sub, spec, exp, puma, active) if "fits" in stages
+                        else (active.get(("fits", puma, None)) or {}).get("job_id"))
+            if "hmc" in stages and spec["hmc"]:
+                stage_hmc(sub, spec, exp, puma, active, fits_job, slots)
+    except SystemExit as error:
+        print(f"stopped early: {error}")
+    return sub.count
+
+
 def main() -> None:
     args = parse_args()
     spec = load_experiment(args.experiment)
     exp = args.root / spec["name"]
-    jobs = latest_jobs(read_jobs(exp))
-    states = active_jobs([job["job_id"] for job in jobs.values()])
-    active = {key: {**job, "state": states[job["job_id"]]}
-              for key, job in jobs.items() if job["job_id"] in states}
     if args.status:
-        status(spec, exp, active)
+        status(spec, exp, active_for(exp))
         return
-
-    problems = check_inputs(spec)
-    if problems:
-        print("the data directory is not ready:\n  " + "\n  ".join(problems))
-        if not args.dry_run:
-            raise SystemExit(1)
-    prepare(exp, spec, args.dry_run)
-    sub = Submitter(exp, spec, args.dry_run)
-    slots = [args.max_gpu_jobs - gpu_jobs_in_queue()]
-    for puma in spec["pumas"]:
-        print(f"{puma}:")
-        if "rake" in args.stage:
-            stage_rake(sub, spec, exp, puma, active)
-        fits_job = (stage_fits(sub, spec, exp, puma, active) if "fits" in args.stage
-                    else (active.get(("fits", puma, None)) or {}).get("job_id"))
-        if "hmc" in args.stage and spec["hmc"]:
-            stage_hmc(sub, spec, exp, puma, active, fits_job, slots)
-    print(f"{sub.count} job(s) {'would be ' if args.dry_run else ''}submitted; "
-          f"see --status")
+    if check_inputs(spec) and not args.dry_run:
+        print("the data directory is not ready:\n  " + "\n  ".join(check_inputs(spec)))
+        raise SystemExit(1)
+    count = advance(spec, args.root, args.stage, args.max_gpu_jobs, args.dry_run)
+    print(f"{count} job(s) {'would be ' if args.dry_run else ''}submitted; see --status")
 
 
 if __name__ == "__main__":
