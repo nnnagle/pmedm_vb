@@ -91,6 +91,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_experiment(path: Path) -> dict:
+    """The experiment, with ``pumas`` and ``alphas`` narrowed to its ``subset``.
+
+    ``pumas`` and ``alphas`` are the experiment's grid; an optional ``subset``
+    (``{"pumas": [...], "alphas": [...]}``, each a subset of the grid) is what is
+    run, scored and tabled. The grid is kept as ``_grid``: it is what tells one
+    experiment from another (so a subset of an experiment run on the whole grid
+    reuses its fits), and it fixes the HMC seeds, which therefore do not depend
+    on the subset.
+    """
     spec = json.loads(path.read_text())
     for key in ("name", "area", "pumas", "alphas", "model", "data_dir", "rake", "vb_families",
                 "hmc"):
@@ -98,7 +107,20 @@ def load_experiment(path: Path) -> dict:
             raise SystemExit(f"{path}: missing '{key}'")
     if "skewed" not in spec["vb_families"] and spec["hmc"]:
         raise SystemExit(f"{path}: HMC is whitened by the skewed VB fit; add 'skewed' to vb_families")
+    spec["_grid"] = {"pumas": list(spec["pumas"]), "alphas": list(spec["alphas"])}
+    subset = spec.get("subset") or {}
+    for key in ("pumas", "alphas"):
+        if key in subset:
+            extra = [v for v in subset[key] if v not in spec[key]]
+            if extra:
+                raise SystemExit(f"{path}: subset {key} {extra} not in the grid's {key}")
+            spec[key] = [v for v in spec[key] if v in subset[key]]
     return spec
+
+
+def grid(spec: dict) -> dict:
+    """The experiment's whole grid of PUMAs and alphas (a folder's record may predate ``_grid``)."""
+    return spec.get("_grid") or {"pumas": spec["pumas"], "alphas": spec["alphas"]}
 
 
 def comparable(spec: dict) -> dict:
@@ -106,7 +128,8 @@ def comparable(spec: dict) -> dict:
     so an option added or renamed later does not tell apart folders that never
     set it."""
     out = {key: value for key, value in spec.items()
-           if key not in FREE_KEYS and not key.startswith("_")}
+           if key not in FREE_KEYS and key != "subset" and not key.startswith("_")}
+    out.update(grid(spec))
     if isinstance(out.get("model"), dict):
         out["model"] = {k: v for k, v in out["model"].items() if v is not None}
     return out
@@ -351,8 +374,9 @@ def hmc_spec_lines(spec: dict, exp: Path, puma: str) -> list[str]:
     lines = []
     for kind, alpha, out in hmc_runs(spec, exp, puma):
         settings = hmc[kind]
-        seed = (settings["seed"] + 10 * spec["pumas"].index(puma)
-                + spec["alphas"].index(alpha))
+        full = grid(spec)
+        seed = (settings["seed"] + 10 * full["pumas"].index(puma)
+                + full["alphas"].index(alpha))
         args = ["--puma", puma, "--alpha", f"{alpha:g}", *model_args(spec),
                 "--area", area_slug(spec["area"]), "--vb-run", str(exp / puma / "vb_skewed"),
                 "--trajectory", f"{hmc['trajectory']:g}", "--chains", str(hmc["chains"]),

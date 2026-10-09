@@ -81,6 +81,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wall", type=float, default=0.01, help="a wall: a cell over this share of N")
     parser.add_argument("--neff-floor", type=float, default=10)
     parser.add_argument("--hh-z", type=float, default=5)
+    parser.add_argument("--pumas", nargs="+", default=None,
+                        help="pool only these PUMAs (default: every PUMA scored)")
+    parser.add_argument("--alphas", nargs="+", type=float, default=None,
+                        help="report only these alphas (default: every alpha scored)")
     parser.add_argument("--out", type=Path, required=True)
     return parser.parse_args()
 
@@ -298,8 +302,9 @@ def wide(stats: pd.DataFrame, table: str, experiments: list[tuple[str, str]]) ->
             if method not in NO_ALPHA:
                 continue
             # The same fit in every alpha cell: read it from the first.
-            values = [fmt(index.get((e, ALPHAS[0], method, k)), k) for k in keys
-                      for e, _ in experiments]
+            values = [fmt(next((index[(e, a, method, k)] for a in ALPHAS
+                                if (e, a, method, k) in index), None), k)
+                      for k in keys for e, _ in experiments]
             if not all(v == "--" for v in values):
                 rows.append((method_label, values))
         if rows:
@@ -368,27 +373,60 @@ def markdown(stats, table, experiments) -> str:
     return "\n".join(lines) + "\n"
 
 
+NUMBER_WORDS = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
+
+
+def word_notes(pumas: list[str]) -> None:
+    """Word the notes for the PUMAs pooled, which they are written for four of."""
+    n = len(pumas)
+    if n == 4:
+        return
+    the = f"PUMA {pumas[0]}" if n == 1 else f"the {NUMBER_WORDS.get(n, n)} PUMAs"
+    draws = ("its one draw" if n == 1 else f"its {NUMBER_WORDS.get(n, n)} draws, one per PUMA")
+    for key, (title, note) in TITLES.items():
+        note = (note.replace("mean over the four PUMAs", "mean over " + the if n > 1 else the)
+                .replace("of the four PUMAs", "of " + the).replace("over PUMAs", "over " + (
+                    "PUMAs" if n > 1 else "its one fit")))
+        TITLES[key] = (title, note)
+    for key, note in RAKING_NOTES.items():
+        RAKING_NOTES[key] = note.replace("its four draws, one per PUMA", draws)
+
+
+def keep(frame: pd.DataFrame, args) -> pd.DataFrame:
+    """The rows of the PUMAs and alphas asked for."""
+    if args.pumas is not None:
+        frame = frame[frame.puma.astype(str).isin(args.pumas)]
+    if args.alphas is not None:
+        alpha = frame.alpha.astype(float)
+        frame = frame[np.isclose(alpha.to_numpy()[:, None], np.array(args.alphas)[None, :]).any(axis=1)]
+    return frame
+
+
 def main() -> None:
     args = parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     labels = dict(EXPERIMENTS)
-    experiments, stats = [], []
+    experiments, stats, pooled = [], [], set()
     for name in args.experiments:
         folder = args.root / name / "scores" / args.tag
         if not (folder / "all_scores.csv").exists():
             print(f"skipping {name}: no {folder / 'all_scores.csv'}", flush=True)
             continue
         experiments.append((name, labels.get(name, name)))
-        cells = read_detail(folder / "detail", "cells", CELL_COLUMNS, CELL_SUBSETS)
+        cells = keep(read_detail(folder / "detail", "cells", CELL_COLUMNS, CELL_SUBSETS), args)
         rows = cell_statistics(cells)
         del cells
-        rows += draw_statistics(read_detail(folder / "detail", "draws", DRAW_COLUMNS), args)
-        rows += scores_statistics(pd.read_csv(folder / "all_scores.csv", dtype={"puma": str}))
+        rows += draw_statistics(keep(read_detail(folder / "detail", "draws", DRAW_COLUMNS), args),
+                                args)
+        scores = keep(pd.read_csv(folder / "all_scores.csv", dtype={"puma": str}), args)
+        pooled |= set(scores.puma.astype(str))
+        rows += scores_statistics(scores)
         stats.append(pd.DataFrame(rows).assign(experiment=name))
         print(f"read {name}", flush=True)
     if not stats:
         raise SystemExit("no experiment has its scoring")
     stats = pd.concat(stats, ignore_index=True)
+    word_notes(sorted(pooled))
     order = {m: i for i, (m, _) in enumerate(METHODS)}
     key_order = {k: i for i, k in enumerate(DIGITS)}
     stats = stats.assign(method_order=stats.method.map(order), key_order=stats.key.map(key_order))

@@ -83,7 +83,32 @@ def parse_args() -> argparse.Namespace:
                         help="submit at most this many scoring jobs in this call")
     parser.add_argument("--no-combine", action="store_true",
                         help="do not submit the combine job")
+    parser.add_argument("--pumas", nargs="+", default=None,
+                        help="score (and combine) only these of the experiment's PUMAs")
+    parser.add_argument("--alphas", nargs="+", type=float, default=None,
+                        help="score (and combine) only these of the experiment's alphas")
     return parser.parse_args()
+
+
+def subset_args(args) -> list[str]:
+    """``--pumas`` and ``--alphas`` as given, to pass on."""
+    out = []
+    if getattr(args, "pumas", None):
+        out += ["--pumas", *args.pumas]
+    if getattr(args, "alphas", None):
+        out += ["--alphas", *[f"{a:g}" for a in args.alphas]]
+    return out
+
+
+def narrow(spec: dict, pumas=None, alphas=None) -> dict:
+    """The spec with its PUMAs and alphas narrowed to ``pumas`` and ``alphas`` (None: all)."""
+    spec = dict(spec)
+    if pumas is not None:
+        spec["pumas"] = [p for p in spec["pumas"] if p in set(pumas)]
+    if alphas is not None:
+        spec["alphas"] = [a for a in spec["alphas"]
+                          if any(abs(float(a) - float(b)) < 1e-12 for b in alphas)]
+    return spec
 
 
 def cell_calls(spec: dict, exp: Path, puma: str, alpha: float, out: Path, draws: int
@@ -179,7 +204,7 @@ def plan(spec: dict, exp: Path, out: Path, draws: int) -> tuple[dict[str, list[s
     return cells, missing
 
 
-def scoring_state(exp: Path, tag: str) -> dict:
+def scoring_state(exp: Path, tag: str, pumas=None, alphas=None) -> dict:
     """Where a scoring stands: ``calls`` (the calls without scores, by cell),
     ``live`` (scoring or combine jobs queued or running), ``combined`` (whether
     ``all_scores.csv`` is newer than every cell's CSV) and ``exists``."""
@@ -188,7 +213,7 @@ def scoring_state(exp: Path, tag: str) -> dict:
     if not record_path.exists():
         return dict(exists=False, calls={}, live=set(), combined=False)
     record = json.loads(record_path.read_text())
-    spec = json.loads((exp / "experiment.json").read_text())
+    spec = narrow(json.loads((exp / "experiment.json").read_text()), pumas, alphas)
     cells, _ = plan(spec, exp, out, record["draws"])
     calls = {}
     for cell, lines in cells.items():
@@ -212,7 +237,7 @@ def write_record(out: Path, record: dict) -> None:
 
 def submit(args: argparse.Namespace) -> None:
     exp = args.experiment.resolve()
-    spec = json.loads((exp / "experiment.json").read_text())
+    spec = narrow(json.loads((exp / "experiment.json").read_text()), args.pumas, args.alphas)
     out = exp / "scores" / args.tag
     if out.exists() and not args.resume:
         raise SystemExit(f"{out} exists; pick a new tag, or pass --resume to submit what has "
@@ -290,7 +315,7 @@ def submit(args: argparse.Namespace) -> None:
             ["sbatch", "--parsable", export, log, f"--job-name={spec['name']}-{args.tag}-combine",
              *COMBINE_SLURM, f"--dependency=afterany:{':'.join(waiting)}",
              str(EXPERIMENTS / "run_python.sbatch"), "score_experiment.py", str(exp),
-             "--tag", args.tag, "--combine"], args.dry_run)
+             "--tag", args.tag, "--combine", *subset_args(args)], args.dry_run)
     except SystemExit as error:
         record["combine_error"] = str(error)
         print(f"the combine job was not submitted:\n{error}\nWhen the scoring jobs finish, "
@@ -306,7 +331,7 @@ def combine(args: argparse.Namespace) -> None:
     import pandas as pd
 
     exp = args.experiment.resolve()
-    spec = json.loads((exp / "experiment.json").read_text())
+    spec = narrow(json.loads((exp / "experiment.json").read_text()), args.pumas, args.alphas)
     out = exp / "scores" / args.tag
     record = json.loads((out / "scoring.json").read_text())
     files = sorted((out / "per_cell").glob("*.csv"))

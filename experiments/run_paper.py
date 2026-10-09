@@ -14,8 +14,14 @@ and nothing for it is queued or running:
 4. **score** -- per experiment, once its fits are complete:
    ``score_experiment.py --resume`` (so only calls without scores are run);
 5. **combine** -- per experiment, once every call has scores;
-6. **tables** -- ``paper_tables.py`` over the three experiments, into
-   ``<root>/tables``.
+6. **tables** -- ``paper_tables.py``: the baseline on its whole grid into
+   ``<root>/tables``, and the three experiments on the PUMAs and alphas they
+   share into ``<root>/tables_compare``.
+
+An experiment JSON's ``subset`` (``{"pumas": [...], "alphas": [...]}``) narrows
+what is run, scored and tabled to part of its grid; exp02 and exp03 run on one
+PUMA at two alphas this way, and an experiment folder already fitted on the
+whole grid is reused.
 
 Every stage looks at what exists, so the same call runs the analysis from an
 empty data directory and results root, or resumes one part way, without redoing
@@ -276,7 +282,7 @@ def advance_experiment(spec: dict, jobs: Jobs, args) -> bool:
         rx.advance(spec, args.root, max_gpu_jobs=args.max_gpu_jobs, dry_run=args.dry_run)
         return False
 
-    state = sx.scoring_state(exp, args.tag)
+    state = sx.scoring_state(exp, args.tag, spec["pumas"], spec["alphas"])
     if not state["exists"] or state["calls"]:
         if state["live"]:
             print(f"{spec['name']}: scoring -- {len(state['live'])} job(s) live")
@@ -287,7 +293,8 @@ def advance_experiment(spec: dict, jobs: Jobs, args) -> bool:
               f"without scores" if state["exists"] else f"{spec['name']}: scoring")
         score = argparse.Namespace(experiment=exp, tag=args.tag, draws=args.draws,
                                    allow_missing=False, dry_run=args.dry_run, combine=False,
-                                   resume=True, max_jobs=None, no_combine=True)
+                                   resume=True, max_jobs=None, no_combine=True,
+                                   pumas=spec["pumas"], alphas=spec["alphas"])
         try:
             sx.submit(score)
         except SystemExit as error:
@@ -302,12 +309,26 @@ def advance_experiment(spec: dict, jobs: Jobs, args) -> bool:
         return False
     guard(jobs, key, args)
     jobs.sbatch(key, spec, "run_python.sbatch",
-                ["score_experiment.py", str(exp), "--tag", args.tag, "--combine"], sx.COMBINE_SLURM)
+                ["score_experiment.py", str(exp), "--tag", args.tag, "--combine",
+                 "--pumas", *spec["pumas"], "--alphas", *[f"{a:g}" for a in spec["alphas"]]],
+                sx.COMBINE_SLURM)
     return False
 
 
-def tables_current(specs, args) -> bool:
-    out = args.root / "tables" / "tables.md"
+def table_sets(specs) -> list[dict]:
+    """The paper's tables: the baseline on its whole grid (``tables``), and every
+    experiment on the PUMAs and alphas they all have (``tables_compare``), so that
+    their columns pool the same cells."""
+    pumas = sorted(set.intersection(*(set(s["pumas"]) for s in specs)))
+    alphas = [a for a in specs[0]["alphas"]
+              if all(any(abs(a - b) < 1e-12 for b in s["alphas"]) for s in specs)]
+    return [{"key": "tables", "out": "tables", "specs": specs[:1], "filter": []},
+            {"key": "tables_compare", "out": "tables_compare", "specs": specs,
+             "filter": ["--pumas", *pumas, "--alphas", *[f"{a:g}" for a in alphas]]}]
+
+
+def tables_current(specs, args, out_name: str = "tables") -> bool:
+    out = args.root / out_name / "tables.md"
     if not out.exists():
         return False
     summaries = [args.root / s["name"] / "scores" / args.tag / "all_scores.csv" for s in specs]
@@ -326,15 +347,22 @@ def advance(args) -> int:
         combined = [advance_experiment(spec, jobs, args) for spec in specs]
         if not all(combined):
             return WAITING
-        if tables_current(specs, args):
-            print("done: every stage is complete; tables in", args.root / "tables")
+        done = True
+        for table in table_sets(specs):
+            if tables_current(table["specs"], args, table["out"]):
+                continue
+            done = False
+            if not jobs.is_live(table["key"]):
+                guard(jobs, table["key"], args)
+                jobs.sbatch(table["key"], specs[0], "run_python.sbatch",
+                            ["paper_tables.py", "--root", str(args.root), "--tag", args.tag,
+                             "--experiments", *[s["name"] for s in table["specs"]],
+                             *table["filter"], "--out", str(args.root / table["out"])],
+                            TABLES_SLURM)
+        if done:
+            print("done: every stage is complete; tables in",
+                  ", ".join(str(args.root / t["out"]) for t in table_sets(specs)))
             return DONE
-        if not jobs.is_live("tables"):
-            guard(jobs, "tables", args)
-            jobs.sbatch("tables", specs[0], "run_python.sbatch",
-                        ["paper_tables.py", "--root", str(args.root), "--tag", args.tag,
-                         "--experiments", *[s["name"] for s in specs],
-                         "--out", str(args.root / "tables")], TABLES_SLURM)
         return WAITING
     except Attention as error:
         print(f"NEEDS ATTENTION: {error}")
@@ -436,7 +464,7 @@ def status(args) -> None:
         line = f"  {spec['name']:<16} fits {'done' if fits else 'not done'}" + (
             f" ({live} job(s) live)" if live else "")
         if fits:
-            s = sx.scoring_state(exp, args.tag)
+            s = sx.scoring_state(exp, args.tag, spec["pumas"], spec["alphas"])
             if not s["exists"]:
                 line += "; scoring not started"
             else:
@@ -445,7 +473,10 @@ def status(args) -> None:
                     f" ({len(s['live'])} job(s) live)" if s["live"] else "")
                 line += "; combined" if s["combined"] else ""
         print(line)
-    print(f"  tables    {'current' if tables_current(specs, args) else 'not current'}")
+    for table in table_sets(specs):
+        current = tables_current(table["specs"], args, table["out"])
+        print(f"  {table['out']:<15} {'current' if current else 'not current'}"
+              + (" (job live)" if jobs.is_live(table["key"]) else ""))
     driver = jobs.latest.get("driver")
     if driver:
         print(f"  driver    job {driver['job_id']} {'queued or running' if jobs.is_live('driver') else 'not live'}")
