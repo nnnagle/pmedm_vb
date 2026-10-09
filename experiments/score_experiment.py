@@ -33,6 +33,15 @@ script with ``--combine``: it concatenates the cells' CSVs and writes the
 A method whose results are missing is listed and, with ``--allow-missing``,
 left out (a cell without its HMC reference is left out whole); without it
 nothing is submitted. ``--dry-run`` prints the jobs and writes nothing.
+
+**Resuming.** ``--resume`` takes a tag that exists and submits only the calls
+that have no scores yet -- a method counts as scored once its rows are in the
+cell's ``per_cell`` CSV -- skipping cells whose job is still queued or running.
+So a submission cut short (a queue limit, a failed job) is finished by calling
+again with ``--resume``, without scoring anything twice. ``scoring.json`` is
+written before the first job is submitted and after each one. ``--max-jobs``
+caps the jobs one call submits; ``--no-combine`` leaves the combine step to the
+caller (``run_paper.py``).
 """
 
 from __future__ import annotations
@@ -68,6 +77,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--combine", action="store_true",
                         help="(the final job) combine the cells' CSVs and write the summaries")
+    parser.add_argument("--resume", action="store_true",
+                        help="the tag exists: submit only the calls without scores")
+    parser.add_argument("--max-jobs", type=int, default=None,
+                        help="submit at most this many scoring jobs in this call")
+    parser.add_argument("--no-combine", action="store_true",
+                        help="do not submit the combine job")
     return parser.parse_args()
 
 
@@ -123,20 +138,87 @@ def sbatch(command: list[str], dry_run: bool) -> str:
     return result.stdout.strip().split(";")[0]
 
 
+def method_of(call: str) -> str:
+    """The ``--method`` of one compare_methods.py argument line."""
+    tokens = call.split()
+    return tokens[tokens.index("--method") + 1]
+
+
+def scored_methods(out: Path, cell: str) -> set[str]:
+    """The methods whose scores are in the cell's CSV."""
+    import pandas as pd
+
+    path = out / "per_cell" / f"{cell}.csv"
+    if not path.exists():
+        return set()
+    return set(pd.read_csv(path, usecols=["method"]).method.unique())
+
+
+def live_jobs(job_ids) -> set[str]:
+    """Those of ``job_ids`` still queued or running."""
+    ids = [j for j in job_ids if j and not str(j).startswith("DRYRUN")]
+    if not ids:
+        return set()
+    try:
+        result = subprocess.run(["squeue", "-h", "-o", "%i", "-j", ",".join(ids)],
+                                capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return set(ids)  # unknown: assume live, so nothing is submitted twice
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def plan(spec: dict, exp: Path, out: Path, draws: int) -> tuple[dict[str, list[str]], list[str]]:
+    """Every cell's compare_methods.py calls, and what is missing to score."""
+    cells, missing = {}, []
+    for puma in spec["pumas"]:
+        for alpha in spec["alphas"]:
+            calls, lacking = cell_calls(spec, exp, puma, alpha, out, draws)
+            missing += lacking
+            if calls:
+                cells[f"{puma}_a{alpha:g}"] = calls
+    return cells, missing
+
+
+def scoring_state(exp: Path, tag: str) -> dict:
+    """Where a scoring stands: ``calls`` (the calls without scores, by cell),
+    ``live`` (scoring or combine jobs queued or running), ``combined`` (whether
+    ``all_scores.csv`` is newer than every cell's CSV) and ``exists``."""
+    out = exp / "scores" / tag
+    record_path = out / "scoring.json"
+    if not record_path.exists():
+        return dict(exists=False, calls={}, live=set(), combined=False)
+    record = json.loads(record_path.read_text())
+    spec = json.loads((exp / "experiment.json").read_text())
+    cells, _ = plan(spec, exp, out, record["draws"])
+    calls = {}
+    for cell, lines in cells.items():
+        done = scored_methods(out, cell)
+        left = [line for line in lines if method_of(line) not in done]
+        if left:
+            calls[cell] = left
+    jobs = [*record.get("jobs", {}).values(), record.get("combine_job")]
+    live = live_jobs(jobs)
+    csvs = list((out / "per_cell").glob("*.csv"))
+    summary = out / "all_scores.csv"
+    combined = summary.exists() and all(p.stat().st_mtime <= summary.stat().st_mtime for p in csvs)
+    return dict(exists=True, calls=calls, live=live, combined=combined)
+
+
+def write_record(out: Path, record: dict) -> None:
+    tmp = out / "scoring.json.tmp"
+    tmp.write_text(json.dumps(record, indent=2) + "\n")
+    tmp.replace(out / "scoring.json")
+
+
 def submit(args: argparse.Namespace) -> None:
     exp = args.experiment.resolve()
     spec = json.loads((exp / "experiment.json").read_text())
     out = exp / "scores" / args.tag
-    if out.exists():
-        raise SystemExit(f"{out} exists; pick a new tag")
+    if out.exists() and not args.resume:
+        raise SystemExit(f"{out} exists; pick a new tag, or pass --resume to submit what has "
+                         "no scores yet")
 
-    cells, missing = {}, []
-    for puma in spec["pumas"]:
-        for alpha in spec["alphas"]:
-            calls, lacking = cell_calls(spec, exp, puma, alpha, out, args.draws)
-            missing += lacking
-            if calls:
-                cells[f"{puma}_a{alpha:g}"] = calls
+    cells, missing = plan(spec, exp, out, args.draws)
     if missing:
         print("missing:\n  " + "\n  ".join(missing))
         if not args.allow_missing:
@@ -144,50 +226,80 @@ def submit(args: argparse.Namespace) -> None:
     if not cells:
         raise SystemExit("no cell has its HMC reference; nothing to score")
 
+    record_path = out / "scoring.json"
+    if record_path.exists():
+        record = json.loads(record_path.read_text())
+        if record["draws"] != args.draws:
+            raise SystemExit(f"{out} was scored with --draws {record['draws']}, not {args.draws}")
+        record.setdefault("history", []).append(
+            {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "commit": git_commit()})
+    else:
+        record = {"tag": args.tag, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                  "commit": git_commit(), "draws": args.draws, "experiment": str(exp),
+                  "level": spec.get("_level"), "missing": missing, "jobs": {},
+                  "combine_job": None}
+    live = live_jobs(record["jobs"].values())
+    todo = {}
+    for cell, calls in cells.items():
+        if record["jobs"].get(cell) in live:
+            continue
+        done = scored_methods(out, cell)
+        left = [call for call in calls if method_of(call) not in done]
+        if left:
+            todo[cell] = left
+    if not todo:
+        print(f"nothing to submit: every call has scores or a live job ({len(live)} live)")
+        return
+
     export = f"--export=ALL,PMEDM_VB_DATA={data_dir(spec)}"
     log = f"--output={out / 'logs' / 'slurm-%j.log'}"
     if not args.dry_run:
-        (out / "specs").mkdir(parents=True)
-        (out / "per_cell").mkdir()
-        (out / "logs").mkdir()
-    jobs = {}
-    for cell, calls in cells.items():
-        spec_file = out / "specs" / f"{cell}.txt"
+        for sub in ("specs", "per_cell", "logs", "detail"):
+            (out / sub).mkdir(parents=True, exist_ok=True)
+        write_record(out, record)
+    submitted = []
+    for cell, calls in todo.items():
+        if args.max_jobs is not None and len(submitted) >= args.max_jobs:
+            print(f"--max-jobs {args.max_jobs} reached; the rest on a later call")
+            break
+        whole = len(calls) == len(cells[cell])
+        spec_file = out / "specs" / (f"{cell}.txt" if whole else
+                                     f"{cell}_part{time.strftime('%Y%m%d%H%M%S')}.txt")
         if args.dry_run:
             print(f"  would write {spec_file}: {len(calls)} calls")
         else:
             spec_file.write_text("\n".join(calls) + "\n")
-        jobs[cell] = sbatch(["sbatch", "--parsable", export, log,
-                             f"--job-name={spec['name']}-{args.tag}-{cell}", *SCORE_SLURM,
-                             str(EXPERIMENTS / "compare_methods.sbatch"), str(spec_file)],
-                            args.dry_run)
-    record = {"tag": args.tag, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-              "commit": git_commit(), "draws": args.draws, "experiment": str(exp),
-              "level": spec.get("_level"), "missing": missing, "jobs": jobs,
-              "combine_job": None}
-    # Recorded before the combine job is submitted, so that a failure there still
-    # leaves what --combine needs once the scoring jobs are done.
-    if not args.dry_run:
-        (out / "scoring.json").write_text(json.dumps(record, indent=2) + "\n")
+        try:
+            job = sbatch(["sbatch", "--parsable", export, log,
+                          f"--job-name={spec['name']}-{args.tag}-{cell}", *SCORE_SLURM,
+                          str(EXPERIMENTS / "compare_methods.sbatch"), str(spec_file)],
+                         args.dry_run)
+        except SystemExit as error:
+            print(f"{error}\nstopped after {len(submitted)} job(s); call again with --resume")
+            break
+        record["jobs"][cell] = job
+        submitted.append(job)
+        if not args.dry_run:
+            write_record(out, record)
+    print(f"{len(submitted)} scoring job(s) submitted for {args.tag}")
+    if args.no_combine or not submitted:
+        return
+    waiting = sorted(set(submitted) | live_jobs(record["jobs"].values()))
     try:
-        combine = sbatch(["sbatch", "--parsable", export, log,
-                          f"--job-name={spec['name']}-{args.tag}-combine", *COMBINE_SLURM,
-                          f"--dependency=afterany:{':'.join(jobs.values())}",
-                          str(EXPERIMENTS / "run_python.sbatch"), "score_experiment.py", str(exp),
-                          "--tag", args.tag, "--combine"], args.dry_run)
+        record["combine_job"] = sbatch(
+            ["sbatch", "--parsable", export, log, f"--job-name={spec['name']}-{args.tag}-combine",
+             *COMBINE_SLURM, f"--dependency=afterany:{':'.join(waiting)}",
+             str(EXPERIMENTS / "run_python.sbatch"), "score_experiment.py", str(exp),
+             "--tag", args.tag, "--combine"], args.dry_run)
     except SystemExit as error:
         record["combine_error"] = str(error)
-        (out / "scoring.json").write_text(json.dumps(record, indent=2) + "\n")
-        raise SystemExit(f"{len(jobs)} scoring job(s) submitted, but the combine job was not:\n"
-                         f"{error}\nWhen they finish, combine on this node with\n"
-                         f"  {sys.executable} {EXPERIMENTS / 'score_experiment.py'} {exp} "
-                         f"--tag {args.tag} --combine")
-    record["combine_job"] = combine
-    if args.dry_run:
+        print(f"the combine job was not submitted:\n{error}\nWhen the scoring jobs finish, "
+              f"combine with\n  {sys.executable} {EXPERIMENTS / 'score_experiment.py'} {exp} "
+              f"--tag {args.tag} --combine")
+    if not args.dry_run:
+        write_record(out, record)
+    else:
         print(json.dumps(record, indent=2))
-        return
-    (out / "scoring.json").write_text(json.dumps(record, indent=2) + "\n")
-    print(f"{len(jobs)} scoring job(s) and the combine job {combine} submitted; results in {out}")
 
 
 def combine(args: argparse.Namespace) -> None:
@@ -230,7 +342,7 @@ def combine(args: argparse.Namespace) -> None:
                         "--out", str(out)], check=True, stdout=subprocess.DEVNULL)
     record["combined"] = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "commit": git_commit(),
                           "cells": len(scores), "missing": len(lines)}
-    (out / "scoring.json").write_text(json.dumps(record, indent=2) + "\n")
+    write_record(out, record)
     print(f"combined {len(scores)} cell(s) into {out}; {len(lines)} missing (missing.txt)")
 
 
