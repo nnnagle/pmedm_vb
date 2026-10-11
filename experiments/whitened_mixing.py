@@ -81,8 +81,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--experiments", nargs="+", default=["exp01_baseline", "exp03_rollup"])
     parser.add_argument("--alpha", type=float, required=True)
     parser.add_argument("--pumas", nargs="+", default=None, help="default: the experiment's")
-    parser.add_argument("--kinds", nargs="+", choices=["short", "ref"], default=["short", "ref"])
-    parser.add_argument("--structure-kinds", nargs="+", choices=["short", "ref"], default=["ref"],
+    parser.add_argument("--kinds", nargs="+", default=["short", "ref"],
+                        help="runs to read, each <experiment>/<puma>/hmc_<kind>")
+    parser.add_argument("--structure-kinds", nargs="+", default=["ref"],
                         help="runs whose wide coordinates' correlation is examined (section 4)")
     parser.add_argument("--wide-sd", type=float, default=2.0,
                         help="whitened sd above which a coordinate counts as wide (section 4)")

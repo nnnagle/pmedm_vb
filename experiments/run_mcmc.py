@@ -43,6 +43,13 @@ resubmitted run still reports its total.
    worth.
 
 ``--variance-floor`` must match the VB run, since it sets ``Sigma`` in ``f``.
+
+``--scale-from`` adds a fixed diagonal scale to the whitening, ``lambda = mu +
+A diag(s) x``, with ``s`` the ``sd`` array of an ``.npz`` (each whitened
+coordinate's posterior sd, as ``whitened_mixing.py`` writes them). It is the
+diagonal mass matrix HMC would learn, given in advance: an oracle that shows
+what learning one could gain. The chains start at the same points as without
+it (each start divided by ``s``), so only the sampler's geometry changes.
 """
 
 from __future__ import annotations
@@ -95,6 +102,9 @@ def parse_args() -> argparse.Namespace:
                         help="nominal integration time; 3.0 mixed rare directions far better than 1.5")
     parser.add_argument("--target-accept", type=float, default=0.8)
     parser.add_argument("--max-leapfrog", type=int, default=1000)
+    parser.add_argument("--scale-from", type=Path, default=None,
+                        help="an .npz whose 'sd' array (one per whitened coordinate) scales the "
+                             "whitening's columns: lambda = mean + A diag(sd) x")
     parser.add_argument("--init-max-share", type=float, default=0.01,
                         help="largest share of p on one cell a starting point may have")
     parser.add_argument("--checkpoint", type=int, default=100)
@@ -160,6 +170,18 @@ def load_problem(args: argparse.Namespace):
 # -- sample ------------------------------------------------------------------
 
 
+def whitening_scale(path: Path | None, size: int) -> np.ndarray | None:
+    """The diagonal scale ``s`` from ``path``'s ``sd`` array; 1 where an sd is
+    not positive (a coordinate the hierarchy fixes)."""
+    if path is None:
+        return None
+    with np.load(path) as saved:
+        sd = np.asarray(saved["sd"], dtype=float)
+    if sd.shape != (size,):
+        raise SystemExit(f"{path}: 'sd' has shape {sd.shape}, the whitening has {size} coordinates")
+    return np.where(np.isfinite(sd) & (sd > 0), sd, 1.0)
+
+
 def draw_arrays(draws: np.ndarray, hierarchy) -> dict[str, np.ndarray]:
     """Kept draws for the trace: ``lam`` always in today's layout (the
     multipliers the data see), plus ``xi`` under a hierarchy, for densities."""
@@ -188,6 +210,12 @@ def sample(args: argparse.Namespace) -> None:
     A = whitening_matrix(q)
     rng = np.random.default_rng(args.seed)
     x0 = starting_points(target, q.mean, A, args.chains, rng, args.init_max_share, device)
+    scale = whitening_scale(args.scale_from, q.size)
+    if scale is not None:
+        A = A * scale            # columns: lambda = mean + A diag(s) x
+        x0 = x0 / scale          # the same starting points as without the scale
+        logger.info("whitening scaled by %s: s median %.3g, max %.3g", args.scale_from,
+                    np.median(scale), scale.max())
     settings = HMCSettings(
         step_size=args.step_size, trajectory=args.trajectory,
         target_accept=args.target_accept, max_leapfrog=args.max_leapfrog,
@@ -208,6 +236,10 @@ def sample(args: argparse.Namespace) -> None:
             earlier_seconds = float(saved["seconds"]) if "seconds" in saved.files else 0.0
             if "warmup_seconds" in saved.files:
                 warmup_seconds = float(saved["warmup_seconds"])
+            saved_scale = str(saved["scale_from"]) if "scale_from" in saved.files else ""
+        if saved_scale != str(args.scale_from or ""):
+            raise SystemExit(f"{trace_path} was sampled with --scale-from {saved_scale or 'none'}, "
+                             f"not {args.scale_from or 'none'}")
         if sampler.chains != args.chains:
             raise SystemExit(f"{state_path} has {sampler.chains} chains, not {args.chains}")
         logger.info("resuming %s at iteration %d", name, sampler.iteration)
@@ -228,7 +260,7 @@ def sample(args: argparse.Namespace) -> None:
             step_size=np.asarray(step_sizes), n_leapfrog=np.asarray(leapfrogs),
             warmup=args.warmup, thin=args.thin, n_zones=inputs.n_zones, n_units=inputs.n_units,
             seconds=earlier_seconds + time.perf_counter() - started,
-            warmup_seconds=warmup_seconds,
+            warmup_seconds=warmup_seconds, scale_from=str(args.scale_from or ""),
             **(draw_arrays(np.asarray(draws), hierarchy) if draws else {}),
         )
 
@@ -294,7 +326,8 @@ def report(args: argparse.Namespace) -> None:
     def chains_first(key: str) -> np.ndarray:
         return trace[key][post].T  # (chains, draws)
 
-    lines = [f"HMC {name}, variance floor {args.variance_floor}, whitened by {args.vb_run}",
+    lines = [f"HMC {name}, variance floor {args.variance_floor}, whitened by {args.vb_run}"
+             + (f", scaled by {args.scale_from}" if args.scale_from else ""),
              f"{inputs.n_zones} zones x {inputs.n_units:,} units, N = {inputs.N:,.0f}; "
              f"{trace['log_pi'].shape[1]} chains, {warmup} warmup + {done - warmup} sampling "
              f"iterations"]
