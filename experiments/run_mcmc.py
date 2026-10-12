@@ -51,6 +51,13 @@ diagonal mass matrix HMC would learn, given in advance: an oracle that shows
 what learning one could gain. The chains start at the same points as without
 it (each start divided by ``s``), so only the sampler's geometry changes.
 
+``--diag-from`` takes the same scale from an earlier run's trace instead of an
+``.npz``: each whitened coordinate's sd over its kept draws, measured in *this*
+run's whitening (``--vb-run``), for every coordinate -- the diagonal mass
+matrix on top of the VB whitening, ``Sigma = A S^2 A'``, given in advance.
+With ``--vb-run`` a Gaussian-only fit, that is the oracle for whitening by
+Gaussian VB plus a learned diagonal.
+
 ``--block-from`` goes one step further, from an earlier run's trace: every
 coordinate is scaled by its sd in that trace's kept draws, as above, except
 the coordinates with sd over ``--block-sd``, which are mapped by the Cholesky
@@ -114,6 +121,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scale-from", type=Path, default=None,
                         help="an .npz whose 'sd' array (one per whitened coordinate) scales the "
                              "whitening's columns: lambda = mean + A diag(sd) x")
+    parser.add_argument("--diag-from", type=Path, default=None,
+                        help="an earlier run's _trace.npz: scale every whitened coordinate (in "
+                             "this run's whitening) by its sd there; excludes --scale-from and "
+                             "--block-from")
     parser.add_argument("--block-from", type=Path, default=None,
                         help="an earlier run's _trace.npz: scale each whitened coordinate by its "
                              "sd there, and the wide ones (--block-sd) by the Cholesky factor of "
@@ -141,8 +152,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cap-strength", type=float, default=None,
                         help="the cap's strength tau (required with --share-cap)")
     args = parser.parse_args()
-    if getattr(args, "block_from", None) is not None and args.scale_from is not None:
-        parser.error("--block-from and --scale-from are alternatives; give one")
+    given = [name for name in ("scale_from", "block_from", "diag_from")
+             if getattr(args, name, None) is not None]
+    if len(given) > 1:
+        parser.error("--scale-from, --block-from and --diag-from are alternatives; give one")
     from pmedm_vb.assemble.hierarchy import level_name
     from pmedm_vb.assemble.sharecap import cap_level
 
@@ -199,19 +212,25 @@ def whitening_scale(path: Path | None, size: int) -> np.ndarray | None:
     return np.where(np.isfinite(sd) & (sd > 0), sd, 1.0)
 
 
+def whitened_draws(path: Path, q) -> np.ndarray:
+    """An earlier run's kept draws at ``path``, ``(draws, m)``, in ``q``'s
+    whitened coordinates ``x = G' (xi - mu)``."""
+    with np.load(path) as saved:
+        key = "xi" if "xi" in saved.files else "lam"
+        draws = saved[key]
+    m = draws.shape[2]
+    if m != q.size:
+        raise SystemExit(f"{path}: draws have {m} coordinates, the whitening has {q.size}")
+    return q.whiten((draws.reshape(-1, m) - q.mean).T).T
+
+
 def block_metric(path: Path, q, wide_sd: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """``(s, wide, L)`` from an earlier run's trace at ``path``: each whitened
     coordinate's sd over its kept draws (1 where it does not vary), the
     coordinates with sd over ``wide_sd``, and the Cholesky factor of their
-    covariance. The whitening is ``q``'s, so the trace must come from the
-    same VB fit."""
-    with np.load(path) as saved:
-        key = "xi" if "xi" in saved.files else "lam"
-        draws = saved[key]
-    kept, chains, m = draws.shape
-    if m != q.size:
-        raise SystemExit(f"{path}: draws have {m} coordinates, the whitening has {q.size}")
-    x = q.whiten((draws.reshape(-1, m) - q.mean).T).T
+    covariance, all in ``q``'s whitening."""
+    x = whitened_draws(path, q)
+    kept_chains = x.shape[0]
     sd = x.std(axis=0)
     wide = sd > wide_sd
     cov = np.cov(x[:, wide], rowvar=False).reshape(int(wide.sum()), -1)
@@ -219,7 +238,7 @@ def block_metric(path: Path, q, wide_sd: float) -> tuple[np.ndarray, np.ndarray,
     corr = cov / np.outer(sd[wide], sd[wide]) if wide.any() else cov
     eig = np.linalg.eigvalsh(corr) if wide.any() else np.array([np.nan])
     logger.info("block metric from %s (%d draws): %d coordinates with sd over %g; their "
-                "correlation's eigenvalues min %.3g, max %.3g", path, kept * chains,
+                "correlation's eigenvalues min %.3g, max %.3g", path, kept_chains,
                 int(wide.sum()), wide_sd, eig[0], eig[-1])
     return np.where(sd > 0, sd, 1.0), wide, L
 
@@ -228,6 +247,8 @@ def metric_name(args: argparse.Namespace) -> str:
     """What the whitening is scaled by, for the trace and the report ('' for nothing)."""
     if getattr(args, "block_from", None) is not None:
         return f"block {args.block_from} sd>{args.block_sd:g}"
+    if getattr(args, "diag_from", None) is not None:
+        return f"diag {args.diag_from}"
     return str(args.scale_from or "")
 
 
@@ -265,6 +286,13 @@ def sample(args: argparse.Namespace) -> None:
         x0 = x0 / scale          # the same starting points as without the scale
         logger.info("whitening scaled by %s: s median %.3g, max %.3g", args.scale_from,
                     np.median(scale), scale.max())
+    if args.diag_from is not None:
+        sd = whitened_draws(args.diag_from, q).std(axis=0)
+        scale = np.where(sd > 0, sd, 1.0)
+        A = A * scale            # Sigma = A S^2 A', every coordinate scaled
+        x0 = x0 / scale
+        logger.info("diagonal from %s: s p10 %.3g, median %.3g, p90 %.3g, max %.3g", args.diag_from,
+                    *np.quantile(scale, [0.1, 0.5, 0.9, 1.0]))
     if args.block_from is not None:
         from scipy.linalg import solve_triangular
 
