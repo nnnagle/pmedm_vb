@@ -50,6 +50,15 @@ coordinate's posterior sd, as ``whitened_mixing.py`` writes them). It is the
 diagonal mass matrix HMC would learn, given in advance: an oracle that shows
 what learning one could gain. The chains start at the same points as without
 it (each start divided by ``s``), so only the sampler's geometry changes.
+
+``--block-from`` goes one step further, from an earlier run's trace: every
+coordinate is scaled by its sd in that trace's kept draws, as above, except
+the coordinates with sd over ``--block-sd``, which are mapped by the Cholesky
+factor ``L`` of their covariance there instead, ``lambda = mu + A M x`` with
+``M = diag(s)`` but ``L`` on the wide block. Their correlation (up to 0.9 in
+the reference runs) leaves directions much narrower than 1 after a diagonal
+scale, which may be what halved the step size with ``--scale-from``. The
+starts are again unchanged (``M x0`` is the unscaled start).
 """
 
 from __future__ import annotations
@@ -105,6 +114,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scale-from", type=Path, default=None,
                         help="an .npz whose 'sd' array (one per whitened coordinate) scales the "
                              "whitening's columns: lambda = mean + A diag(sd) x")
+    parser.add_argument("--block-from", type=Path, default=None,
+                        help="an earlier run's _trace.npz: scale each whitened coordinate by its "
+                             "sd there, and the wide ones (--block-sd) by the Cholesky factor of "
+                             "their covariance; excludes --scale-from")
+    parser.add_argument("--block-sd", type=float, default=2.0,
+                        help="whitened sd above which --block-from treats a coordinate as wide")
     parser.add_argument("--init-max-share", type=float, default=0.01,
                         help="largest share of p on one cell a starting point may have")
     parser.add_argument("--checkpoint", type=int, default=100)
@@ -126,6 +141,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cap-strength", type=float, default=None,
                         help="the cap's strength tau (required with --share-cap)")
     args = parser.parse_args()
+    if getattr(args, "block_from", None) is not None and args.scale_from is not None:
+        parser.error("--block-from and --scale-from are alternatives; give one")
     from pmedm_vb.assemble.hierarchy import level_name
     from pmedm_vb.assemble.sharecap import cap_level
 
@@ -182,6 +199,38 @@ def whitening_scale(path: Path | None, size: int) -> np.ndarray | None:
     return np.where(np.isfinite(sd) & (sd > 0), sd, 1.0)
 
 
+def block_metric(path: Path, q, wide_sd: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``(s, wide, L)`` from an earlier run's trace at ``path``: each whitened
+    coordinate's sd over its kept draws (1 where it does not vary), the
+    coordinates with sd over ``wide_sd``, and the Cholesky factor of their
+    covariance. The whitening is ``q``'s, so the trace must come from the
+    same VB fit."""
+    with np.load(path) as saved:
+        key = "xi" if "xi" in saved.files else "lam"
+        draws = saved[key]
+    kept, chains, m = draws.shape
+    if m != q.size:
+        raise SystemExit(f"{path}: draws have {m} coordinates, the whitening has {q.size}")
+    x = q.whiten((draws.reshape(-1, m) - q.mean).T).T
+    sd = x.std(axis=0)
+    wide = sd > wide_sd
+    cov = np.cov(x[:, wide], rowvar=False).reshape(int(wide.sum()), -1)
+    L = np.linalg.cholesky(cov) if wide.any() else np.zeros((0, 0))
+    corr = cov / np.outer(sd[wide], sd[wide]) if wide.any() else cov
+    eig = np.linalg.eigvalsh(corr) if wide.any() else np.array([np.nan])
+    logger.info("block metric from %s (%d draws): %d coordinates with sd over %g; their "
+                "correlation's eigenvalues min %.3g, max %.3g", path, kept * chains,
+                int(wide.sum()), wide_sd, eig[0], eig[-1])
+    return np.where(sd > 0, sd, 1.0), wide, L
+
+
+def metric_name(args: argparse.Namespace) -> str:
+    """What the whitening is scaled by, for the trace and the report ('' for nothing)."""
+    if getattr(args, "block_from", None) is not None:
+        return f"block {args.block_from} sd>{args.block_sd:g}"
+    return str(args.scale_from or "")
+
+
 def draw_arrays(draws: np.ndarray, hierarchy) -> dict[str, np.ndarray]:
     """Kept draws for the trace: ``lam`` always in today's layout (the
     multipliers the data see), plus ``xi`` under a hierarchy, for densities."""
@@ -216,6 +265,15 @@ def sample(args: argparse.Namespace) -> None:
         x0 = x0 / scale          # the same starting points as without the scale
         logger.info("whitening scaled by %s: s median %.3g, max %.3g", args.scale_from,
                     np.median(scale), scale.max())
+    if args.block_from is not None:
+        from scipy.linalg import solve_triangular
+
+        s, wide, L = block_metric(args.block_from, q, args.block_sd)
+        scaled = A * s                               # lambda = mean + A M x, M = diag(s) ...
+        scaled[:, wide] = A[:, wide] @ L             # ... with L on the wide block
+        x0 = x0 / s
+        x0[:, wide] = solve_triangular(L, (x0[:, wide] * s[wide]).T, lower=True).T
+        A = scaled
     settings = HMCSettings(
         step_size=args.step_size, trajectory=args.trajectory,
         target_accept=args.target_accept, max_leapfrog=args.max_leapfrog,
@@ -236,10 +294,11 @@ def sample(args: argparse.Namespace) -> None:
             earlier_seconds = float(saved["seconds"]) if "seconds" in saved.files else 0.0
             if "warmup_seconds" in saved.files:
                 warmup_seconds = float(saved["warmup_seconds"])
-            saved_scale = str(saved["scale_from"]) if "scale_from" in saved.files else ""
-        if saved_scale != str(args.scale_from or ""):
-            raise SystemExit(f"{trace_path} was sampled with --scale-from {saved_scale or 'none'}, "
-                             f"not {args.scale_from or 'none'}")
+            saved_metric = next((str(saved[k]) for k in ("metric", "scale_from")
+                                 if k in saved.files), "")
+        if saved_metric != metric_name(args):
+            raise SystemExit(f"{trace_path} was sampled with metric {saved_metric or 'none'!r}, "
+                             f"not {metric_name(args) or 'none'!r}")
         if sampler.chains != args.chains:
             raise SystemExit(f"{state_path} has {sampler.chains} chains, not {args.chains}")
         logger.info("resuming %s at iteration %d", name, sampler.iteration)
@@ -260,7 +319,7 @@ def sample(args: argparse.Namespace) -> None:
             step_size=np.asarray(step_sizes), n_leapfrog=np.asarray(leapfrogs),
             warmup=args.warmup, thin=args.thin, n_zones=inputs.n_zones, n_units=inputs.n_units,
             seconds=earlier_seconds + time.perf_counter() - started,
-            warmup_seconds=warmup_seconds, scale_from=str(args.scale_from or ""),
+            warmup_seconds=warmup_seconds, metric=metric_name(args),
             **(draw_arrays(np.asarray(draws), hierarchy) if draws else {}),
         )
 
@@ -327,7 +386,7 @@ def report(args: argparse.Namespace) -> None:
         return trace[key][post].T  # (chains, draws)
 
     lines = [f"HMC {name}, variance floor {args.variance_floor}, whitened by {args.vb_run}"
-             + (f", scaled by {args.scale_from}" if args.scale_from else ""),
+             + (f", scaled by {metric_name(args)}" if metric_name(args) else ""),
              f"{inputs.n_zones} zones x {inputs.n_units:,} units, N = {inputs.N:,.0f}; "
              f"{trace['log_pi'].shape[1]} chains, {warmup} warmup + {done - warmup} sampling "
              f"iterations"]
