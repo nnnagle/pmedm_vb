@@ -197,10 +197,10 @@ def one_fit(az, q, trace: dict, args: argparse.Namespace, rng: np.random.Generat
     wide = varying & (post_x["sd"] > args.wide_sd)
     row["wide_x_n"] = int(wide.sum())
     if wide.any():
-        noise = noise_kelly(np.median(ess[wide]), args.null_reps, rng)
-        row["wide_x_noise_kelly"] = noise
+        noise_level = noise_kelly(np.median(ess[wide]), args.null_reps, rng)
+        row["wide_x_noise_kelly"] = noise_level
         row.update({f"wide_x_{k}": v for k, v in
-                    agreement(post_x["kelly"][wide], vb_shape_x["kelly"][wide], 2 * noise).items()})
+                    agreement(post_x["kelly"][wide], vb_shape_x["kelly"][wide], 2 * noise_level).items()})
         row["wide_x_vb_sd_median"] = float(np.median(vb_shape_x["sd"][wide]))
         row["wide_x_post_tail"] = float(np.median(post_x["tail"][wide]))
         row["wide_x_vb_tail"] = float(np.median(vb_shape_x["tail"][wide]))
@@ -218,12 +218,12 @@ def one_fit(az, q, trace: dict, args: argparse.Namespace, rng: np.random.Generat
     if wide_xi.any():
         cube = np.transpose(xi.reshape(kept, chains, m)[:, :, wide_xi], (1, 0, 2))
         ess_xi = az.ess(az.convert_to_dataset({"xi": cube}), method="bulk")["xi"].values
-        noise = noise_kelly(np.median(ess_xi), args.null_reps, rng)
-        row["wide_xi_noise_kelly"] = noise
+        noise_level = noise_kelly(np.median(ess_xi), args.null_reps, rng)
+        row["wide_xi_noise_kelly"] = noise_level
         row["wide_xi_sd_over_gauss"] = float(np.median(ratio_gauss[wide_xi]))
         row["wide_xi_sd_over_skewed"] = float(np.median(ratio_skew[wide_xi]))
         row.update({f"wide_xi_{k}": v for k, v in
-                    agreement(post_xi["kelly"][wide_xi], vb_xi_shape["kelly"][wide_xi], 2 * noise).items()})
+                    agreement(post_xi["kelly"][wide_xi], vb_xi_shape["kelly"][wide_xi], 2 * noise_level).items()})
         row["wide_xi_post_tail"] = float(np.median(post_xi["tail"][wide_xi]))
         row["wide_xi_vb_tail"] = float(np.median(vb_xi_shape["tail"][wide_xi]))
 
