@@ -10,5 +10,7 @@ job_id,step,puma,alpha,method,family,seed,commit,partition,out_dir,status,notes
 6276611,hmc_short,4701501,0.01,,skewed-whitened,2002,run_args.jsonl,campus-gpu,$RUNS/6276611/mcmc,submitted,200+1000 traj 3.0; whitened by 6276609; afterok:6276609
 6370253,hmc_bundle,4701501,0.01,,skewed-whitened,3000,da358c1,campus-gpu,$PAPER/{exp01_baseline;exp03_rollup}/4701501/{hmc_thin1;hmc_oracle},failed,$PAPER/oracle_scale/spec.txt; 200+1000 thin 1 traj 3.0; hmc_thin1 runs done; hmc_oracle runs rejected (checkout predated --scale-from)
 6370985,whitened_mixing,4701501,0.01,,,,da358c1,campus,$PAPER/oracle_scale/mixing,failed,--kinds thin1 oracle rejected (checkout predated free --kinds)
-6372368,hmc_bundle,4701501,0.01,,skewed-whitened-oracle,3000,5e6531d,campus-gpu,$PAPER/{exp01_baseline;exp03_rollup}/4701501/hmc_oracle,submitted,$PAPER/oracle_scale/spec_oracle.txt; --scale-from the ref runs' whitened sds ($PAPER/whitened_mixing/*_ref.npz)
-6372369,whitened_mixing,4701501,0.01,,,,5e6531d,campus,$PAPER/oracle_scale/mixing_thin1,submitted,--kinds thin1 --structure-kinds none; exp01 and exp03
+6372368,hmc_bundle,4701501,0.01,,skewed-whitened-oracle,3000,5e6531d,campus-gpu,$PAPER/{exp01_baseline;exp03_rollup}/4701501/hmc_oracle,completed,$PAPER/oracle_scale/spec_oracle.txt; --scale-from the ref runs' whitened sds ($PAPER/whitened_mixing/*_ref.npz)
+6372369,whitened_mixing,4701501,0.01,,,,5e6531d,campus,$PAPER/oracle_scale/mixing_thin1,completed,--kinds thin1 --structure-kinds none; exp01 and exp03
+6375985,hmc_bundle,4701501,0.01,,skewed-whitened-block,3000,ab59987,campus-gpu,$PAPER/{exp01_baseline;exp03_rollup}/4701501/hmc_block,completed,$PAPER/oracle_scale/spec_block.txt; --block-from the ref trace; diag sd + Cholesky block on sd>2; 200+1000 thin 1 traj 3.0
+6377095,whitened_mixing,4701501,0.01,,,,ab59987,campus,$PAPER/oracle_scale/mixing_block,completed,--kinds block --structure-kinds block
