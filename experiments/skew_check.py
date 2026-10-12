@@ -35,6 +35,15 @@ much less).
    sd against the Gaussian part's and the skewed family's, and the same skew
    comparisons as section 2.
 
+4. **The Gaussian-only fit in the same whitened space** (``vb_gaussian``,
+   fitted like the skewed fit's first stage; the second stage re-optimises the
+   Gaussian part together with the skew layers): ``--vb-draws`` of its draws,
+   whitened by the skewed fit. Their sd by band of posterior sd, and on the
+   wide coordinates with the posterior's sd over theirs and their mean offset.
+   An sd clearly over 1 on the wide coordinates means the plain Gaussian was
+   wider there, so the skewed stage narrowed those directions; about 1 means
+   they were as narrow before the skew was fitted.
+
 Writes ``<out>/skew_check.csv`` (one row per experiment and PUMA),
 ``skew_check.txt`` and per fit ``<experiment>_<fit>_skew.npz`` (each
 coordinate's sd and Kelly skewness, posterior and VB, in both spaces)::
@@ -124,6 +133,29 @@ def agreement(post: np.ndarray, vb: np.ndarray, threshold: float) -> dict[str, f
            "vb_abs_kelly": float(np.median(np.abs(vb)))}
     out["rank_corr"] = float(spearmanr(post, vb)[0]) if post.size > 2 else np.nan
     return out
+
+
+def gaussian_only(q, q_gauss, post_sd: np.ndarray, wide_sd: float, draws: int,
+                  rng: np.random.Generator) -> tuple[dict, np.ndarray]:
+    """Section 4: the Gaussian-only fit's draws in the skewed fit's whitened space."""
+    if q_gauss.size != q.size:
+        raise SystemExit(f"the Gaussian fit has {q_gauss.size} coordinates, the skewed {q.size}")
+    x_g = q.whiten(q_gauss.sample(rng, draws) - q.mean[:, None])           # (m, draws)
+    sd_g, mean_g = x_g.std(axis=1), x_g.mean(axis=1)
+    varying = post_sd > 0
+    row = {}
+    for low, high in SD_BANDS:
+        band = varying & (post_sd >= low) & (post_sd < high)
+        prefix = f"g_sd_{low:g}_{high:g}" if np.isfinite(high) else f"g_sd_over_{low:g}"
+        if band.any():
+            row[f"{prefix}_gauss_sd"] = float(np.median(sd_g[band]))
+    wide = varying & (post_sd > wide_sd)
+    if wide.any():
+        row["g_wide_gauss_sd"] = float(np.median(sd_g[wide]))
+        row["g_wide_gauss_sd_p90"] = float(np.quantile(sd_g[wide], 0.9))
+        row["g_wide_post_over_gauss"] = float(np.median(post_sd[wide] / sd_g[wide]))
+        row["g_wide_gauss_abs_mean"] = float(np.median(np.abs(mean_g[wide])))
+    return row, sd_g
 
 
 def one_fit(az, q, trace: dict, args: argparse.Namespace, rng: np.random.Generator) -> tuple[dict, dict]:
@@ -230,6 +262,17 @@ def main() -> None:
                 trace = {k: saved[k] for k in ("xi", "lam") if k in saved.files}
             logger.info("%s %s: %s", experiment, puma, trace_path)
             row, per_coordinate = one_fit(az, q, trace, args, rng)
+            del trace
+            gauss_path = exp / puma / "vb_gaussian" / f"{name}.npz"
+            if gauss_path.exists():
+                q_gauss, _, _ = load_vb(gauss_path)
+                extra, sd_g = gaussian_only(q, q_gauss, per_coordinate["x_sd"], args.wide_sd,
+                                            args.vb_draws, rng)
+                row.update(extra)
+                per_coordinate["x_gauss_only_sd"] = sd_g
+            else:
+                logger.info("%s %s: no Gaussian-only fit (%s); section 4 skipped",
+                            experiment, puma, gauss_path)
             rows.append({"experiment": experiment, "puma": puma, "alpha": args.alpha,
                          "kind": args.kind, **row})
             np.savez(args.out / f"{experiment}_{name}_skew.npz", **per_coordinate)
@@ -252,6 +295,12 @@ def main() -> None:
         "and the same skew comparison":
             ident + [c for c in table.columns if c.startswith("wide_xi_")],
     }
+    gauss_columns = [c for c in table.columns if c.startswith("g_")]
+    if gauss_columns:
+        sections["4. The Gaussian-only fit, whitened by the skewed fit: its median sd by band of "
+                 "posterior sd (1 = as wide as the skewed fit's Gaussian part), and on the wide "
+                 "coordinates its sd (median, p90), the posterior's sd over it and its mean offset"] = (
+            ident + gauss_columns)
     lines = [f"Shape of the wide directions, alpha {args.alpha:g}, {args.kind} runs, from {args.root}", ""]
     with pd.option_context("display.width", 250, "display.max_columns", 40):
         for title, columns in sections.items():

@@ -20,6 +20,11 @@ Per direction:
 - **constraints**: the one it moves most (its level, published value and SE),
   and the share of the move's squared length in its top 5 (1 = concentrated
   on a few);
+- **how far it reaches**: the constraints carrying 90% of the move's squared
+  length, how many there are and how many distinct tracts they lie in (a
+  block group's tract is the first 11 digits of its GEOID). The variational
+  family's correlations are per tract plus a low-rank term, so a direction
+  spread over many tracts is one it can represent only through that term;
 - **households**: the unit whose tilt changes most (largest ``|d eta|`` over
   zones), that change, the unit's MAP weight in that zone and in all, and its
   *rarest category*: of the table columns (tract and block-group) on which it
@@ -143,6 +148,7 @@ def one_fit(args, spec: dict, exp: Path, puma: str, rng: np.random.Generator):
               for g, idx in groups.items()}
 
     table = constraint_table(inputs)
+    tract_of = table["geoid"].astype(str).str[:11].to_numpy()
     tilt = Tilt(inputs)
     weights = weights_from_lambda(inputs, map_lam) * inputs.N               # people
     unit_total = weights.sum(axis=0)
@@ -162,7 +168,10 @@ def one_fit(args, spec: dict, exp: Path, puma: str, rng: np.random.Generator):
         for i, j in enumerate(idx):
             dl = move[:, i]
             size = np.abs(dl)
-            top = np.argsort(-size)[:5]
+            order = np.argsort(-size)
+            top = order[:5]
+            cumulative = np.cumsum(size[order] ** 2) / (size ** 2).sum()
+            carry = order[: int(np.searchsorted(cumulative, 0.9)) + 1]
             eta = np.abs(tilt(dl))
             per_unit = eta.max(axis=0)
             units = np.argsort(-per_unit)[:3]
@@ -176,6 +185,7 @@ def one_fit(args, spec: dict, exp: Path, puma: str, rng: np.random.Generator):
                 "top_geoid": first["geoid"], "top_published": float(first["published"]),
                 "top_se": float(first["se"]), "top_move": float(dl[top[0]]),
                 "top5_share": float((size[top] ** 2).sum() / (size ** 2).sum()),
+                "n90_constraints": int(carry.size), "n90_tracts": int(np.unique(tract_of[carry]).size),
                 "unit": unit_ids[u], "unit_eta": float(per_unit[u]), "unit_zone": zones[z],
                 "unit_weight_zone": float(weights[z, u]), "unit_weight": float(unit_total[u]),
                 "unit_rarest": names[rarest_col[u]] if rarest_col[u] >= 0 else "",
@@ -200,12 +210,15 @@ def one_fit(args, spec: dict, exp: Path, puma: str, rng: np.random.Generator):
             "top_published": frame["top_published"].median(),
             "top_published_zero": float((frame["top_published"] == 0).mean()),
             "top_se": frame["top_se"].median(), "top5_share": frame["top5_share"].median(),
+            "n90_constraints": frame["n90_constraints"].median(),
+            "n90_tracts": frame["n90_tracts"].median(),
             "unit_eta": frame["unit_eta"].median(),
             "unit_rarest_n": frame["unit_rarest_n"].median(),
             "unit_rarest_pct": frame["unit_rarest_pct"].median(),
             "unit_weight": frame["unit_weight"].median(),
         })
-    all_units = {"all_units_rarest_n_median": float(np.median(rarest_n)), "n_units": int(rarest_n.size)}
+    all_units = {"all_units_rarest_n_median": float(np.median(rarest_n)), "n_units": int(rarest_n.size),
+                 "n_tracts": int(np.unique(tract_of).size), "vb_rank": int(q.W.shape[1])}
     return rows, details, all_units
 
 
@@ -233,7 +246,9 @@ def main() -> None:
             for d in widest[: args.detail]:
                 lines_detail.append(f"--- coordinate {d['coordinate']}: sd {d['sd']:.1f}, "
                                     f"Kelly {d['kelly']:+.3f}, quantile ratio {d['qkurt']:.2f}; "
-                                    f"top-5 constraints carry {d['top5_share']:.0%} of the move")
+                                    f"top-5 constraints carry {d['top5_share']:.0%} of the move; "
+                                    f"90% of it lies in {d['n90_constraints']} constraints over "
+                                    f"{d['n90_tracts']} tracts")
                 with pd.option_context("display.width", 200, "display.max_columns", 20):
                     lines_detail.append(d["_constraints"].to_string(index=False, float_format=lambda v: f"{v:,.3g}"))
                     lines_detail.append(d["_units"].to_string(index=False, float_format=lambda v: f"{v:,.3g}"))
