@@ -12,9 +12,14 @@ Shape is measured three ways per coordinate: the moment skewness; Kelly's
 quantile skewness ``(q90 + q10 - 2 q50) / (q90 - q10)``, robust to the tails;
 and the tail ratio ``(q99 - q50) / (q50 - q01)``, reported as ``max(r, 1/r)``
 (1 for a symmetric shape; 5 means one side reaches five times as far as the
-other). Draws are autocorrelated, so a noise level is set by simulation:
-the median ``|Kelly|`` of standard normal samples as large as the band's
-median ESS.
+other). Flatness is measured two ways: the excess kurtosis (0 for a normal,
+-1.2 for a uniform) and the quantile ratio ``(q99 - q01) / (q90 - q10)``
+(1.82 for a normal, 1.23 for a uniform; a flat-topped shape with steep walls
+on both sides falls between). Draws are autocorrelated, so a noise level is
+set by simulation from standard normal samples as large as the band's median
+ESS: the median ``|Kelly|``, and the 5th-95th percentile of the quantile
+ratio for one coordinate (a band's median, over many coordinates, varies
+much less).
 
 1. **Whitened coordinates** ``x = G' (xi - mu)`` (HMC's space; ``mu``, ``G``
    the skewed fit's median and Gaussian-part factor), by band of posterior sd:
@@ -61,7 +66,8 @@ def parse_args() -> argparse.Namespace:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--root", type=Path, required=True, help="the experiments' results root")
-    parser.add_argument("--experiments", nargs="+", default=["exp01_baseline", "exp03_rollup"])
+    parser.add_argument("--experiments", nargs="+",
+                        default=["exp01_baseline", "exp02_nullspace", "exp03_rollup"])
     parser.add_argument("--alpha", type=float, required=True)
     parser.add_argument("--pumas", nargs="+", default=None, help="default: the experiment's")
     parser.add_argument("--kind", default="ref", help="the HMC run read, <puma>/hmc_<kind>")
@@ -78,21 +84,32 @@ def parse_args() -> argparse.Namespace:
 
 def shape(z: np.ndarray) -> dict[str, np.ndarray]:
     """Per column of ``z`` (``(draws, k)``): sd, moment skewness, Kelly's
-    skewness and the tail ratio ``max(r, 1/r)``."""
+    skewness, the tail ratio ``max(r, 1/r)``, excess kurtosis and the quantile
+    ratio ``(q99 - q01) / (q90 - q10)``."""
     sd = z.std(axis=0)
     centred = z - z.mean(axis=0)
     with np.errstate(divide="ignore", invalid="ignore"):
         moment = (centred ** 3).mean(axis=0) / sd ** 3
+        kurt = (centred ** 4).mean(axis=0) / sd ** 4 - 3.0
         q01, q10, q50, q90, q99 = np.quantile(z, [0.01, 0.1, 0.5, 0.9, 0.99], axis=0)
         kelly = (q90 + q10 - 2 * q50) / (q90 - q10)
         ratio = (q99 - q50) / (q50 - q01)
-    return {"sd": sd, "moment": moment, "kelly": kelly, "tail": np.maximum(ratio, 1 / ratio)}
+        qkurt = (q99 - q01) / (q90 - q10)
+    return {"sd": sd, "moment": moment, "kelly": kelly, "tail": np.maximum(ratio, 1 / ratio),
+            "kurt": kurt, "qkurt": qkurt}
+
+
+def noise(n: int, reps: int, rng: np.random.Generator) -> dict[str, float]:
+    """For standard normal samples of size ``n``: the median ``|Kelly|`` and the
+    5th and 95th percentiles of the quantile ratio."""
+    sim = shape(rng.standard_normal((max(int(n), 20), reps)))
+    lo, hi = np.quantile(sim["qkurt"], [0.05, 0.95])
+    return {"kelly": float(np.median(np.abs(sim["kelly"]))), "qkurt_p05": float(lo),
+            "qkurt_p95": float(hi)}
 
 
 def noise_kelly(n: int, reps: int, rng: np.random.Generator) -> float:
-    """Median ``|Kelly|`` of standard normal samples of size ``n``."""
-    n = max(int(n), 20)
-    return float(np.median(np.abs(shape(rng.standard_normal((n, reps)))["kelly"])))
+    return noise(n, reps, rng)["kelly"]
 
 
 def agreement(post: np.ndarray, vb: np.ndarray, threshold: float) -> dict[str, float]:
@@ -131,7 +148,12 @@ def one_fit(az, q, trace: dict, args: argparse.Namespace, rng: np.random.Generat
         row[f"{prefix}_abs_moment"] = float(np.median(np.abs(post_x["moment"][band])))
         row[f"{prefix}_abs_kelly"] = float(np.median(np.abs(post_x["kelly"][band])))
         row[f"{prefix}_tail"] = float(np.median(post_x["tail"][band]))
-        row[f"{prefix}_noise_kelly"] = noise_kelly(np.median(ess[band]), args.null_reps, rng)
+        row[f"{prefix}_kurt"] = float(np.median(post_x["kurt"][band]))
+        row[f"{prefix}_qkurt"] = float(np.median(post_x["qkurt"][band]))
+        level = noise(np.median(ess[band]), args.null_reps, rng)
+        row[f"{prefix}_noise_kelly"] = level["kelly"]
+        row[f"{prefix}_noise_qkurt_p05"] = level["qkurt_p05"]
+        row[f"{prefix}_noise_qkurt_p95"] = level["qkurt_p95"]
 
     # The skewed family's draws, and its Gaussian part's from the same eps.
     eps = rng.standard_normal((m, args.vb_draws))
@@ -150,6 +172,8 @@ def one_fit(az, q, trace: dict, args: argparse.Namespace, rng: np.random.Generat
         row["wide_x_vb_sd_median"] = float(np.median(vb_shape_x["sd"][wide]))
         row["wide_x_post_tail"] = float(np.median(post_x["tail"][wide]))
         row["wide_x_vb_tail"] = float(np.median(vb_shape_x["tail"][wide]))
+        row["wide_x_post_qkurt"] = float(np.median(post_x["qkurt"][wide]))
+        row["wide_x_vb_qkurt"] = float(np.median(vb_shape_x["qkurt"][wide]))
 
     post_xi = shape(xi)
     vb_xi_shape = shape(vb_xi.T)
@@ -172,6 +196,7 @@ def one_fit(az, q, trace: dict, args: argparse.Namespace, rng: np.random.Generat
         row["wide_xi_vb_tail"] = float(np.median(vb_xi_shape["tail"][wide_xi]))
 
     per_coordinate = {"x_sd": post_x["sd"], "x_kelly": post_x["kelly"], "x_tail": post_x["tail"],
+                      "x_kurt": post_x["kurt"], "x_qkurt": post_x["qkurt"],
                       "x_ess": ess, "x_vb_sd": vb_shape_x["sd"], "x_vb_kelly": vb_shape_x["kelly"],
                       "xi_sd": post_xi["sd"], "xi_kelly": post_xi["kelly"],
                       "xi_gauss_sd": gauss_sd, "xi_vb_sd": vb_xi_shape["sd"],
@@ -216,8 +241,8 @@ def main() -> None:
     ident = ["experiment", "puma"]
     sections = {
         "1. Posterior shape of the whitened coordinates by band of sd: median |moment skew|, "
-        "|Kelly| and tail ratio max(r, 1/r); noise = median |Kelly| of normal samples of the "
-        "band's median ESS":
+        "|Kelly|, tail ratio max(r, 1/r), excess kurtosis and quantile ratio (normal 1.82, "
+        "uniform 1.23); noise from normal samples of the band's median ESS":
             ident + [c for c in table.columns if c.startswith("sd_")],
         f"2. Wide whitened coordinates (sd over {args.wide_sd:g}): the skewed family against the "
         "posterior. sign_agree is over coordinates whose posterior |Kelly| exceeds twice the noise":
