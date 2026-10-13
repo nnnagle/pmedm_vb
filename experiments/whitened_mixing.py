@@ -15,7 +15,11 @@ R-hat runs:
 2. **Mixing** (decides the chain count and the trajectory length): ``tau``,
    sampling iterations per effective draw, ``chains x iterations / ESS``,
    and ESS per 1,000 gradient evaluations per chain (each chain's leapfrog
-   steps, the cost that scales with chains on a saturated GPU).
+   steps, the cost that scales with chains on a saturated GPU), and ESS per
+   minute of the sampling phase's wall time (the trace's ``seconds`` less
+   ``warmup_seconds``) -- the honest cost where batches differ in size, as
+   delayed rejection's retries do. Comparable only between runs on the same
+   kind of GPU.
 
    - ``log pi`` and the largest cell's share, recorded every iteration: bulk
      ESS, as in ``run_mcmc.py``'s report. For a Gaussian, ``log pi`` is
@@ -170,8 +174,15 @@ def one_run(az, q, trace: dict, chains_first, wide: dict | None = None) -> tuple
     row["abs_mean_p50"] = float(np.median(np.abs(mean[varying])))
     row["abs_mean_max"] = float(np.abs(mean[varying]).max())
 
+    # Wall time of the sampling phase (every job that contributed, warmup excluded), if recorded.
+    minutes = np.nan
+    if "seconds" in trace and "warmup_seconds" in trace and np.isfinite(float(trace["warmup_seconds"])):
+        minutes = (float(trace["seconds"]) - float(trace["warmup_seconds"])) / 60
+    row["sampling_minutes"] = minutes
+
     def rate(ess: float | np.ndarray) -> dict:
-        return {"tau": chains * iterations / ess, "per_1000_grad": 1000 * ess / (chains * gradients)}
+        return {"tau": chains * iterations / ess, "per_1000_grad": 1000 * ess / (chains * gradients),
+                "per_minute": ess / minutes}
 
     for name in ("log_pi", "max_share"):
         ess = float(az.ess(chains_first(name), method="bulk"))
@@ -255,12 +266,13 @@ def main() -> None:
     ident = ["experiment", "puma", "kind"]
     sections = {
         "Sampler": ident + ["chains", "iterations", "thin", "m", "step_size", "leapfrog_mean",
+                            "sampling_minutes",
                             "accept_mean", "divergent"]
                    + [c for c in ("retried_%", "retry_accepted_%") if c in table.columns],
         "Shape: sd of each whitened coordinate (N(0, I) would give 1)":
             ident + [c for c in table.columns if c.startswith("sd_") and "_tau_" not in c
                      and not c.endswith("_n")] + ["abs_mean_p50", "abs_mean_max"],
-        "Mixing per iteration: tau = iterations per effective draw; ESS per 1,000 gradients per chain":
+        "Mixing per iteration: tau = iterations per effective draw; ESS per 1,000 gradients per chain; ESS per minute of sampling (wall time)":
             ident + [c for c in table.columns if c.startswith(("log_pi_", "max_share_"))],
         "Mixing of x and x^2 (kept draws): ESS per kept draw over coordinates; tau and "
         "ESS per 1,000 gradients at the worst and median coordinate":
