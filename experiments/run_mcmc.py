@@ -56,7 +56,14 @@ it (each start divided by ``s``), so only the sampler's geometry changes.
 run's whitening (``--vb-run``), for every coordinate -- the diagonal mass
 matrix on top of the VB whitening, ``Sigma = A S^2 A'``, given in advance.
 With ``--vb-run`` a Gaussian-only fit, that is the oracle for whitening by
-Gaussian VB plus a learned diagonal.
+Gaussian VB plus a learned diagonal. ``--diag-stat steep`` scales each
+coordinate by the narrower of its two half-widths, ``min(q50 - q16, q84 - q50)``,
+instead of its sd: the same for a symmetric coordinate, but a lopsided one is
+scaled only to its steep side, which is what bounds the step size.
+
+``--locate K`` records, at every divergent transition, the ``K`` whitened
+coordinates with the largest ``|gradient|`` at the trajectory's end; the
+report lists the coordinates that come first most often.
 
 ``--block-from`` goes one step further, from an earlier run's trace: every
 coordinate is scaled by its sd in that trace's kept draws, as above, except
@@ -88,6 +95,8 @@ from laplace_diagnostic import constraint_table, load_vb
 SHARES = (0.01, 0.10)
 #: Per-iteration records, each (iterations, chains).
 TRACE_KEYS = ("log_pi", "accept_prob", "divergent", "energy", "max_share", "max_cell")
+#: Per-divergence records (--locate): iteration, chain, and the top coordinates and |gradient|s.
+LOCATED_KEYS = ("div_iter", "div_chain", "div_coords", "div_grad")
 
 
 def parse_args() -> argparse.Namespace:
@@ -125,6 +134,12 @@ def parse_args() -> argparse.Namespace:
                         help="an earlier run's _trace.npz: scale every whitened coordinate (in "
                              "this run's whitening) by its sd there; excludes --scale-from and "
                              "--block-from")
+    parser.add_argument("--diag-stat", choices=["sd", "steep"], default="sd",
+                        help="--diag-from's scale: each coordinate's sd, or the narrower of its "
+                             "two half-widths min(q50 - q16, q84 - q50)")
+    parser.add_argument("--locate", type=int, default=0,
+                        help="at each divergence, record this many whitened coordinates with "
+                             "the largest |gradient| at the trajectory's end")
     parser.add_argument("--block-from", type=Path, default=None,
                         help="an earlier run's _trace.npz: scale each whitened coordinate by its "
                              "sd there, and the wide ones (--block-sd) by the Cholesky factor of "
@@ -248,7 +263,7 @@ def metric_name(args: argparse.Namespace) -> str:
     if getattr(args, "block_from", None) is not None:
         return f"block {args.block_from} sd>{args.block_sd:g}"
     if getattr(args, "diag_from", None) is not None:
-        return f"diag {args.diag_from}"
+        return f"diag {args.diag_from}" + ("" if args.diag_stat == "sd" else f" {args.diag_stat}")
     return str(args.scale_from or "")
 
 
@@ -287,12 +302,18 @@ def sample(args: argparse.Namespace) -> None:
         logger.info("whitening scaled by %s: s median %.3g, max %.3g", args.scale_from,
                     np.median(scale), scale.max())
     if args.diag_from is not None:
-        sd = whitened_draws(args.diag_from, q).std(axis=0)
+        x = whitened_draws(args.diag_from, q)
+        if args.diag_stat == "sd":
+            sd = x.std(axis=0)
+        else:
+            q16, q50, q84 = np.quantile(x, [0.16, 0.5, 0.84], axis=0)
+            sd = np.minimum(q50 - q16, q84 - q50)
+        del x
         scale = np.where(sd > 0, sd, 1.0)
         A = A * scale            # Sigma = A S^2 A', every coordinate scaled
         x0 = x0 / scale
-        logger.info("diagonal from %s: s p10 %.3g, median %.3g, p90 %.3g, max %.3g", args.diag_from,
-                    *np.quantile(scale, [0.1, 0.5, 0.9, 1.0]))
+        logger.info("diagonal (%s) from %s: s p10 %.3g, median %.3g, p90 %.3g, max %.3g",
+                    args.diag_stat, args.diag_from, *np.quantile(scale, [0.1, 0.5, 0.9, 1.0]))
     if args.block_from is not None:
         from scipy.linalg import solve_triangular
 
@@ -304,12 +325,13 @@ def sample(args: argparse.Namespace) -> None:
         A = scaled
     settings = HMCSettings(
         step_size=args.step_size, trajectory=args.trajectory,
-        target_accept=args.target_accept, max_leapfrog=args.max_leapfrog,
+        target_accept=args.target_accept, max_leapfrog=args.max_leapfrog, locate=args.locate,
     )
     sampler = HMC(target, inputs.n, q.mean, A, x0, settings, seed=args.seed, device=device)
 
     trace = {key: [] for key in TRACE_KEYS}
     step_sizes, leapfrogs, draws = [], [], []
+    located = {key: [] for key in LOCATED_KEYS}   # one entry per divergent transition
     earlier_seconds, warmup_seconds = 0.0, float("nan")
     if state_path.exists() and trace_path.exists():
         with np.load(state_path) as state:
@@ -322,6 +344,7 @@ def sample(args: argparse.Namespace) -> None:
             earlier_seconds = float(saved["seconds"]) if "seconds" in saved.files else 0.0
             if "warmup_seconds" in saved.files:
                 warmup_seconds = float(saved["warmup_seconds"])
+            located = {key: list(saved[key]) if key in saved.files else [] for key in LOCATED_KEYS}
             saved_metric = next((str(saved[k]) for k in ("metric", "scale_from")
                                  if k in saved.files), "")
         if saved_metric != metric_name(args):
@@ -345,6 +368,8 @@ def sample(args: argparse.Namespace) -> None:
             trace_path,
             **{key: np.asarray(value) for key, value in trace.items()},
             step_size=np.asarray(step_sizes), n_leapfrog=np.asarray(leapfrogs),
+            **({key: np.asarray(value) for key, value in located.items()}
+               if located["div_iter"] else {}),
             warmup=args.warmup, thin=args.thin, n_zones=inputs.n_zones, n_units=inputs.n_units,
             seconds=earlier_seconds + time.perf_counter() - started,
             warmup_seconds=warmup_seconds, metric=metric_name(args),
@@ -364,6 +389,11 @@ def sample(args: argparse.Namespace) -> None:
         trace["max_share"].append(share)
         trace["max_cell"].append(cell)
         step_sizes.append(stats["step_size"])
+        if "div_chain" in stats:
+            located["div_iter"].extend([sampler.iteration] * len(stats["div_chain"]))
+            located["div_chain"].extend(stats["div_chain"])
+            located["div_coords"].extend(stats["div_coords"])
+            located["div_grad"].extend(stats["div_grad"])
         leapfrogs.append(stats["n_leapfrog"])
         sampling_index = sampler.iteration - args.warmup
         if sampling_index > 0 and sampling_index % args.thin == 0:
@@ -393,6 +423,30 @@ def sample(args: argparse.Namespace) -> None:
 def quantile_line(x: np.ndarray, scale: float = 1.0, fmt: str = "{:.3f}") -> str:
     qs = np.quantile(x, [0.5, 0.9, 0.99, 1.0]) * scale
     return "  ".join(f"{label} {fmt.format(v)}" for label, v in zip(["median", "p90", "p99", "max"], qs))
+
+
+def locate_lines(trace: dict, warmup: int, top: int = 10) -> list[str]:
+    """Where the divergences happened (``--locate``): the whitened coordinates
+    that carry the largest ``|gradient|`` at a divergent trajectory's end most
+    often, in warmup and sampling together and in sampling alone."""
+    coords, grads, iters = trace["div_coords"], trace["div_grad"], trace["div_iter"]
+    lines = [f"   divergences located ({coords.shape[0]:,}, {coords.shape[1]} coordinates each; "
+             "whitened coordinate: times first / times in the top "
+             f"{coords.shape[1]} / median |gradient| when first):"]
+    for label, mask in (("all", np.ones(iters.size, bool)), ("sampling", iters > warmup)):
+        if not mask.any():
+            lines.append(f"     {label}: none")
+            continue
+        first = coords[mask, 0]
+        values, counts = np.unique(first, return_counts=True)
+        order = np.argsort(-counts)[:top]
+        anywhere = np.bincount(coords[mask].ravel(), minlength=int(values.max()) + 1)
+        parts = [f"{int(values[i])}: {counts[i]}/{anywhere[values[i]]}/"
+                 f"{np.median(grads[mask, 0][first == values[i]]):.3g}" for i in order]
+        share = counts[order].sum() / mask.sum()
+        lines.append(f"     {label} ({int(mask.sum()):,}; these {len(order)} are first in "
+                     f"{share:.0%}): " + ", ".join(parts))
+    return lines
 
 
 def report(args: argparse.Namespace) -> None:
@@ -437,6 +491,8 @@ def report(args: argparse.Namespace) -> None:
         "   E-BFMI per chain (below 0.3 is a warning sign): min {:.2f}, median {:.2f}".format(
             *np.quantile(az.bfmi(chains_first("energy")), [0.0, 0.5])),
     ]
+    if "div_coords" in trace:
+        lines += locate_lines(trace, warmup)
 
     lines += ["", "2. Convergence (rank-normalised split R-hat; bulk and tail ESS)"]
     for key, label in (("log_pi", "log pi"), ("max_share", "largest-cell share")):

@@ -32,6 +32,12 @@ Per direction:
   the share of all units whose rarest category is at least as rare (a
   percentile: small = a rare household).
 
+``--whitening gaussian`` measures everything in the Gaussian-only fit's
+whitening (the one ``run_mcmc.py --vb-run .../vb_gaussian`` samples in), and
+``--coordinates j ...`` adds a group ``listed`` of exactly those whitened
+coordinates, each shown in detail -- for describing the coordinates a run's
+``--locate`` found at its divergences.
+
 Writes ``<out>/wide_directions.csv`` (medians per experiment, PUMA and group),
 ``wide_directions_detail.csv`` (every direction examined) and
 ``wide_directions.txt`` (the medians, then the ``--detail`` widest directions
@@ -58,8 +64,6 @@ from laplace_diagnostic import constraint_table
 from run_experiment import area_slug, fit_name, level
 from skew_check import shape
 
-GROUPS = ("widest", "moderate", "bulk")
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -74,19 +78,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wide-sd", type=float, default=3.0)
     parser.add_argument("--per-group", type=int, default=300)
     parser.add_argument("--detail", type=int, default=8, help="widest directions listed per fit")
+    parser.add_argument("--whitening", choices=["skewed", "gaussian"], default="skewed",
+                        help="whose whitened coordinates: the skewed fit's Gaussian part, or the "
+                             "Gaussian-only fit's")
+    parser.add_argument("--coordinates", type=int, nargs="+", default=None,
+                        help="also describe these whitened coordinates in detail (group 'listed')")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path, required=True)
     return parser.parse_args()
 
 
-def load(spec: dict, exp: Path, puma: str, alpha: float):
+def load(spec: dict, exp: Path, puma: str, alpha: float, whitening: str = "skewed"):
     from run_mcmc import load_problem
 
     model = spec["model"]
     problem = argparse.Namespace(
         area=area_slug(spec["area"]), puma=puma, alpha=alpha, taper=model["taper"],
         variance_floor=str(model["variance_floor"]), hierarchy=level(spec),
-        vb_run=exp / puma / "vb_skewed")
+        vb_run=exp / puma / f"vb_{whitening}")
     return load_problem(problem)
 
 
@@ -129,7 +138,7 @@ def rarity(inputs) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
 def one_fit(args, spec: dict, exp: Path, puma: str, rng: np.random.Generator):
     from pmedm_vb.solvers.base import weights_from_lambda
 
-    inputs, _, q, map_lam, hierarchy = load(spec, exp, puma, args.alpha)
+    inputs, _, q, map_lam, hierarchy = load(spec, exp, puma, args.alpha, args.whitening)
     name = fit_name(spec, puma, args.alpha)
     with np.load(exp / puma / f"hmc_{args.kind}" / f"{name}_trace.npz") as saved:
         draws = saved["xi"] if "xi" in saved.files else saved["lam"]
@@ -143,6 +152,8 @@ def one_fit(args, spec: dict, exp: Path, puma: str, rng: np.random.Generator):
     groups = {"widest": np.flatnonzero(sd > args.wide_sd),
               "moderate": np.flatnonzero((sd >= 1.5) & (sd <= args.wide_sd)),
               "bulk": np.flatnonzero((sd > 0) & (sd < 1.5))}
+    if args.coordinates:
+        groups["listed"] = np.asarray([j for j in args.coordinates if 0 <= j < m], int)
     chosen = {g: (idx if idx.size <= args.per_group
                   else np.sort(rng.choice(idx, args.per_group, replace=False)))
               for g, idx in groups.items()}
@@ -157,7 +168,7 @@ def one_fit(args, spec: dict, exp: Path, puma: str, rng: np.random.Generator):
     unit_ids = inputs.units.iloc[:, 0].to_numpy()
 
     rows, details = [], []
-    for group in GROUPS:
+    for group in groups:
         idx = chosen[group]
         if not idx.size:
             continue
@@ -192,7 +203,7 @@ def one_fit(args, spec: dict, exp: Path, puma: str, rng: np.random.Generator):
                 "unit_rarest_n": int(rarest_n[u]), "unit_rarest_pct": float(rarest_pct[u]),
             }
             details.append(record)
-            if group == "widest":
+            if group in ("widest", "listed"):
                 record["_constraints"] = table.iloc[top].assign(move=dl[top])
                 record["_units"] = pd.DataFrame({
                     "unit": unit_ids[units], "rarest": [names[k] if k >= 0 else "" for k in rarest_col[units]],
@@ -241,10 +252,12 @@ def main() -> None:
             rows, details, all_units = one_fit(args, spec, exp, puma, rng)
             ident = {"experiment": experiment, "puma": puma}
             summary += [{**ident, **row, **all_units} for row in rows]
-            lines_detail.append(f"=== {experiment} {puma}: the {args.detail} widest directions")
             widest = sorted((d for d in details if d["group"] == "widest"), key=lambda d: -d["sd"])
-            for d in widest[: args.detail]:
-                lines_detail.append(f"--- coordinate {d['coordinate']}: sd {d['sd']:.1f}, "
+            listed = [d for d in details if d["group"] == "listed"]
+            lines_detail.append(f"=== {experiment} {puma}: the {args.detail} widest directions"
+                                + (f", then the {len(listed)} listed" if listed else ""))
+            for d in widest[: args.detail] + listed:
+                lines_detail.append(f"--- {d['group']} coordinate {d['coordinate']}: sd {d['sd']:.1f}, "
                                     f"Kelly {d['kelly']:+.3f}, quantile ratio {d['qkurt']:.2f}; "
                                     f"top-5 constraints carry {d['top5_share']:.0%} of the move; "
                                     f"90% of it lies in {d['n90_constraints']} constraints over "

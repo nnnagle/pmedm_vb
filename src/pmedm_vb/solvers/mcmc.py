@@ -125,6 +125,11 @@ class HMCSettings:
         stall a job.
     divergence:
         Energy error, in nats, above which a transition counts as divergent.
+    locate:
+        For each divergent transition, report this many whitened coordinates
+        with the largest ``|gradient|`` at the trajectory's end -- where the
+        potential is steepest, so where the integrator lost the posterior
+        (0: none).
     """
 
     step_size: float = 0.1
@@ -132,6 +137,7 @@ class HMCSettings:
     target_accept: float = 0.8
     max_leapfrog: int = 1000
     divergence: float = 1000.0
+    locate: int = 0
 
 
 class HMC:
@@ -223,6 +229,13 @@ class HMC:
         self.U = torch.where(accepted, U, self.U)
         energy = torch.where(accepted, H1, H0)
         self.iteration += 1
+        located = {}
+        if s.locate and bool(divergent.any()):
+            g = torch.nan_to_num(grad[divergent].abs(), nan=math.inf, posinf=math.inf)
+            top = torch.topk(g, min(s.locate, g.shape[1]), dim=1)
+            located = {"div_chain": torch.nonzero(divergent).ravel().cpu().numpy(),
+                       "div_coords": top.indices.cpu().numpy(),
+                       "div_grad": top.values.cpu().numpy()}
 
         mean_accept = float(accept_prob.mean())
         if adapt:
@@ -235,6 +248,7 @@ class HMC:
             "log_pi": (-self.U).cpu().numpy(),
             "step_size": eps,
             "n_leapfrog": n_leap,
+            **located,
         }
 
     def _adapt(self, accept: float) -> None:
