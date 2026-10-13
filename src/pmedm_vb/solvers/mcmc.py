@@ -38,6 +38,32 @@ A transition whose energy error exceeds ``divergence`` nats (or is not finite)
 is recorded as divergent, following Stan's convention; divergences are where
 the integrator could not follow the posterior, and here are expected at the
 walls.
+
+**Delayed rejection** (``retry_factor = a > 1``). A wall is a few household-zone
+cells whose weight jumps from nothing to something along some direction; a
+step size small enough for every wall wastes most of each trajectory in the
+bulk. So a divergent transition is retried, from the same position and
+momentum, with step ``eps / a`` and the same number of steps, and the retry
+accepted with the delayed-rejection probability (Tierney & Mira 1999; for HMC,
+Modi, Barnett & Carpenter 2024, *Bayesian Analysis* 19, whose reference code
+does the same with every rejection retried):
+
+.. math::
+
+    \\alpha_2 = \\min\\Big(1, e^{H_0 - H_2}\\,
+        \\frac{\\rho(z_2')\\,(1 - \\alpha_1(z_2'))}{\\rho(z_0)\\,(1 - \\alpha_1(z_0))}\\Big),
+
+``z_0 = (x_0, p_0)`` the start, ``z_2 = (x_2, p_2)`` the retry's end and
+``z_2' = (x_2, -p_2)`` its reversal, ``alpha_1(z)`` the first stage's
+acceptance from ``z`` (its "ghost" trajectory, step ``eps``, the same number of
+steps) and ``rho(z)`` the probability of retrying from ``z``: 1 if that first
+stage diverges, else 0. Retrying only divergences is a state-dependent retry
+rule, so the reversal's must hold too: a retry whose ghost does not diverge is
+rejected. Both maps are reversible and volume-preserving, so this keeps
+``exp(-H)`` invariant. Only the retried chains are integrated again, as a
+smaller batch; ``extra_leapfrog`` counts those steps (the retry and its ghost)
+so that cost per gradient stays honest. During warmup the step size is adapted
+to the acceptance of either stage, so walls do not drag it down.
 """
 
 from __future__ import annotations
@@ -130,6 +156,9 @@ class HMCSettings:
         with the largest ``|gradient|`` at the trajectory's end -- where the
         potential is steepest, so where the integrator lost the posterior
         (0: none).
+    retry_factor:
+        Delayed rejection: a divergent transition is retried with step
+        ``eps / retry_factor`` (see the module docstring); 0 or 1 turns it off.
     """
 
     step_size: float = 0.1
@@ -138,6 +167,7 @@ class HMCSettings:
     max_leapfrog: int = 1000
     divergence: float = 1000.0
     locate: int = 0
+    retry_factor: float = 0.0
 
 
 class HMC:
@@ -194,13 +224,34 @@ class HMC:
     def _uniform(self, *shape) -> torch.Tensor:
         return torch.rand(*shape, generator=self.generator, dtype=DTYPE, device=self.device)
 
+    def _trajectory(self, x: torch.Tensor, p: torch.Tensor, grad: torch.Tensor, eps: float,
+                    n_leap: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """``n_leap`` leapfrog steps of size ``eps`` from ``(x, p)``, whose
+        potential gradient is ``grad``: the end ``x``, ``p``, ``U`` and gradient."""
+        p = p - 0.5 * eps * grad
+        U = None
+        for i in range(n_leap):
+            x = x + eps * p
+            U, grad = self.potential_and_gradient(x)
+            p = p - (eps if i < n_leap - 1 else 0.5 * eps) * grad
+        return x, p, U, grad
+
+    @staticmethod
+    def _energy_error(H1: torch.Tensor, H0: torch.Tensor) -> torch.Tensor:
+        """``H1 - H0``, infinite where it is not finite."""
+        error = H1 - H0
+        return torch.where(torch.isfinite(error), error, torch.full_like(error, math.inf))
+
     def step(self, adapt: bool) -> dict[str, np.ndarray | float | int]:
         """One HMC iteration for every chain; adapts the step size if ``adapt``.
 
-        Returns per-chain ``accept_prob``, ``accepted``, ``divergent``,
+        Returns per-chain ``accept_prob`` (of either stage, with delayed
+        rejection), ``accepted``, ``divergent`` (the first stage),
         ``energy`` (the Hamiltonian at the retained state, as in Stan's
         ``energy__``) and ``log_pi`` (``-n f`` there), plus the shared
-        ``step_size`` and ``n_leapfrog`` used.
+        ``step_size`` and ``n_leapfrog`` used. With delayed rejection, also
+        per chain ``retried`` and ``accepted2`` (the retry was accepted), and
+        ``extra_leapfrog``, the steps the retries and their ghosts took.
         """
         s = self.settings
         eps = self.step_size
@@ -209,25 +260,49 @@ class HMC:
 
         p0 = torch.randn(self.x.shape, generator=self.generator, dtype=DTYPE, device=self.device)
         H0 = self.U + 0.5 * (p0 * p0).sum(1)
-        x, p, grad = self.x, p0 - 0.5 * eps * self.grad, None
-        for i in range(n_leap):
-            x = x + eps * p
-            U, grad = self.potential_and_gradient(x)
-            p = p - (eps if i < n_leap - 1 else 0.5 * eps) * grad
+        x, p, U, grad = self._trajectory(self.x, p0, self.grad, eps, n_leap)
         H1 = U + 0.5 * (p * p).sum(1)
 
-        error = H1 - H0
-        finite = torch.isfinite(error)
-        error = torch.where(finite, error, torch.full_like(error, math.inf))
-        accept_prob = torch.exp(torch.clamp(-error, max=0.0))
-        accepted = self._uniform(self.chains) < accept_prob
+        error = self._energy_error(H1, H0)
+        alpha1 = torch.exp(torch.clamp(-error, max=0.0))
+        accepted = self._uniform(self.chains) < alpha1
         divergent = error > s.divergence
+        accept_prob = alpha1
 
-        keep = accepted[:, None]
-        self.x = torch.where(keep, x, self.x)
-        self.grad = torch.where(keep, grad, self.grad)
-        self.U = torch.where(accepted, U, self.U)
-        energy = torch.where(accepted, H1, H0)
+        new_x, new_grad = torch.where(accepted[:, None], x, self.x), torch.where(accepted[:, None], grad, self.grad)
+        new_U, energy = torch.where(accepted, U, self.U), torch.where(accepted, H1, H0)
+
+        retried = torch.zeros_like(accepted)
+        accepted2 = torch.zeros_like(accepted)
+        extra = 0
+        if s.retry_factor > 1 and bool((divergent & ~accepted).any()):
+            retried = divergent & ~accepted
+            r = torch.nonzero(retried).ravel()
+            eps2 = eps / s.retry_factor
+            x2, p2, U2, g2 = self._trajectory(self.x[r], p0[r], self.grad[r], eps2, n_leap)
+            H2 = U2 + 0.5 * (p2 * p2).sum(1)
+            # The ghost: the first stage from the retry's reversal.
+            _, pg, Ug, _ = self._trajectory(x2, -p2, g2, eps, n_leap)
+            Hg = Ug + 0.5 * (pg * pg).sum(1)
+            error_g = self._energy_error(Hg, H2)
+            alpha1_g = torch.exp(torch.clamp(-error_g, max=0.0))
+            ghost_retries = error_g > s.divergence
+            log_ratio = (-self._energy_error(H2, H0[r]) + torch.log1p(-alpha1_g)
+                         - torch.log1p(-alpha1[r]))
+            log_ratio = torch.where(ghost_retries & torch.isfinite(log_ratio), log_ratio,
+                                    torch.full_like(log_ratio, -math.inf))
+            alpha2 = torch.exp(torch.clamp(log_ratio, max=0.0))
+            take = self._uniform(r.numel()) < alpha2
+            accepted2[r] = take
+            t = r[take]
+            new_x[t], new_grad[t] = x2[take], g2[take]
+            new_U[t], energy[t] = U2[take], H2[take]
+            accept_prob = alpha1.clone()
+            accept_prob[r] = alpha1[r] + (1 - alpha1[r]) * alpha2
+            extra = 2 * n_leap
+
+        self.x, self.grad, self.U = new_x, new_grad, new_U
+        accepted = accepted | accepted2
         self.iteration += 1
         located = {}
         if s.locate and bool(divergent.any()):
@@ -248,6 +323,9 @@ class HMC:
             "log_pi": (-self.U).cpu().numpy(),
             "step_size": eps,
             "n_leapfrog": n_leap,
+            "retried": retried.cpu().numpy(),
+            "accepted2": accepted2.cpu().numpy(),
+            "extra_leapfrog": extra,
             **located,
         }
 

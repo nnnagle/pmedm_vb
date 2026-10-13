@@ -141,6 +141,8 @@ def one_run(az, q, trace: dict, chains_first, wide: dict | None = None) -> tuple
     thin = int(trace["thin"])
     iterations, chains = trace["log_pi"][warmup:].shape
     gradients = int(trace["n_leapfrog"][warmup:].sum())   # per chain: the step size is shared
+    if "extra_leapfrog" in trace:       # delayed rejection: retries run as a batch of their own
+        gradients += int(trace["extra_leapfrog"][warmup:].sum())
     key = "xi" if "xi" in trace else "lam"
     kept, _, m = trace[key].shape
     draws = trace[key].reshape(-1, m)                      # (kept x chains, m), kept-major
@@ -151,6 +153,10 @@ def one_run(az, q, trace: dict, chains_first, wide: dict | None = None) -> tuple
            "leapfrog_mean": gradients / iterations,
            "accept_mean": float(trace["accept_prob"][warmup:].mean()),
            "divergent": int(trace["divergent"][warmup:].sum())}
+    if "retried" in trace:
+        retried = trace["retried"][warmup:]
+        row["retried_%"] = 100 * float(retried.mean())
+        row["retry_accepted_%"] = 100 * float(trace["accepted2"][warmup:].sum()) / max(1, int(retried.sum()))
 
     flat = x.reshape(-1, m)
     sd, mean = flat.std(axis=0), flat.mean(axis=0)
@@ -249,7 +255,8 @@ def main() -> None:
     ident = ["experiment", "puma", "kind"]
     sections = {
         "Sampler": ident + ["chains", "iterations", "thin", "m", "step_size", "leapfrog_mean",
-                            "accept_mean", "divergent"],
+                            "accept_mean", "divergent"]
+                   + [c for c in ("retried_%", "retry_accepted_%") if c in table.columns],
         "Shape: sd of each whitened coordinate (N(0, I) would give 1)":
             ident + [c for c in table.columns if c.startswith("sd_") and "_tau_" not in c
                      and not c.endswith("_n")] + ["abs_mean_p50", "abs_mean_max"],

@@ -61,6 +61,11 @@ coordinate by the narrower of its two half-widths, ``min(q50 - q16, q84 - q50)``
 instead of its sd: the same for a symmetric coordinate, but a lopsided one is
 scaled only to its steep side, which is what bounds the step size.
 
+``--retry-factor a`` turns on delayed rejection
+(:mod:`~pmedm_vb.solvers.mcmc`): a divergent transition is retried with step
+``eps / a``; the trace records which chains retried, whether the retry was
+accepted and the steps it cost, and the report summarises them.
+
 ``--locate K`` records, at every divergent transition, the ``K`` whitened
 coordinates with the largest ``|gradient|`` at the trajectory's end; the
 report lists the coordinates that come first most often.
@@ -95,6 +100,8 @@ from laplace_diagnostic import constraint_table, load_vb
 SHARES = (0.01, 0.10)
 #: Per-iteration records, each (iterations, chains).
 TRACE_KEYS = ("log_pi", "accept_prob", "divergent", "energy", "max_share", "max_cell")
+#: Per-iteration delayed-rejection records (--retry-factor), each (iterations, chains).
+RETRY_KEYS = ("retried", "accepted2")
 #: Per-divergence records (--locate): iteration, chain, and the top coordinates and |gradient|s.
 LOCATED_KEYS = ("div_iter", "div_chain", "div_coords", "div_grad")
 
@@ -137,6 +144,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--diag-stat", choices=["sd", "steep"], default="sd",
                         help="--diag-from's scale: each coordinate's sd, or the narrower of its "
                              "two half-widths min(q50 - q16, q84 - q50)")
+    parser.add_argument("--retry-factor", type=float, default=0.0,
+                        help="delayed rejection: retry divergent transitions with step size "
+                             "divided by this (0: off); e.g. 4")
     parser.add_argument("--locate", type=int, default=0,
                         help="at each divergence, record this many whitened coordinates with "
                              "the largest |gradient| at the trajectory's end")
@@ -326,12 +336,15 @@ def sample(args: argparse.Namespace) -> None:
     settings = HMCSettings(
         step_size=args.step_size, trajectory=args.trajectory,
         target_accept=args.target_accept, max_leapfrog=args.max_leapfrog, locate=args.locate,
+        retry_factor=args.retry_factor,
     )
     sampler = HMC(target, inputs.n, q.mean, A, x0, settings, seed=args.seed, device=device)
 
     trace = {key: [] for key in TRACE_KEYS}
     step_sizes, leapfrogs, draws = [], [], []
     located = {key: [] for key in LOCATED_KEYS}   # one entry per divergent transition
+    retries = {key: [] for key in RETRY_KEYS}
+    extra_leapfrogs = []
     earlier_seconds, warmup_seconds = 0.0, float("nan")
     if state_path.exists() and trace_path.exists():
         with np.load(state_path) as state:
@@ -339,6 +352,13 @@ def sample(args: argparse.Namespace) -> None:
         with np.load(trace_path) as saved:
             trace = {key: list(saved[key]) for key in TRACE_KEYS}
             step_sizes, leapfrogs = list(saved["step_size"]), list(saved["n_leapfrog"])
+            saved_retry = float(saved["retry_factor"]) if "retry_factor" in saved.files else 0.0
+            if saved_retry != args.retry_factor:
+                raise SystemExit(f"{trace_path} was sampled with --retry-factor {saved_retry:g}, "
+                                 f"not {args.retry_factor:g}")
+            if args.retry_factor > 1:
+                retries = {key: list(saved[key]) for key in RETRY_KEYS}
+                extra_leapfrogs = list(saved["extra_leapfrog"])
             key = "lam" if hierarchy.is_trivial else "xi"
             draws = list(saved[key]) if key in saved.files else []
             earlier_seconds = float(saved["seconds"]) if "seconds" in saved.files else 0.0
@@ -368,6 +388,9 @@ def sample(args: argparse.Namespace) -> None:
             trace_path,
             **{key: np.asarray(value) for key, value in trace.items()},
             step_size=np.asarray(step_sizes), n_leapfrog=np.asarray(leapfrogs),
+            retry_factor=args.retry_factor,
+            **({**{key: np.asarray(value) for key, value in retries.items()},
+                "extra_leapfrog": np.asarray(extra_leapfrogs)} if args.retry_factor > 1 else {}),
             **({key: np.asarray(value) for key, value in located.items()}
                if located["div_iter"] else {}),
             warmup=args.warmup, thin=args.thin, n_zones=inputs.n_zones, n_units=inputs.n_units,
@@ -395,6 +418,10 @@ def sample(args: argparse.Namespace) -> None:
             located["div_coords"].extend(stats["div_coords"])
             located["div_grad"].extend(stats["div_grad"])
         leapfrogs.append(stats["n_leapfrog"])
+        if args.retry_factor > 1:
+            for key in RETRY_KEYS:
+                retries[key].append(stats[key])
+            extra_leapfrogs.append(stats["extra_leapfrog"])
         sampling_index = sampler.iteration - args.warmup
         if sampling_index > 0 and sampling_index % args.thin == 0:
             draws.append(sampler.lam(sampler.x).detach().cpu().numpy())
@@ -491,6 +518,15 @@ def report(args: argparse.Namespace) -> None:
         "   E-BFMI per chain (below 0.3 is a warning sign): min {:.2f}, median {:.2f}".format(
             *np.quantile(az.bfmi(chains_first("energy")), [0.0, 0.5])),
     ]
+    if "retried" in trace:
+        retried, taken = chains_first("retried"), chains_first("accepted2")
+        extra = trace["extra_leapfrog"][post].sum()
+        lines.append(
+            f"   delayed rejection (step / {float(trace['retry_factor']):g}): {int(retried.sum()):,} "
+            f"retries ({100 * retried.mean():.2f}% of transitions), "
+            f"{100 * taken.sum() / max(1, retried.sum()):.1f}% of them accepted; retries and their "
+            f"ghosts took {int(extra):,} extra leapfrog steps per chain "
+            f"({100 * extra / trace['n_leapfrog'][post].sum():.0f}% of the first stage's)")
     if "div_coords" in trace:
         lines += locate_lines(trace, warmup)
 
