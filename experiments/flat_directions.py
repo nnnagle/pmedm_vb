@@ -32,6 +32,17 @@ with ``--coordinates``, e.g. ``exp02_nullspace:6629,6720 exp01_baseline:12895``
 fit's by default (``--whitening``). Finally, each multiplier's own posterior
 sd (data layout): how many a prior of scale 1, 3 or 10 would bind.
 
+**Tilts.** A cell's tilt is its weight over its prior allocation,
+``W_ij / (N q_ij) = p_ij / q_ij``; a unit's is the same summed over zones,
+``sum_j p_ij / sum_j q_ij``. For each bound ``K`` in ``--bounds``, over
+``--tilt-draws`` posterior draws: the cells and units tilted above ``K`` or
+below ``1/K`` in more than half the draws and in any draw, and the people
+(``N p``) those cells hold, averaged over the draws -- what a prior bounding
+the tilt in both directions would act on. Units are the PUMA's own (a
+statewide support's added rows have a tiny prior by construction). Also the
+excluded cells' tilt at the posterior mean, and for each direction's wall
+cell its prior allocation ``N q`` and its tilt now and at one person.
+
 Writes ``<out>/flat_directions.csv`` (medians per group), ``..._detail.csv``
 (every direction) and ``flat_directions.txt``. Needs the assembled inputs::
 
@@ -74,6 +85,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--draws", type=int, default=8, help="posterior draws for the data curvature")
     parser.add_argument("--excluded", type=float, default=1e-6,
                         help="a cell under this many people counts as excluded")
+    parser.add_argument("--bounds", type=float, nargs="+", default=[1e3, 3e3, 1e4],
+                        help="tilt bounds K, applied as K and 1/K")
+    parser.add_argument("--tilt-draws", type=int, default=200,
+                        help="posterior draws for the tilt counts")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path, required=True)
     return parser.parse_args()
@@ -101,8 +116,63 @@ def log_shares(inputs, tilt: Tilt, lam: np.ndarray) -> tuple[np.ndarray, float]:
     return logits - log_z, float(log_z)
 
 
+def own_units(inputs) -> np.ndarray:
+    """Units holding at least one of the PUMA's own records (all of them
+    without a statewide support)."""
+    members = inputs.unit_members
+    n_units = inputs.q.shape[1]
+    if members is None:
+        return np.ones(n_units, bool)
+    own = np.zeros(n_units, bool)
+    own[members.loc[members["in_puma"].to_numpy(bool), "row"].to_numpy(int)] = True
+    return own
+
+
+def tilt_counts(args, inputs, tilt: Tilt, lam_flat: np.ndarray, log_q: np.ndarray,
+                own: np.ndarray, rng: np.random.Generator) -> list[dict]:
+    """Per bound ``K``: cells and units tilted beyond ``K`` either way, over posterior draws."""
+    picks = rng.choice(lam_flat.shape[0], min(args.tilt_draws, lam_flat.shape[0]), replace=False)
+    log_k = np.log(np.asarray(args.bounds))
+    cell_up = np.zeros((log_k.size,) + log_q.shape, np.int32)
+    cell_down = np.zeros_like(cell_up)
+    unit_up = np.zeros((log_k.size, own.size), np.int32)
+    unit_down = np.zeros_like(unit_up)
+    people_up, people_down = np.zeros(log_k.size), np.zeros(log_k.size)
+    log_q_unit = np.log(inputs.q.sum(axis=0))
+    for i in picks:
+        log_p, _ = log_shares(inputs, tilt, lam_flat[i])
+        p = np.exp(log_p)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            t = np.where(tilt.support, log_p - log_q, 0.0)            # log tilt, 0 off the support
+            t_unit = np.log(p.sum(axis=0)) - log_q_unit
+        for b, lk in enumerate(log_k):
+            up, down = t > lk, t < -lk
+            cell_up[b] += up
+            cell_down[b] += down
+            unit_up[b] += t_unit > lk
+            unit_down[b] += t_unit < -lk
+            people_up[b] += inputs.N * p[up].sum()
+            people_down[b] += inputs.N * p[down].sum()
+    half = picks.size / 2
+    rows = []
+    for b, k in enumerate(args.bounds):
+        rows.append({
+            "bound": k, "draws": int(picks.size),
+            "cells_up_half": int((cell_up[b] > half).sum()), "cells_up_any": int((cell_up[b] > 0).sum()),
+            "cells_down_half": int((cell_down[b] > half).sum()),
+            "cells_down_any": int((cell_down[b] > 0).sum()),
+            "people_up": people_up[b] / picks.size, "people_down": people_down[b] / picks.size,
+            "units_up_half": int((unit_up[b][own] > half).sum()),
+            "units_up_any": int((unit_up[b][own] > 0).sum()),
+            "units_down_half": int((unit_down[b][own] > half).sum()),
+            "units_down_any": int((unit_down[b][own] > 0).sum()),
+            "own_units": int(own.sum()),
+        })
+    return rows
+
+
 def one_fit(args, spec: dict, exp: Path, puma: str, listed: list[int],
-            rng: np.random.Generator) -> tuple[list[dict], list[dict], dict]:
+            rng: np.random.Generator) -> tuple[list[dict], list[dict], dict, list[dict]]:
     inputs, sigma, q, _, hierarchy = load(spec, exp, puma, args.alpha, args.whitening)
     name = fit_name(spec, puma, args.alpha)
     with np.load(exp / puma / f"hmc_{args.kind}" / f"{name}_trace.npz") as saved:
@@ -128,6 +198,9 @@ def one_fit(args, spec: dict, exp: Path, puma: str, listed: list[int],
     mean_log_p, _ = log_shares(inputs, tilt, lam_mean)
     target = np.log(1.0 / N)                                         # one person, as a log share
     excluded = tilt.support & (mean_log_p < np.log(args.excluded / N))
+    with np.errstate(divide="ignore"):
+        log_q = np.where(tilt.support, np.log(inputs.q), -np.inf)
+    ln10 = np.log(10.0)
 
     groups = {"widest": np.flatnonzero(sd > args.wide_sd),
               "moderate": np.flatnonzero((sd >= 1.5) & (sd <= args.wide_sd)),
@@ -170,6 +243,9 @@ def one_fit(args, spec: dict, exp: Path, puma: str, listed: list[int],
                 "total_curv": sigma_curv + data_curv + ridge, "sigma_ratio": ratio,
                 "wall_distance_sd": float(dist[z, u]), "wall_unit": unit_ids[u], "wall_zone": zones[z],
                 "wall_d_eta": float(delta[z, u]),
+                "wall_prior_people": float(N * inputs.q[z, u]),
+                "wall_log10_tilt_now": float((mean_log_p[z, u] - log_q[z, u]) / ln10),
+                "wall_log10_tilt_at_one": float((target - log_q[z, u]) / ln10),
                 "top_constraint": f"{table['level'].iat[top]} {table['geoid'].iat[top]} "
                                   f"{table['constraint'].iat[top]}",
                 "top_move": float(lam_d[top]),
@@ -188,12 +264,19 @@ def one_fit(args, spec: dict, exp: Path, puma: str, listed: list[int],
                      "sigma_ratio_p10": f["sigma_ratio"].quantile(0.1),
                      "wall_distance_sd": f["wall_distance_sd"].median(),
                      "wall_distance_sd_p10": f["wall_distance_sd"].quantile(0.1)})
+    excluded_tilt = (mean_log_p[excluded] - log_q[excluded]) / ln10
+    excluded_q = (np.quantile(excluded_tilt, [0.0, 0.1, 0.5, 0.9]) if excluded_tilt.size
+                  else [np.nan] * 4)
     multipliers = {"multipliers": int(lam_sd.size),
                    **{f"lam_sd_over_{s:g}": int((lam_sd > s).sum()) for s in (1, 3, 10)},
                    "lam_sd_p50": float(np.median(lam_sd)), "lam_sd_p99": float(np.quantile(lam_sd, 0.99)),
                    "lam_sd_max": float(lam_sd.max()), "alpha": args.alpha,
-                   "excluded_cells": int(excluded.sum()), "support_cells": int(tilt.support.sum())}
-    return rows, details, multipliers
+                   "excluded_cells": int(excluded.sum()), "support_cells": int(tilt.support.sum()),
+                   **{f"excluded_log10_tilt_{name}": float(v)
+                      for name, v in zip(("min", "p10", "p50", "p90"), excluded_q)}}
+    logger.info("tilt counts over %d draws", min(args.tilt_draws, lam_flat.shape[0]))
+    tilts = tilt_counts(args, inputs, tilt, lam_flat, log_q, own_units(inputs), rng)
+    return rows, details, multipliers, tilts
 
 
 def main() -> None:
@@ -202,7 +285,7 @@ def main() -> None:
     record_run(args.out, args)
     rng = np.random.default_rng(args.seed)
 
-    summary, detail_rows, extra = [], [], []
+    summary, detail_rows, extra, tilt_rows = [], [], [], []
     for experiment in args.experiments:
         exp = args.root / experiment
         spec = json.loads((exp / "experiment.json").read_text())
@@ -212,14 +295,16 @@ def main() -> None:
                 logger.info("%s %s: no %s trace; skipped", experiment, puma, args.kind)
                 continue
             logger.info("%s %s", experiment, puma)
-            rows, details, multipliers = one_fit(args, spec, exp, puma,
+            rows, details, multipliers, tilts = one_fit(args, spec, exp, puma,
                                                  listed_for(args.coordinates, experiment), rng)
             ident = {"experiment": experiment, "puma": puma}
             summary += [{**ident, **r} for r in rows]
             detail_rows += [{**ident, **d} for d in details]
             extra.append({**ident, **multipliers})
+            tilt_rows += [{**ident, **t} for t in tilts]
             pd.DataFrame(summary).to_csv(args.out / "flat_directions.csv", index=False)
             pd.DataFrame(detail_rows).to_csv(args.out / "flat_directions_detail.csv", index=False)
+            pd.DataFrame(tilt_rows).to_csv(args.out / "flat_directions_tilts.csv", index=False)
     if not summary:
         raise SystemExit("no traces found")
 
@@ -235,8 +320,12 @@ def main() -> None:
              "Medians by group", pd.DataFrame(summary).to_string(index=False, float_format=fmt), ""]
     if not listed.empty:
         lines += ["Listed coordinates", listed.drop(columns=["group"]).to_string(index=False, float_format=fmt), ""]
-    lines += ["Multipliers (data layout): how many have a posterior sd over 1, 3, 10",
-              pd.DataFrame(extra).to_string(index=False, float_format=fmt)]
+    lines += ["Multipliers (data layout): how many have a posterior sd over 1, 3, 10; excluded "
+              "cells' log10 tilt (weight over prior allocation) at the posterior mean",
+              pd.DataFrame(extra).to_string(index=False, float_format=fmt), "",
+              "Tilts beyond K (up) or 1/K (down): cells and own units, in more than half the draws "
+              "and in any draw; people = N p held by those cells, averaged over draws",
+              pd.DataFrame(tilt_rows).to_string(index=False, float_format=fmt)]
     text = "\n".join(lines)
     (args.out / "flat_directions.txt").write_text(text + "\n")
     print(text)
