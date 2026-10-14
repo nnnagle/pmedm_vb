@@ -16,4 +16,4 @@ job_id,step,puma,alpha,method,family,seed,commit,partition,out_dir,status,notes
 6377095,whitened_mixing,4701501,0.01,,,,ab59987,campus,$PAPER/oracle_scale/mixing_block,completed,--kinds block --structure-kinds block
 6399066,fits_bundle,4701501,0.01,map+vb,gaussian;skewed,,964a97b,short,$PAPER/exp08_prior3/4701501,submitted,run_experiment.py exp08_prior3.json --stage fits; puma+prior3 (zeta ~ N(0 3^2))
 6399067,fits_bundle,4701501,0.01,map+vb,gaussian;skewed,,964a97b,short,$PAPER/exp09_nullspace_prior3/4701501,submitted,run_experiment.py exp09_nullspace_prior3.json --stage fits; nullspace+prior3 (zeta ~ N(0 3^2))
-6400217,hmc_bundle,4701501,0.01,,gaussian-whitened-diag,2000,964a97b,campus-gpu,$PAPER/{exp08_prior3;exp09_nullspace_prior3}/4701501/hmc_gdiag,submitted,$PAPER/spec_prior3_gdiag.txt; --diag-from each experiment's hmc_gwhite trace; --locate 5; 200+500 thin 1 traj 3.0
+6400217,hmc_bundle,4701501,0.01,,gaussian-whitened-diag,2000,964a97b,campus-gpu,$PAPER/{exp08_prior3;exp09_nullspace_prior3}/4701501/hmc_gdiag,completed,$PAPER/spec_prior3_gdiag.txt; --diag-from each experiment's hmc_gwhite trace; --locate 5; 200+500 thin 1 traj 3.0
