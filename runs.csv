@@ -14,3 +14,5 @@ job_id,step,puma,alpha,method,family,seed,commit,partition,out_dir,status,notes
 6372369,whitened_mixing,4701501,0.01,,,,5e6531d,campus,$PAPER/oracle_scale/mixing_thin1,completed,--kinds thin1 --structure-kinds none; exp01 and exp03
 6375985,hmc_bundle,4701501,0.01,,skewed-whitened-block,3000,ab59987,campus-gpu,$PAPER/{exp01_baseline;exp03_rollup}/4701501/hmc_block,completed,$PAPER/oracle_scale/spec_block.txt; --block-from the ref trace; diag sd + Cholesky block on sd>2; 200+1000 thin 1 traj 3.0
 6377095,whitened_mixing,4701501,0.01,,,,ab59987,campus,$PAPER/oracle_scale/mixing_block,completed,--kinds block --structure-kinds block
+6399066,fits_bundle,4701501,0.01,map+vb,gaussian;skewed,,964a97b,short,$PAPER/exp08_prior3/4701501,submitted,run_experiment.py exp08_prior3.json --stage fits; puma+prior3 (zeta ~ N(0 3^2))
+6399067,fits_bundle,4701501,0.01,map+vb,gaussian;skewed,,964a97b,short,$PAPER/exp09_nullspace_prior3/4701501,submitted,run_experiment.py exp09_nullspace_prior3.json --stage fits; nullspace+prior3 (zeta ~ N(0 3^2))
