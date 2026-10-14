@@ -2,7 +2,7 @@
 
 An experiment is a JSON file (``experiments/paper/expNN_<name>.json``): the
 study area, PUMAs and alphas, the model (taper, variance floor, hierarchy,
-roll-up, share cap), the raking methods, the VB families and the HMC settings.
+roll-up, share cap, multiplier prior), the raking methods, the VB families and the HMC settings.
 Everything it produces lives under ``<root>/<name>``::
 
     <root>/<name>/
@@ -160,11 +160,13 @@ def data_dir(spec: dict) -> Path:
 def level(spec: dict) -> str:
     """The hierarchy level string that names the MAP, VB and HMC results."""
     from pmedm_vb.assemble.hierarchy import level_name
+    from pmedm_vb.assemble.prior import prior_level
     from pmedm_vb.assemble.sharecap import cap_level
 
     model = spec["model"]
-    return cap_level(level_name(model["hierarchy"], None, model.get("rollup")),
-                     model.get("share_cap"), model.get("cap_strength"))
+    return prior_level(cap_level(level_name(model["hierarchy"], None, model.get("rollup")),
+                                 model.get("share_cap"), model.get("cap_strength")),
+                       model.get("multiplier_prior_sd"))
 
 
 def fit_name(spec: dict, puma: str, alpha: float) -> str:
@@ -183,6 +185,8 @@ def model_args(spec: dict) -> list[str]:
     if model.get("share_cap") is not None:
         args += ["--share-cap", f"{model['share_cap']:g}",
                  "--cap-strength", f"{model['cap_strength']:g}"]
+    if model.get("multiplier_prior_sd") is not None:
+        args += ["--prior-sd", f"{model['multiplier_prior_sd']:g}"]
     return args
 
 

@@ -143,12 +143,18 @@ class Hierarchy:
 
         A ``+share<share>x<strength>`` suffix (:mod:`pmedm_vb.assemble.sharecap`)
         adds the share cap to any level; it is held as ``.cap`` (``None``
-        without one)."""
+        without one). A ``+prior<sd>`` suffix (:mod:`pmedm_vb.assemble.prior`)
+        adds the Gaussian prior on the multipliers, held as ``.prior_sd`` and
+        as ``.prior_var``, the diagonal :meth:`sigma` adds."""
+        from pmedm_vb.assemble.prior import prior_variance, split_prior
         from pmedm_vb.assemble.sharecap import split_cap
 
+        level, prior_sd = split_prior(level)
         level, cap = split_cap(level)
         h = cls._build(inputs, level, alpha=alpha, taper=taper, variance_floor=variance_floor)
         h.cap = cap
+        h.prior_sd = prior_sd
+        h.prior_var = prior_variance(prior_sd, inputs.n, inputs.N)
         return h
 
     @classmethod
@@ -227,6 +233,8 @@ class Hierarchy:
         return self.level == "none"
 
     is_collapsed = False
+    prior_sd = None
+    prior_var = 0.0
 
     @property
     def targets_ext(self) -> np.ndarray:
@@ -314,16 +322,19 @@ class Hierarchy:
     def sigma(self, inputs: PMEDMInputs, alpha: float, taper: str | None,
               variance_floor: str | float | None) -> Sigma:
         """``Sigma_ext``: the run's ``Sigma`` with the PUMA rows appended as their
-        own taper group. The same as ``inputs.sigma(...)`` below ``"puma"``."""
+        own taper group. The same as ``inputs.sigma(...)`` below ``"puma"``.
+        With a prior (``+prior<sd>``), its ``prior_var`` on the diagonal."""
+        from pmedm_vb.assemble.prior import with_prior
+
         base = inputs.sigma(alpha, taper, variance_floor)
         if not self.n_puma:
-            return base
+            return with_prior(base, self.prior_var)
         v = np.concatenate([base.v, self.v_P])
         l = np.vstack([base.l, self.l_P])
         groups = None
         if base.groups is not None:
             groups = np.concatenate([base.groups, np.full(self.n_puma, base.groups.max() + 1)])
-        return Sigma(v=v, l=l, alpha=alpha, groups=groups)
+        return with_prior(Sigma(v=v, l=l, alpha=alpha, groups=groups), self.prior_var)
 
     # -- torch maps (tensors are (batch, rows)) ------------------------------
 

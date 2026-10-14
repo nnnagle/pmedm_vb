@@ -215,6 +215,11 @@ class Sigma:
         ``(n,)`` integer labels. The low-rank term is kept only between rows
         sharing a label -- see *Tapering* in the module docstring. ``None``
         keeps it everywhere, the untapered form.
+    prior_var:
+        ``tau^2`` added to the diagonal on top of ``v``: the Gaussian prior on
+        the multipliers of the module docstring (*Anything above the published
+        variance*), ``tau = N / (n s)`` for a prior sd ``s``. Zero, the
+        default, is no prior. ``v`` stays the published variance either way.
 
     Notes
     -----
@@ -228,6 +233,7 @@ class Sigma:
     l: np.ndarray | None
     alpha: float
     groups: np.ndarray | None = None
+    prior_var: float = 0.0
 
     def __post_init__(self) -> None:
         if not 0.0 < self.alpha <= 1.0:
@@ -249,6 +255,8 @@ class Sigma:
                 )
             if not np.issubdtype(self.groups.dtype, np.integer):
                 raise ValueError(f"groups must be integer, got {self.groups.dtype}")
+        if not self.prior_var >= 0.0:
+            raise ValueError(f"prior_var must be non-negative, got {self.prior_var}")
         if not np.all(self.v > 0):
             bad = int((self.v <= 0).sum())
             raise ValueError(
@@ -274,14 +282,15 @@ class Sigma:
 
     @cached_property
     def d(self) -> np.ndarray:
-        """Residual diagonal ``v - (1 - alpha) * s``, strictly positive.
+        """Residual diagonal ``v - (1 - alpha) * s``, strictly positive, plus
+        ``prior_var``.
 
         Tapering removes off-diagonal entries only, so this is the same with
         or without ``groups``.
         """
         if self.l is None or self.scale == 0.0:
-            return self.v
-        return self.v - self.scale * np.square(self.l).sum(axis=1)
+            return self.v + self.prior_var
+        return self.v - self.scale * np.square(self.l).sum(axis=1) + self.prior_var
 
     @cached_property
     def b(self) -> np.ndarray | None:
@@ -366,7 +375,8 @@ class Sigma:
         return total
 
     def diagonal(self) -> np.ndarray:
-        """``diag(Sigma)``, which equals ``v`` exactly at every ``alpha``.
+        """``diag(Sigma)``, which equals ``v + prior_var`` exactly at every
+        ``alpha`` -- ``v`` itself without a prior.
 
         The point of the residual construction, and cheap to assert against the
         published variances.

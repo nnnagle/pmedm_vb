@@ -200,13 +200,18 @@ def parse_args() -> argparse.Namespace:
                              "+share<share>x<strength>")
     parser.add_argument("--cap-strength", type=float, default=None,
                         help="the cap's strength tau (required with --share-cap)")
+    parser.add_argument("--prior-sd", type=float, default=None,
+                        help="the Gaussian prior on the multipliers, zeta ~ N(0, s^2) "
+                             "(pmedm_vb.assemble.prior), e.g. 3; the hierarchy level gains "
+                             "+prior<sd>")
     args = parser.parse_args()
     from pmedm_vb.assemble.hierarchy import level_name
+    from pmedm_vb.assemble.prior import prior_level
     from pmedm_vb.assemble.sharecap import cap_level
 
     if getattr(args, "hierarchy", None) is not None:
-        args.hierarchy = cap_level(level_name(args.hierarchy, args.collapse, args.rollup),
-                                   args.share_cap, args.cap_strength)
+        args.hierarchy = prior_level(cap_level(level_name(args.hierarchy, args.collapse, args.rollup),
+                                               args.share_cap, args.cap_strength), args.prior_sd)
     return args
 
 

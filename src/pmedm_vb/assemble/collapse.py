@@ -496,7 +496,12 @@ class CollapsedHierarchy:
 
     def sigma(self, inputs: PMEDMInputs, alpha: float, taper: str | None,
               variance_floor: str | float | None) -> Sigma:
-        """``Sigma`` over the cells, then the PUMA cells as their own taper group."""
+        """``Sigma`` over the cells, then the PUMA cells as their own taper group;
+        with a prior (``+prior<sd>``), its ``prior_var`` on the diagonal. The
+        null-space level builds its coordinates from this before the prior is
+        set, so they are the same with and without one."""
+        from pmedm_vb.assemble.prior import with_prior
+
         if taper not in ("tract", None):
             raise ValueError(f"taper must be 'tract' or None, got {taper!r}")
         v = self.v_c
@@ -509,7 +514,7 @@ class CollapsedHierarchy:
         groups = None
         if taper == "tract":
             groups = np.concatenate([self.cell_area, np.full(self.n_puma, self.n_tracts)])
-        return Sigma(v=v, l=l, alpha=alpha, groups=groups)
+        return with_prior(Sigma(v=v, l=l, alpha=alpha, groups=groups), getattr(self, "prior_var", 0.0))
 
     def torch_maps(self, device: str):
         return _TorchCollapsed(self, device)
