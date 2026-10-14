@@ -20,13 +20,12 @@ the diagonal is preserved exactly:
 for ``v`` the published (or modelled) per-cell variance and ``L`` the
 ``(n, 80)`` deviations.
 
-**Why ``D`` is a residual rather than a ridge.** Any ``D`` added *on top of* the
-replicate covariance inflates every variance above what ACS publishes. That
-diagonal is the one quantity in this pipeline with an independent published
-answer -- recomputed MOEs match Census's own to rounding -- so buying
-invertibility by corrupting it is a bad trade. Defining ``D`` as the residual
-leaves the variances alone at every ``alpha`` and shrinks only the
-correlations, which is the part 80 replicates estimate badly.
+**The diagonal is at least the published variance.** ``diag(Sigma)`` should
+never fall below what ACS publishes: that MOE is the one quantity in this
+pipeline with an independent published answer -- recomputed MOEs match
+Census's own to rounding. Defining ``D`` as the residual keeps the diagonal at
+exactly ``v`` at every ``alpha`` and shrinks only the correlations, which is
+the part 80 replicates estimate badly.
 
 It also disarms a trap in the obvious formulation. Under a naive
 ``alpha * diag(v) + (1 - alpha) * Sigma_hat``, a zero count -- whose replicates
@@ -35,12 +34,28 @@ zero-cell variance silently scaled down, making the cells we know least about
 look the most certain. Here ``s_i`` is exactly zero for those cells, so
 ``D_i = v_i = w * k`` at any ``alpha``.
 
-**The same thing written as variance and correlation.** With ``D = diag(v)``
-and ``R`` the replicate correlation matrix, this is exactly
+**Anything above the published variance is a prior on the multipliers.** In
+the dual, a diagonal ``tau^2 I`` added to ``Sigma`` is exactly a Gaussian prior
+on them: with ``c = n / N^2``,
 
 .. math::
 
-    \Sigma(\alpha) = D^{1/2}\,[\,(1-\alpha) R + \alpha I\,]\,D^{1/2}
+    \\tfrac{c}{2}\\,\\zeta'(\\Sigma + \\tau^2 I)\\zeta
+    = \\tfrac{c}{2}\\,\\zeta'\\Sigma\\zeta + \\frac{\\zeta'\\zeta}{2 n s^2},
+    \\qquad \\tau = \\frac{N}{n s},
+
+so under ``exp(-n f)`` it is ``zeta ~ N(0, s^2)``. A diagonal above ``v`` is
+therefore not sampling error and is not needed for invertibility, which
+``alpha > 0`` already gives; it belongs in ``Sigma`` only as that prior, and
+is reported as one.
+
+**The same thing written as variance and correlation.** With ``D = diag(v)``
+and ``R`` the replicate correlation matrix, ``Sigma(alpha)`` without a prior is
+exactly
+
+.. math::
+
+    \\Sigma(\\alpha) = D^{1/2}\\,[\\,(1-\\alpha) R + \\alpha I\\,]\\,D^{1/2}
 
 -- algebraically identical, verified to 3e-17. ``R`` here is literally
 ``L~ L~'`` for ``L~`` the row-normalised deviations: unit diagonal, cosines off
@@ -104,9 +119,9 @@ rest of the dual Hessian. From ``pmedm_derivation.md`` that Hessian is
 
 .. math::
 
-    H = (S + cD) \;+\; [\sqrt{c}B \;\; u]
-        \begin{bmatrix} I_{80} & \\ & -1 \end{bmatrix}
-        [\sqrt{c}B \;\; u]'
+    H = (S + cD) \\;+\\; [\\sqrt{c}B \\;\\; u]
+        \\begin{bmatrix} I_{80} & \\\\ & -1 \\end{bmatrix}
+        [\\sqrt{c}B \\;\\; u]'
 
 So the whole Hessian is *sparse plus diagonal*, corrected by rank 81: eighty
 directions up from the replicates and one down from the outer product the
