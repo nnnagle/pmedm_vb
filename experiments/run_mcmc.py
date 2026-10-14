@@ -70,6 +70,31 @@ accepted and the steps it cost, and the report summarises them.
 coordinates with the largest ``|gradient|`` at the trajectory's end; the
 report lists the coordinates that come first most often.
 
+``--adapt-diag`` learns that diagonal in warmup instead, in Stan's windows
+(:func:`~pmedm_vb.solvers.mcmc.stan_windows`: ``--warmup-init`` iterations
+adapting only the step size, then windows of ``--warmup-base``, twice that,
+..., then ``--warmup-term``): at each window's end every whitened coordinate is
+scaled by its sd over the window, pooled across chains. The state carries the
+scale, so a resumed run continues with it.
+
+**Many short chains** (``--superchains K``): ``--chains`` split into ``K``
+superchains of ``M = chains / K`` that start at one point each -- ``K`` screened
+draws from the VB Gaussian, times ``--init-inflate`` so that they are
+overdispersed -- the design of nested ``R-hat`` (Margossian et al. 2024,
+*Bayesian Analysis*). Warmup is adaptive: ``--warmup-init`` step-size-only
+iterations, then repeatedly a metric window (``--warmup-base``, doubling each
+time), ``--warmup-term`` step-size iterations, and one iteration at the fixed
+kernel, whose draw gives nested ``R-hat`` (one draw per chain) for ``log pi``,
+the largest cell's share and the 99th percentile of ``|lambda|``; warmup ends
+at the first check where all three are under ``sqrt(1 + 1/M + tau)``, ``tau``
+from ``--nested-tau`` or, by default, the level ``K`` superchains can resolve
+(:func:`~pmedm_vb.solvers.mcmc.nested_tau`, a ``--nested-alpha`` false-alarm
+rate split over the three), or at ``--warmup`` iterations, flagged as not
+converged. That draw is the first of ``ceil(--draws / chains)`` sampling
+iterations, all kept; sampling is extended by as many again (up to
+``--max-extend`` times) while a monitored quantity's bulk or tail ESS is under
+``--ess-target``. No checkpoints: a run that stops is rerun.
+
 ``--block-from`` goes one step further, from an earlier run's trace: every
 coordinate is scaled by its sd in that trace's kept draws, as above, except
 the coordinates with sd over ``--block-sd``, which are mapped by the Cholesky
@@ -84,6 +109,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import math
 import time
 from pathlib import Path
 
@@ -158,6 +184,31 @@ def parse_args() -> argparse.Namespace:
                         help="whitened sd above which --block-from treats a coordinate as wide")
     parser.add_argument("--init-max-share", type=float, default=0.01,
                         help="largest share of p on one cell a starting point may have")
+    parser.add_argument("--init-inflate", type=float, default=1.0,
+                        help="starting points are VB Gaussian draws times this (overdispersed > 1)")
+    parser.add_argument("--adapt-diag", action="store_true",
+                        help="learn a diagonal on top of the whitening in warmup windows; "
+                             "excludes --scale-from, --diag-from and --block-from")
+    parser.add_argument("--warmup-init", type=int, default=75,
+                        help="warmup iterations adapting only the step size before the first window")
+    parser.add_argument("--warmup-base", type=int, default=25, help="the first metric window's length")
+    parser.add_argument("--warmup-term", type=int, default=50,
+                        help="step-size-only iterations after the (each, with --superchains) last window")
+    parser.add_argument("--superchains", type=int, default=0,
+                        help="many short chains: split --chains into this many superchains and end "
+                             "warmup by nested R-hat (implies --adapt-diag; --warmup is its cap)")
+    parser.add_argument("--draws", type=int, default=4000,
+                        help="--superchains: total kept draws, ceil(draws / chains) per chain")
+    parser.add_argument("--ess-target", type=float, default=400,
+                        help="--superchains: extend sampling while a monitor's bulk or tail ESS is under this")
+    parser.add_argument("--max-extend", type=int, default=3,
+                        help="--superchains: at most this many extensions")
+    parser.add_argument("--nested-tau", type=float, default=None,
+                        help="--superchains: tolerated nonstationary variance (default: what K "
+                             "superchains can resolve at --nested-alpha)")
+    parser.add_argument("--nested-alpha", type=float, default=0.05,
+                        help="--superchains: false-alarm rate at stationarity for the default tau, "
+                             "split over the monitored quantities")
     parser.add_argument("--checkpoint", type=int, default=100)
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--seed", type=int, default=0)
@@ -183,8 +234,14 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     given = [name for name in ("scale_from", "block_from", "diag_from")
              if getattr(args, name, None) is not None]
+    if getattr(args, "superchains", 0):
+        args.adapt_diag = True
+        if args.chains % args.superchains:
+            parser.error(f"--chains {args.chains} does not split into --superchains {args.superchains}")
+    if getattr(args, "adapt_diag", False):
+        given.append("adapt_diag")
     if len(given) > 1:
-        parser.error("--scale-from, --block-from and --diag-from are alternatives; give one")
+        parser.error("--scale-from, --block-from, --diag-from and --adapt-diag are alternatives; give one")
     from pmedm_vb.assemble.hierarchy import level_name
     from pmedm_vb.assemble.prior import prior_level
     from pmedm_vb.assemble.sharecap import cap_level
@@ -275,6 +332,12 @@ def block_metric(path: Path, q, wide_sd: float) -> tuple[np.ndarray, np.ndarray,
 
 def metric_name(args: argparse.Namespace) -> str:
     """What the whitening is scaled by, for the trace and the report ('' for nothing)."""
+    if getattr(args, "superchains", 0):
+        return (f"nested {args.superchains} x {args.chains // args.superchains}, diagonal learned "
+                f"in warmup ({args.warmup_init}+{args.warmup_base}x2^k+{args.warmup_term})")
+    if getattr(args, "adapt_diag", False):
+        return (f"diagonal learned in warmup ({args.warmup_init}+{args.warmup_base}x2^k+"
+                f"{args.warmup_term})")
     if getattr(args, "block_from", None) is not None:
         return f"block {args.block_from} sd>{args.block_sd:g}"
     if getattr(args, "diag_from", None) is not None:
@@ -295,7 +358,7 @@ def draw_arrays(draws: np.ndarray, hierarchy) -> dict[str, np.ndarray]:
 def sample(args: argparse.Namespace) -> None:
     import torch
 
-    from pmedm_vb.solvers.mcmc import HMC, HMCSettings, starting_points, whitening_matrix
+    from pmedm_vb.solvers.mcmc import HMC, HMCSettings, stan_windows, starting_points, whitening_matrix
     from pmedm_vb.solvers.vb import _DualTarget
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -309,7 +372,8 @@ def sample(args: argparse.Namespace) -> None:
     target = _DualTarget(inputs, sigma, device, hierarchy)
     A = whitening_matrix(q)
     rng = np.random.default_rng(args.seed)
-    x0 = starting_points(target, q.mean, A, args.chains, rng, args.init_max_share, device)
+    x0 = starting_points(target, q.mean, A, args.chains, rng, args.init_max_share, device,
+                         inflate=args.init_inflate)
     scale = whitening_scale(args.scale_from, q.size)
     if scale is not None:
         A = A * scale            # columns: lambda = mean + A diag(s) x
@@ -344,6 +408,10 @@ def sample(args: argparse.Namespace) -> None:
         retry_factor=args.retry_factor,
     )
     sampler = HMC(target, inputs.n, q.mean, A, x0, settings, seed=args.seed, device=device)
+    windows = (stan_windows(args.warmup, args.warmup_init, args.warmup_term, args.warmup_base)
+               if args.adapt_diag else [])
+    if args.adapt_diag:
+        logger.info("diagonal learned in %d windows: %s", len(windows), windows)
 
     trace = {key: [] for key in TRACE_KEYS}
     step_sizes, leapfrogs, draws = [], [], []
@@ -401,12 +469,21 @@ def sample(args: argparse.Namespace) -> None:
             warmup=args.warmup, thin=args.thin, n_zones=inputs.n_zones, n_units=inputs.n_units,
             seconds=earlier_seconds + time.perf_counter() - started,
             warmup_seconds=warmup_seconds, metric=metric_name(args),
+            scale=sampler.scale.cpu().numpy(),
             **(draw_arrays(np.asarray(draws), hierarchy) if draws else {}),
         )
 
     while sampler.iteration < total:
         warming = sampler.iteration < args.warmup
         stats = sampler.step(adapt=warming)
+        done = sampler.iteration                     # the step just taken had index done - 1
+        for start, end in windows:
+            if start <= done - 1 < end:
+                sampler.accumulate()
+                if done == end:
+                    new = sampler.adapt_scale()
+                    logger.info("  window %d-%d: diagonal p10 %.3g, median %.3g, p90 %.3g, max %.3g",
+                                start, end, *np.quantile(new, [0.1, 0.5, 0.9, 1.0]))
         if sampler.iteration == args.warmup:
             sampler.end_warmup()
             warmup_seconds = earlier_seconds + time.perf_counter() - started
@@ -447,6 +524,165 @@ def sample(args: argparse.Namespace) -> None:
             save()
     logger.info("HMC %s done: %.0fs this job; results in %s", name,
                 time.perf_counter() - started, args.out)
+
+
+#: The quantities nested R-hat and the ESS check monitor in a --superchains run.
+MONITORS = ("log_pi", "max_share", "lam_q99")
+
+
+def sample_nested(args: argparse.Namespace) -> None:
+    """Many short chains: superchains, adaptive warmup ended by nested R-hat,
+    then just enough sampling (see the module docstring)."""
+    import torch
+
+    from pmedm_vb.compare import import_arviz
+    from pmedm_vb.solvers.mcmc import (HMC, HMCSettings, nested_rhat, nested_tau, nested_threshold,
+                                       starting_points, whitening_matrix)
+    from pmedm_vb.solvers.vb import _DualTarget
+
+    az = import_arviz()
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    args.out.mkdir(parents=True, exist_ok=True)
+    record_run(args.out, args)
+    name = fit_name(args)
+    trace_path = args.out / f"{name}_trace.npz"
+    if trace_path.exists():
+        with np.load(trace_path) as saved:
+            if "nested_done" in saved.files:
+                logger.info("%s is done; nothing to sample", trace_path)
+                return
+
+    k, chains = args.superchains, args.chains
+    m_per = chains // k
+    inputs, sigma, q, _, hierarchy = load_problem(args)
+    target = _DualTarget(inputs, sigma, device, hierarchy)
+    A = whitening_matrix(q)
+    rng = np.random.default_rng(args.seed)
+    starts = starting_points(target, q.mean, A, k, rng, args.init_max_share, device,
+                             inflate=args.init_inflate)
+    x0 = np.repeat(starts, m_per, axis=0)             # chain c is in superchain c // M
+    settings = HMCSettings(
+        step_size=args.step_size, trajectory=args.trajectory,
+        target_accept=args.target_accept, max_leapfrog=args.max_leapfrog, locate=args.locate,
+    )
+    sampler = HMC(target, inputs.n, q.mean, A, x0, settings, seed=args.seed, device=device)
+    tau = (args.nested_tau if args.nested_tau is not None
+           else nested_tau(k, m_per, args.nested_alpha, len(MONITORS)))
+    threshold = nested_threshold(m_per, tau)
+    logger.info("HMC %s on %s: %s multipliers, %d superchains x %d chains, starts x%g; nested "
+                "R-hat threshold %.4f (tau %.4g); warmup at most %d, %d draws wanted", name, device,
+                f"{q.size:,}", k, m_per, args.init_inflate, threshold, tau, args.warmup, args.draws)
+
+    trace = {key: [] for key in TRACE_KEYS}
+    step_sizes, leapfrogs, draws, monitors = [], [], [], []
+    located = {key: [] for key in LOCATED_KEYS}
+    checks = []                                      # (iteration, rhat per monitor, max over x, count over)
+    started = time.perf_counter()
+
+    def monitor_values() -> np.ndarray:
+        with torch.no_grad():
+            lam = sampler.lam(sampler.x)
+            q99 = torch.quantile(lam.abs(), 0.99, dim=1)
+        share, _ = sampler.largest_cell()
+        return np.stack([(-sampler.U).cpu().numpy(), share, q99.cpu().numpy()], axis=1)
+
+    def advance(adapt: bool, window: bool = False, keep: bool = False) -> None:
+        stats = sampler.step(adapt=adapt)
+        if window:
+            sampler.accumulate()
+        share, cell = sampler.largest_cell()
+        for key in TRACE_KEYS[:4]:
+            trace[key].append(stats[key])
+        trace["max_share"].append(share)
+        trace["max_cell"].append(cell)
+        step_sizes.append(stats["step_size"])
+        leapfrogs.append(stats["n_leapfrog"])
+        if "div_chain" in stats:
+            located["div_iter"].extend([sampler.iteration] * len(stats["div_chain"]))
+            located["div_chain"].extend(stats["div_chain"])
+            located["div_coords"].extend(stats["div_coords"])
+            located["div_grad"].extend(stats["div_grad"])
+        if keep:
+            draws.append(sampler.lam(sampler.x).detach().cpu().numpy())
+            monitors.append(monitor_values())
+        if sampler.iteration % args.log_every == 0:
+            logger.info("  iter %5d  step %.4g  leapfrog %4d  accept %.2f  divergent %3d  "
+                        "log pi median %.1f", sampler.iteration, stats["step_size"],
+                        stats["n_leapfrog"], float(np.mean(stats["accept_prob"])),
+                        int(np.sum(stats["divergent"])), float(np.median(stats["log_pi"])))
+
+    # Warmup: step size alone, then window / step size / check until nested R-hat passes.
+    for _ in range(args.warmup_init):
+        advance(adapt=True)
+    size, converged = args.warmup_base, False
+    while True:
+        for _ in range(size):
+            advance(adapt=True, window=True)
+        new = sampler.adapt_scale()
+        for _ in range(args.warmup_term):
+            advance(adapt=True)
+        sampler.end_warmup()
+        advance(adapt=False, keep=True)              # the check: one draw at the fixed kernel
+        rhat = nested_rhat(monitors[-1][None], k)
+        with torch.no_grad():
+            u = (sampler.x * sampler.scale).cpu().numpy()
+        rhat_x = nested_rhat(u[None], k)
+        checks.append((sampler.iteration, rhat, float(rhat_x.max()), int((rhat_x > threshold).sum())))
+        logger.info("  check at %d (window %d; diagonal median %.3g, max %.3g; step %.4g): nested "
+                    "R-hat %s (threshold %.4f); whitened coordinates max %.4f, %d over",
+                    sampler.iteration, size, np.median(new), new.max(), sampler.step_size,
+                    ", ".join(f"{label} {v:.4f}" for label, v in zip(MONITORS, rhat)), threshold,
+                    rhat_x.max(), int((rhat_x > threshold).sum()))
+        if bool((rhat <= threshold).all()):
+            converged = True
+            break
+        size *= 2
+        if sampler.iteration + size + args.warmup_term + 1 > args.warmup:
+            logger.warning("warmup cap %d reached without nested R-hat passing; sampling anyway",
+                           args.warmup)
+            break
+        draws.pop()
+        monitors.pop()                               # a failed check's draw is warmup
+        sampler.restart_step_size()
+    warmup = sampler.iteration - 1
+    warmup_seconds = time.perf_counter() - started
+
+    # Sampling: the check's draw and enough more for --draws; extended while ESS is short.
+    per_chain = math.ceil(args.draws / chains)
+    for _ in range(per_chain - 1):
+        advance(adapt=False, keep=True)
+    extensions = 0
+    while True:
+        values = np.asarray(monitors)                 # (draws, chains, monitors)
+        bulk = [float(az.ess(values[:, :, j].T, method="bulk")) for j in range(len(MONITORS))]
+        tail = [float(az.ess(values[:, :, j].T, method="tail")) for j in range(len(MONITORS))]
+        logger.info("  sampling %d per chain: ESS bulk %s, tail %s", values.shape[0],
+                    ", ".join(f"{v:,.0f}" for v in bulk), ", ".join(f"{v:,.0f}" for v in tail))
+        if min(bulk + tail) >= args.ess_target or extensions >= args.max_extend:
+            break
+        extensions += 1
+        for _ in range(per_chain):
+            advance(adapt=False, keep=True)
+
+    np.savez(
+        trace_path,
+        **{key: np.asarray(value) for key, value in trace.items()},
+        step_size=np.asarray(step_sizes), n_leapfrog=np.asarray(leapfrogs), retry_factor=0.0,
+        **({key: np.asarray(value) for key, value in located.items()} if located["div_iter"] else {}),
+        warmup=warmup, thin=1, n_zones=inputs.n_zones, n_units=inputs.n_units,
+        seconds=time.perf_counter() - started, warmup_seconds=warmup_seconds,
+        metric=metric_name(args), scale=sampler.scale.cpu().numpy(),
+        superchains=k, nested_tau=tau, nested_threshold=threshold, nested_converged=converged,
+        check_iter=np.asarray([c[0] for c in checks]), check_rhat=np.asarray([c[1] for c in checks]),
+        check_rhat_x_max=np.asarray([c[2] for c in checks]),
+        check_x_over=np.asarray([c[3] for c in checks]), monitors=np.asarray(MONITORS),
+        monitor_draws=np.asarray(monitors), ess_bulk=np.asarray(bulk), ess_tail=np.asarray(tail),
+        extensions=extensions, nested_done=True,
+        **draw_arrays(np.asarray(draws), hierarchy),
+    )
+    logger.info("HMC %s done: warmup %d (%s), %d sampling iterations, %.0fs; results in %s", name,
+                warmup, "nested R-hat passed" if converged else "NOT converged",
+                np.asarray(monitors).shape[0], time.perf_counter() - started, args.out)
 
 
 # -- report ------------------------------------------------------------------
@@ -535,7 +771,30 @@ def report(args: argparse.Namespace) -> None:
     if "div_coords" in trace:
         lines += locate_lines(trace, warmup)
 
+    if "superchains" in trace:
+        k = int(trace["superchains"])
+        names = [str(v) for v in trace["monitors"]]
+        lines += [
+            "",
+            f"1b. Many short chains: {k} superchains x {trace['log_pi'].shape[1] // k} chains; nested "
+            f"R-hat threshold {float(trace['nested_threshold']):.4f} (tau {float(trace['nested_tau']):.4g}); "
+            f"warmup {warmup} iterations, "
+            + ("ended by nested R-hat" if bool(trace["nested_converged"]) else "NOT CONVERGED (cap reached)")
+            + f"; {done - warmup} sampling iterations ({int(trace['extensions'])} extensions)",
+            "   checks (iteration: nested R-hat per monitor; whitened coordinates max, number over):",
+        ]
+        for it, rh, mx, over in zip(trace["check_iter"], trace["check_rhat"], trace["check_rhat_x_max"],
+                                    trace["check_x_over"]):
+            lines.append(f"     {int(it):5d}: " + ", ".join(f"{n} {v:.4f}" for n, v in zip(names, rh))
+                         + f"; x max {float(mx):.4f}, {int(over):,} over")
+        lines.append("   ESS over the sampling draws (bulk / tail): " + ", ".join(
+            f"{n} {b:,.0f} / {t:,.0f}" for n, b, t in zip(names, trace["ess_bulk"], trace["ess_tail"])))
+
     lines += ["", "2. Convergence (rank-normalised split R-hat; bulk and tail ESS)"]
+    if "superchains" in trace:
+        lines.append(f"   (with {done - warmup} draws per chain split R-hat is not a convergence test -- "
+                     "it needs long chains (Margossian et al. 2024, figure 1); nested R-hat in 1b is. "
+                     "The ESS counts every chain.)")
     for key, label in (("log_pi", "log pi"), ("max_share", "largest-cell share")):
         values = chains_first(key)
         lines.append(
@@ -615,7 +874,7 @@ def report(args: argparse.Namespace) -> None:
 def main() -> None:
     args = parse_args()
     if args.step == "sample":
-        sample(args)
+        (sample_nested if args.superchains else sample)(args)
     else:
         with contextlib.suppress(BrokenPipeError):
             report(args)

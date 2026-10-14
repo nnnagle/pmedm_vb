@@ -32,7 +32,24 @@ adapted towards a target mean acceptance probability by the dual averaging of
 Hoffman & Gelman (2014, *JMLR* 15, algorithm 5, with their constants
 ``gamma = 0.05, t0 = 10, kappa = 0.75``); after warmup it is fixed at the
 averaged value, so the chains are then a valid (time-homogeneous) Markov
-chain. The mass matrix is not adapted: the whitening plays that part.
+chain.
+
+**Learned diagonal.** The whitening is the mass matrix up to a diagonal: with
+:meth:`HMC.set_scale`, ``lambda = mu + A diag(s) x``. Warmup can learn ``s`` in
+windows, as Stan does (:func:`stan_windows`): over a window the sampler
+accumulates each coordinate of ``u = s * x`` (the whitening's own
+coordinates) across every chain and iteration, and at its end ``s`` becomes
+their sd, shrunk towards 1 (the whitening) as Stan shrinks towards its
+default, and the step size's dual averaging restarts. Pooling over chains
+counts any spread between chains still in it as width, which errs wide.
+
+**Many short chains.** :func:`nested_rhat` is the nested ``R-hat`` of
+Margossian et al. (2024, *Bayesian Analysis*, definition 2.2) for ``K``
+superchains of ``M`` chains that start at one point each; at one draw per
+chain (``N = 1``) the threshold is ``sqrt(1 + 1/M + tau)`` (their eq. 29),
+``tau`` the tolerated nonstationary variance relative to the posterior's.
+:func:`nested_tau` sets ``tau`` at the level the diagnostic can resolve with
+``K`` superchains, from its distribution at stationarity.
 
 A transition whose energy error exceeds ``divergence`` nats (or is not finite)
 is recorded as divergent, following Stan's convention; divergences are where
@@ -101,9 +118,11 @@ def starting_points(
     max_share: float = 0.01,
     device: str = "cpu",
     tries: int = 20,
+    inflate: float = 1.0,
 ) -> np.ndarray:
-    """``(chains, m)`` whitened starting points: standard normal draws, keeping
-    only those whose largest cell holds at most ``max_share`` of ``p``.
+    """``(chains, m)`` whitened starting points: standard normal draws (times
+    ``inflate``, to start overdispersed), keeping only those whose largest cell
+    holds at most ``max_share`` of ``p``.
 
     A draw from the whitening Gaussian can land on a wall -- as VB draws do --
     and a chain started there diverges on every trajectory at a step size that
@@ -114,7 +133,7 @@ def starting_points(
     mean_t = torch.as_tensor(mean, dtype=DTYPE, device=device)
     A_t = torch.as_tensor(A, dtype=DTYPE, device=device)
     for _ in range(tries):
-        x = rng.standard_normal((chains, mean.size))
+        x = inflate * rng.standard_normal((chains, mean.size))
         lam = mean_t + torch.as_tensor(x, dtype=DTYPE, device=device) @ A_t.T
         share, _ = largest_share(target, lam)
         keep.extend(x[(share <= max_share).cpu().numpy()])
@@ -130,6 +149,81 @@ def whitening_matrix(q: StructuredGaussian) -> np.ndarray:
     """``A = G'^{-1}`` as a dense ``(m, m)`` array, so that ``mean + A eps`` is a
     draw from the Gaussian part of ``q`` for ``eps ~ N(0, I)``."""
     return q.gaussian_part(np.eye(q.size))
+
+
+def stan_windows(warmup: int, init: int = 75, term: int = 50, base: int = 25
+                 ) -> list[tuple[int, int]]:
+    """Stan's metric-adaptation windows for ``warmup`` iterations: ``(start,
+    end)`` iteration ranges (0-based, end exclusive), after an initial buffer
+    of ``init`` step-size-only iterations and before a final one of ``term``;
+    ``base, 2 base, 4 base, ...``, the last stretched to the final buffer. Too
+    short a warmup for the buffers gives no windows."""
+    windows, start, size = [], init, base
+    end_of_windows = warmup - term
+    while start + size <= end_of_windows:
+        end = start + size
+        if end + 2 * size > end_of_windows:
+            end = end_of_windows
+        windows.append((start, end))
+        start, size = end, 2 * size
+    return windows
+
+
+def nested_rhat(values: np.ndarray, superchains: int) -> np.ndarray:
+    """Nested ``R-hat`` (Margossian et al. 2024, definition 2.2).
+
+    ``values`` is ``(draws, chains)`` or ``(draws, chains, q)`` for ``q``
+    quantities, chain ``c`` in superchain ``c // M``, ``M = chains /
+    superchains``. The between-superchain variance ``B`` of the superchain
+    means, over the within-superchain variance ``W`` (the variance between
+    its chains' means plus, with more than one draw, the mean variance within
+    them), as ``sqrt(1 + B / W)``. Returns ``(q,)`` (a 0-d array for 2-d input).
+    """
+    v = np.asarray(values, dtype=float)
+    squeeze = v.ndim == 2
+    if squeeze:
+        v = v[:, :, None]
+    n, chains, q = v.shape
+    k = superchains
+    if chains % k:
+        raise ValueError(f"{chains} chains do not split into {k} superchains")
+    m = chains // k
+    v = v.reshape(n, k, m, q)                       # draw, superchain, chain, quantity
+    chain_mean = v.mean(0)                          # (k, m, q)
+    super_mean = chain_mean.mean(1)                 # (k, q)
+    b = super_mean.var(0, ddof=1)
+    within = np.zeros((k, q))
+    if m > 1:
+        within += chain_mean.var(1, ddof=1)
+    if n > 1:
+        within += v.var(0, ddof=1).mean(1)
+    w = within.mean(0)
+    out = np.sqrt(1.0 + b / w)
+    return out[0] if squeeze else out
+
+
+def nested_tau(superchains: int, chains_per: int, alpha: float = 0.05, tests: int = 1) -> float:
+    """The tolerance ``tau`` at which the ``N = 1`` threshold
+    ``sqrt(1 + 1/M + tau)`` is exceeded with probability ``alpha / tests`` by
+    chains already at stationarity.
+
+    Then every draw is independent, so ``M B / W`` follows an ``F`` distribution
+    on ``K - 1`` and ``K (M - 1)`` degrees of freedom, and ``tau = (F_q - 1) / M``
+    for ``F_q`` its ``1 - alpha / tests`` quantile: the smallest nonstationary
+    variance (relative to the posterior's) that ``K`` superchains can tell from
+    noise at that rate. Margossian et al. set ``tau`` from the error they
+    tolerate (``1e-4`` for an ESS of 2,000 with 2,048 chains); with fewer
+    chains, a ``tau`` below this level fails stationary chains often."""
+    from scipy.stats import f
+
+    k, m = superchains, chains_per
+    quantile = float(f.ppf(1.0 - alpha / tests, k - 1, k * (m - 1)))
+    return (quantile - 1.0) / m
+
+
+def nested_threshold(chains_per: int, tau: float) -> float:
+    """``sqrt(1 + 1/M + tau)``, the ``N = 1`` threshold (Margossian et al., eq. 29)."""
+    return math.sqrt(1.0 + 1.0 / chains_per + tau)
 
 
 @dataclass
@@ -205,6 +299,10 @@ class HMC:
         self.da_hbar = 0.0
         self.da_log_bar = 0.0
         self.da_count = 0
+        # The learned diagonal: lambda = mean + A x with A = A0 diag(scale).
+        m = self.x.shape[1]
+        self.scale = torch.ones(m, dtype=DTYPE, device=device)
+        self.reset_accumulator()
 
     @property
     def chains(self) -> int:
@@ -344,6 +442,60 @@ class HMC:
         if self.da_count:
             self.step_size = math.exp(self.da_log_bar)
 
+    def restart_step_size(self) -> None:
+        """Restart dual averaging from the current step size, as Stan does
+        after each metric update."""
+        self.da_mu = math.log(10 * self.step_size)
+        self.da_hbar = 0.0
+        self.da_log_bar = 0.0
+        self.da_count = 0
+
+    # -- the learned diagonal ----------------------------------------------
+
+    def set_scale(self, scale) -> None:
+        """Make ``lambda = mean + A0 diag(scale) x``, keeping every chain where it is."""
+        new = torch.as_tensor(np.asarray(scale), dtype=DTYPE, device=self.device)
+        ratio = new / self.scale
+        self.A = self.A * ratio[None, :]
+        self.x = self.x / ratio
+        self.scale = new
+        self.U, self.grad = self.potential_and_gradient(self.x)
+
+    def reset_accumulator(self) -> None:
+        m = self.x.shape[1]
+        self.acc_draws = 0
+        self.acc_sum = torch.zeros(m, dtype=DTYPE, device=self.device)
+        self.acc_sq = torch.zeros(m, dtype=DTYPE, device=self.device)
+
+    def accumulate(self) -> None:
+        """Add the current state of every chain, in the whitening's own
+        coordinates ``u = scale * x``, to the window's sums."""
+        u = self.x * self.scale
+        self.acc_draws += u.shape[0]
+        self.acc_sum += u.sum(0)
+        self.acc_sq += (u * u).sum(0)
+
+    def adapted_scale(self, shrink: float = 5.0) -> np.ndarray:
+        """Each coordinate's sd over the window, pooled over chains and
+        iterations, its variance shrunk towards 1 as Stan shrinks towards its
+        default: ``(n var + shrink) / (n + shrink)`` for ``n`` the window's
+        iterations."""
+        draws = self.acc_draws
+        mean = self.acc_sum / draws
+        var = torch.clamp(self.acc_sq / draws - mean * mean, min=0.0)
+        n = draws / self.chains
+        var = (n * var + shrink) / (n + shrink)
+        return torch.sqrt(torch.clamp(var, min=1e-8)).cpu().numpy()
+
+    def adapt_scale(self, shrink: float = 5.0) -> np.ndarray:
+        """End a metric window: set the scale from it, empty the sums and
+        restart the step size's adaptation. Returns the new scale."""
+        scale = self.adapted_scale(shrink)
+        self.set_scale(scale)
+        self.reset_accumulator()
+        self.restart_step_size()
+        return scale
+
     def largest_cell(self) -> tuple[np.ndarray, np.ndarray]:
         """Per chain, the largest cell's share of ``p(lambda)`` and its flat
         ``(zone, unit)`` index into the ``(n_zones, n_units)`` weight matrix."""
@@ -357,9 +509,18 @@ class HMC:
             "iteration": self.iteration,
             "da": np.array([self.da_mu, self.da_hbar, self.da_log_bar, self.da_count]),
             "generator": self.generator.get_state().cpu().numpy(),
+            "scale": self.scale.cpu().numpy(),
+            "acc": np.array([self.acc_draws], dtype=float),
+            "acc_sum": self.acc_sum.cpu().numpy(),
+            "acc_sq": self.acc_sq.cpu().numpy(),
         }
 
     def load_state_dict(self, state: dict) -> None:
+        if "scale" in state:
+            self.set_scale(state["scale"])
+            self.acc_draws = int(state["acc"][0])
+            self.acc_sum = torch.as_tensor(state["acc_sum"], dtype=DTYPE, device=self.device)
+            self.acc_sq = torch.as_tensor(state["acc_sq"], dtype=DTYPE, device=self.device)
         self.x = torch.as_tensor(state["x"], dtype=DTYPE, device=self.device)
         self.U, self.grad = self.potential_and_gradient(self.x)
         self.step_size = float(state["step_size"])

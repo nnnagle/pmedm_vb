@@ -31,6 +31,7 @@ experiment. Pooling:
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from pathlib import Path
 
@@ -43,7 +44,8 @@ EXPERIMENTS = [("exp01_baseline", "Baseline"), ("exp02_nullspace", "Null space")
                ("exp03_rollup", "Roll-up")]
 
 #: (method, label), in the tables' order.
-METHODS = [("ipf", "IPF"), ("map_laplace", "MAP + Laplace"),
+METHODS = [("ipf", "IPF"), ("ipf_multinomial", "IPF, multinomial"),
+           ("map_laplace", "MAP + Laplace"),
            ("vb_gaussian", "VB Gaussian"), ("vb_skewed", "VB skewed"),
            ("vb_gaussian_trunc", "VB Gaussian, truncated"),
            ("vb_skewed_trunc", "VB skewed, truncated"),
@@ -54,7 +56,7 @@ ALPHAS = (0.01, 0.1, 1.0)
 #: Methods without an alpha (raking): one fit per PUMA, scored in every alpha
 #: cell. They are shown once, in their own panel, except in Table 4, where they
 #: are compared with each alpha's reference.
-NO_ALPHA = ("ipf",)
+NO_ALPHA = ("ipf", "ipf_multinomial")
 
 #: Table 5's statistics that are shares of draws: for a method without an alpha,
 #: one draw per PUMA, shown as a count of draws.
@@ -180,20 +182,21 @@ def draw_statistics(draws: pd.DataFrame, args) -> list[dict]:
     return rows
 
 
-def scores_statistics(scores: pd.DataFrame) -> list[dict]:
-    """Cost (Table 1) and k-hat (Table 4) from all_scores.csv."""
+def scores_statistics(scores: pd.DataFrame, whiten: str = "vb_skewed") -> list[dict]:
+    """Cost (Table 1) and k-hat (Table 4) from all_scores.csv; HMC's cost includes
+    the fit that whitened it (``whiten``)."""
     scores = scores.assign(alpha=scores.alpha.astype(float).round(12))
     timing = scores[(scores.subset == "timing") & (scores.stat == "value")].pivot_table(
         index=["method", "puma", "alpha"], columns="metric", values="value", aggfunc="first")
     timing = timing.reset_index()
-    vb_fit = timing[timing.method == "vb_skewed"].set_index(["puma", "alpha"])["fit_seconds"]
+    vb_fit = timing[timing.method == whiten].set_index(["puma", "alpha"])["fit_seconds"]
     cost = []
     for _, row in timing.iterrows():
         method = row["method"]
         if method in ("hmc_short", "hmc_ref"):
             fit = vb_fit.get((row["puma"], row["alpha"]), np.nan)
             sampling = row.get("hmc_seconds", np.nan)
-        elif method in ("ipf", "sinkhorn"):
+        elif method in ("ipf", "sinkhorn", "ipf_multinomial"):
             fit, sampling = row.get("fit_seconds", np.nan), np.nan
         else:
             fit = row.get("fit_seconds", np.nan)
@@ -420,7 +423,10 @@ def main() -> None:
                                 args)
         scores = keep(pd.read_csv(folder / "all_scores.csv", dtype={"puma": str}), args)
         pooled |= set(scores.puma.astype(str))
-        rows += scores_statistics(scores)
+        record = args.root / name / "experiment.json"
+        whiten = (f"vb_{json.loads(record.read_text())['hmc'].get('whiten', 'skewed')}"
+                  if record.exists() else "vb_skewed")
+        rows += scores_statistics(scores, whiten)
         stats.append(pd.DataFrame(rows).assign(experiment=name))
         print(f"read {name}", flush=True)
     if not stats:

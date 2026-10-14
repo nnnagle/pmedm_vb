@@ -28,8 +28,8 @@ queued or running:
   families, every alpha;
 - **hmc**: one ``run_mcmc_bundle.sbatch`` job per PUMA -- short runs at every
   alpha, then the references -- after that PUMA's fits (``afterok`` when the
-  fits job is still queued or running; not at all while the skewed VB fits are
-  missing and no fits job is). The campus-gpu QoS takes 6 submitted jobs per
+  fits job is still queued or running; not at all while the whitening VB fits
+  -- ``hmc.whiten``, skewed by default -- are missing and no fits job is). The campus-gpu QoS takes 6 submitted jobs per
   user, so only as many are submitted as ``--max-gpu-jobs`` less the user's
   jobs already in campus-gpu; the rest wait for a later call.
 
@@ -373,7 +373,23 @@ def stage_fits(sub: Submitter, spec: dict, exp: Path, puma: str, active: dict) -
     return sub.submit("fits", puma, "run_map_bundle.sbatch", args, slurm=FITS_SLURM, env=env)
 
 
+#: Optional per-kind HMC settings and the run_mcmc.py options they become.
+HMC_OPTIONS = {"samples": "--samples", "thin": "--thin", "checkpoint": "--checkpoint",
+               "superchains": "--superchains", "draws": "--draws", "ess_target": "--ess-target",
+               "max_extend": "--max-extend", "nested_alpha": "--nested-alpha",
+               "init_inflate": "--init-inflate", "warmup_init": "--warmup-init",
+               "warmup_base": "--warmup-base", "warmup_term": "--warmup-term"}
+
+
+def whitening_folder(spec: dict) -> str:
+    """The VB fit that whitens HMC: ``vb_<hmc.whiten>``, skewed unless the spec says."""
+    return f"vb_{spec['hmc'].get('whiten', 'skewed')}"
+
+
 def hmc_spec_lines(spec: dict, exp: Path, puma: str) -> list[str]:
+    """One run_mcmc_bundle.sbatch line per HMC run. Each kind's settings may set
+    its own ``chains`` and any of :data:`HMC_OPTIONS`; ``adapt_diag: true``
+    learns the diagonal in warmup."""
     hmc = spec["hmc"]
     lines = []
     for kind, alpha, out in hmc_runs(spec, exp, puma):
@@ -382,12 +398,17 @@ def hmc_spec_lines(spec: dict, exp: Path, puma: str) -> list[str]:
         seed = (settings["seed"] + 10 * full["pumas"].index(puma)
                 + full["alphas"].index(alpha))
         args = ["--puma", puma, "--alpha", f"{alpha:g}", *model_args(spec),
-                "--area", area_slug(spec["area"]), "--vb-run", str(exp / puma / "vb_skewed"),
-                "--trajectory", f"{hmc['trajectory']:g}", "--chains", str(hmc["chains"]),
-                "--warmup", str(settings["warmup"]), "--samples", str(settings["samples"]),
-                "--thin", str(settings["thin"]), "--seed", str(seed)]
-        if "checkpoint" in settings:
-            args += ["--checkpoint", str(settings["checkpoint"])]
+                "--area", area_slug(spec["area"]),
+                "--vb-run", str(exp / puma / whitening_folder(spec)),
+                "--trajectory", f"{hmc['trajectory']:g}",
+                "--chains", str(settings.get("chains", hmc["chains"])),
+                "--warmup", str(settings["warmup"]), "--seed", str(seed)]
+        for key, option in HMC_OPTIONS.items():
+            if key in settings:
+                args += [option, f"{settings[key]:g}" if isinstance(settings[key], float)
+                         else str(settings[key])]
+        if settings.get("adapt_diag"):
+            args.append("--adapt-diag")
         lines.append(" ".join([str(out), *args]))
     return lines
 
@@ -398,10 +419,11 @@ def stage_hmc(sub: Submitter, spec: dict, exp: Path, puma: str, active: dict,
         return
     if all(path.exists() for path in hmc_outputs(spec, exp, puma)):
         return
-    whiteners = [exp / puma / "vb_skewed" / f"{fit_name(spec, puma, alpha)}.npz"
+    whiteners = [exp / puma / whitening_folder(spec) / f"{fit_name(spec, puma, alpha)}.npz"
                  for alpha in spec["alphas"]]
     if fits_job is None and not all(path.exists() for path in whiteners):
-        print(f"  hmc {puma}: waiting -- the skewed VB fits are missing and no fits job is live")
+        print(f"  hmc {puma}: waiting -- the {whitening_folder(spec)} fits are missing and no "
+              "fits job is live")
         return
     if slots[0] <= 0:
         print(f"  hmc {puma}: not submitted -- {GPU_PARTITION} is full; call again later")

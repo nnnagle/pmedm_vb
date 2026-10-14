@@ -9,6 +9,10 @@ Methods and where their draws come from (``--run`` is the results directory):
 
 - ``ipf``, ``sinkhorn``: ``<run>/<puma>_<method>.npz`` (``run_map.py rake``); a
   single ``W``, and no alpha (write ``--alpha`` as the cell being compared to).
+- ``ipf_multinomial``: the IPF solution taken as a multinomial population.
+  ``--run`` is the IPF results directory; each of the ``--draws`` draws is an
+  allocation ``W ~ Multinomial(round(N), W_ipf / N)`` over every (zone, unit)
+  cell, simulated directly (no multipliers), and scored like any other draw.
 - ``map_laplace``: ``<run>/<name>.npz`` from ``run_map.py solve``; draws from
   ``N(lambda*, (n H)^-1)`` (``StructuredGaussian.laplace``).
 - ``vb_gaussian``, ``vb_skewed``, ``vb_sumdiff``: ``<run>/<name>.npz`` from
@@ -127,7 +131,7 @@ from pmedm_vb.solvers.base import ConstraintOperator
 
 from laplace_diagnostic import batched_f, load_vb
 
-METHODS = ("ipf", "sinkhorn", "map_laplace", "vb_gaussian", "vb_skewed", "vb_sumdiff",
+METHODS = ("ipf", "ipf_multinomial", "sinkhorn", "map_laplace", "vb_gaussian", "vb_skewed", "vb_sumdiff",
            "vb_gaussian_trunc", "vb_skewed_trunc", "vb_sumdiff_trunc",
            "hmc_short", "hmc_ref")
 #: 90% interval half-width in standard errors.
@@ -306,6 +310,23 @@ def method_draws(args, inputs: PMEDMInputs, rng, h) -> tuple[dict, dict]:
     hierarchy)."""
     name = fit_name(args.puma, args.alpha, args.hierarchy, args.taper)
     timing: dict[str, float] = {}
+    if args.method == "ipf_multinomial":
+        from pmedm_vb.rake import rake_name
+
+        with np.load(args.run / f"{rake_name(args.puma, 'ipf', args.rollup)}.npz") as saved:
+            timing["fit_seconds"] = float(saved["seconds"])
+            timing["converged"] = float(saved["converged"])
+            W = np.asarray(saved["W"], dtype=float)
+        total = int(round(W.sum()))
+        p = np.clip(W.ravel() / W.sum(), 0.0, None)
+        p /= p.sum()
+        timing["multinomial_total"] = float(total)
+
+        def allocations():
+            for _ in range(args.draws):
+                yield rng.multinomial(total, p).reshape(W.shape).astype(float)
+
+        return {"W_draws": allocations()}, timing
     if args.method in ("ipf", "sinkhorn"):
         from pmedm_vb.rake import rake_name
 
@@ -550,6 +571,11 @@ def log_p_of(inputs, op, lam):
 def run_draws(inputs, source, sets, ratios, shares, ref_max=None, hh_min=100,
               neff_floors=(20, 50), distinct_floors=(0.1, 0.2)) -> Accumulator:
     acc = Accumulator(inputs, sets, ratios, shares, ref_max, hh_min, neff_floors, distinct_floors)
+    if "W_draws" in source:
+        for W in source["W_draws"]:
+            with np.errstate(divide="ignore"):
+                acc.add(np.log(W / W.sum()), W=W)
+        return acc
     if "W" in source:
         with np.errstate(divide="ignore"):
             acc.add(np.log(source["W"] / source["W"].sum()), W=source["W"])

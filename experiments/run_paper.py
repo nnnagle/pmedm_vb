@@ -42,6 +42,8 @@ submits a one-line job whose only purpose is the "done" e-mail; if a stage
 needs attention it exits non-zero, which mails the failure. ``tick`` takes a
 lock under ``<root>/run_paper``, so two drivers never submit the same work.
 
+``--specs`` chooses the folder of experiment JSONs (``experiments/paper``, or
+``experiments/paper_prior3`` for the models with the multiplier prior).
 ``--root`` and ``--data-dir`` choose the folders: new ones for a run from
 scratch, the existing ones to resume. ``--dry-run`` prints what one ``advance``
 would submit and changes nothing.
@@ -85,6 +87,9 @@ def parse_args() -> argparse.Namespace:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("command", choices=["start", "tick", "advance", "status"])
+    parser.add_argument("--specs", type=Path, default=rx.EXPERIMENTS / "paper",
+                        help="the folder holding the three experiments' JSON files "
+                             "(experiments/paper; experiments/paper_prior3 for the prior)")
     parser.add_argument("--root", type=Path, default=rx.DEFAULT_ROOT,
                         help=f"results root (default {rx.DEFAULT_ROOT})")
     parser.add_argument("--data-dir", type=Path, default=None,
@@ -105,7 +110,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def experiments(args) -> list[dict]:
-    specs = [rx.load_experiment(rx.EXPERIMENTS / "paper" / name) for name in EXPERIMENT_FILES]
+    specs = [rx.load_experiment(args.specs / name) for name in EXPERIMENT_FILES]
     if args.data_dir is not None:
         for spec in specs:
             # Only a different directory replaces the JSON's: the same one spelled
@@ -394,7 +399,8 @@ class Lock:
 
 
 def driver_args(args) -> list[str]:
-    out = ["--root", str(args.root), "--tag", args.tag, "--draws", str(args.draws),
+    out = ["--specs", str(args.specs.resolve()),
+           "--root", str(args.root), "--tag", args.tag, "--draws", str(args.draws),
            "--every", str(args.every), "--max-gpu-jobs", str(args.max_gpu_jobs),
            "--max-attempts", str(args.max_attempts)]
     if args.data_dir is not None:
