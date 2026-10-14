@@ -80,7 +80,9 @@ scale, so a resumed run continues with it.
 **Many short chains** (``--superchains K``): ``--chains`` split into ``K``
 superchains of ``M = chains / K`` that start at one point each -- ``K`` screened
 draws from the VB Gaussian, times ``--init-inflate`` so that they are
-overdispersed -- the design of nested ``R-hat`` (Margossian et al. 2024,
+overdispersed, shrunk from there by 0.95 at a time (not below 1) until enough
+pass the ``--init-max-share`` screen
+(:func:`~pmedm_vb.solvers.mcmc.overdispersed_starts`) -- the design of nested ``R-hat`` (Margossian et al. 2024,
 *Bayesian Analysis*). Warmup is adaptive: ``--warmup-init`` step-size-only
 iterations, then repeatedly a metric window (``--warmup-base``, doubling each
 time), ``--warmup-term`` step-size iterations, and one iteration at the fixed
@@ -185,7 +187,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--init-max-share", type=float, default=0.01,
                         help="largest share of p on one cell a starting point may have")
     parser.add_argument("--init-inflate", type=float, default=1.0,
-                        help="starting points are VB Gaussian draws times this (overdispersed > 1)")
+                        help="starting points are VB Gaussian draws times this (overdispersed > 1); "
+                             "with --superchains, the most it is shrunk from while starts fail the screen")
     parser.add_argument("--adapt-diag", action="store_true",
                         help="learn a diagonal on top of the whitening in warmup windows; "
                              "excludes --scale-from, --diag-from and --block-from")
@@ -537,7 +540,7 @@ def sample_nested(args: argparse.Namespace) -> None:
 
     from pmedm_vb.compare import import_arviz
     from pmedm_vb.solvers.mcmc import (HMC, HMCSettings, nested_rhat, nested_tau, nested_threshold,
-                                       starting_points, whitening_matrix)
+                                       overdispersed_starts, whitening_matrix)
     from pmedm_vb.solvers.vb import _DualTarget
 
     az = import_arviz()
@@ -558,8 +561,10 @@ def sample_nested(args: argparse.Namespace) -> None:
     target = _DualTarget(inputs, sigma, device, hierarchy)
     A = whitening_matrix(q)
     rng = np.random.default_rng(args.seed)
-    starts = starting_points(target, q.mean, A, k, rng, args.init_max_share, device,
-                             inflate=args.init_inflate)
+    starts, inflation, passed = overdispersed_starts(target, q.mean, A, k, rng, args.init_max_share,
+                                                     device, inflate=args.init_inflate)
+    logger.info("starts: VB Gaussian draws x%.3g (asked x%g; %.0f%% of that batch passed the "
+                "%.1f%% screen)", inflation, args.init_inflate, 100 * passed, 100 * args.init_max_share)
     x0 = np.repeat(starts, m_per, axis=0)             # chain c is in superchain c // M
     settings = HMCSettings(
         step_size=args.step_size, trajectory=args.trajectory,
@@ -569,9 +574,9 @@ def sample_nested(args: argparse.Namespace) -> None:
     tau = (args.nested_tau if args.nested_tau is not None
            else nested_tau(k, m_per, args.nested_alpha, len(MONITORS)))
     threshold = nested_threshold(m_per, tau)
-    logger.info("HMC %s on %s: %s multipliers, %d superchains x %d chains, starts x%g; nested "
+    logger.info("HMC %s on %s: %s multipliers, %d superchains x %d chains, starts x%.3g; nested "
                 "R-hat threshold %.4f (tau %.4g); warmup at most %d, %d draws wanted", name, device,
-                f"{q.size:,}", k, m_per, args.init_inflate, threshold, tau, args.warmup, args.draws)
+                f"{q.size:,}", k, m_per, inflation, threshold, tau, args.warmup, args.draws)
 
     trace = {key: [] for key in TRACE_KEYS}
     step_sizes, leapfrogs, draws, monitors = [], [], [], []
@@ -673,6 +678,7 @@ def sample_nested(args: argparse.Namespace) -> None:
         seconds=time.perf_counter() - started, warmup_seconds=warmup_seconds,
         metric=metric_name(args), scale=sampler.scale.cpu().numpy(),
         superchains=k, nested_tau=tau, nested_threshold=threshold, nested_converged=converged,
+        init_inflation=inflation, init_passed=passed,
         check_iter=np.asarray([c[0] for c in checks]), check_rhat=np.asarray([c[1] for c in checks]),
         check_rhat_x_max=np.asarray([c[2] for c in checks]),
         check_x_over=np.asarray([c[3] for c in checks]), monitors=np.asarray(MONITORS),
@@ -778,7 +784,10 @@ def report(args: argparse.Namespace) -> None:
             "",
             f"1b. Many short chains: {k} superchains x {trace['log_pi'].shape[1] // k} chains; nested "
             f"R-hat threshold {float(trace['nested_threshold']):.4f} (tau {float(trace['nested_tau']):.4g}); "
-            f"warmup {warmup} iterations, "
+            + (f"starts x{float(trace['init_inflation']):.3g} "
+               f"({100 * float(trace['init_passed']):.0f}% passed the screen); "
+               if "init_inflation" in trace else "")
+            + f"warmup {warmup} iterations, "
             + ("ended by nested R-hat" if bool(trace["nested_converged"]) else "NOT CONVERGED (cap reached)")
             + f"; {done - warmup} sampling iterations ({int(trace['extensions'])} extensions)",
             "   checks (iteration: nested R-hat per monitor; whitened coordinates max, number over):",
