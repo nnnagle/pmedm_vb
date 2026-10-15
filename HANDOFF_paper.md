@@ -94,6 +94,31 @@ through the replicate covariance in `Sigma` (fully at alpha 0, not at all at
 alpha 1). The `hierarchy` option measures each total once (`default_tables`
 docstring, `assemble/hierarchy.py`).
 
+**All-cell version (`paper_allcells`, in preparation; decided with the
+author).** The collapsed categories above are replaced by every published cell
+of every table, totals and subtotals included: 184 cells per block group and
+489 per tract for the constraint tables (the `default_tables` set has 80 and
+135), every subtotal checked to equal the sum of its children in every area
+and replicate (`experiments/table_trees.py`). The held-out tables move to every
+cell too. The redundancy the subtotals add is left to the null space
+(`--hierarchy nullspace`) and, at small alpha, to the replicate covariance.
+`Sigma` keeps the modelled zero-cell variance `w k` on published zeros and the
+`zeta ~ N(0, 3^2)` prior; the zero-count variance floor is dropped
+(`variance_floor = "none"`). The finer cells need PUMS fields the collapsed
+version did not read, all from the 2020-2024 data dictionary: `RACNUM` and
+`RACSOR` (B03002's two-or-more-races split), `JWRIP` (B08301's carpool sizes),
+`SOCP` (C24010's finer occupation lines) and INDP code ranges (C24030, per the
+2022 Census Industry Code List). In C24010, supervisors of transportation and
+material moving workers (OCCP 9005) are a transportation occupation, as the
+2018 Census Occupation Code List groups them. **Assumption, to be confirmed:**
+the two healthcare lines follow SOC -- practitioners and other technical =
+29-1 and 29-9, technologists and technicians = 29-2 -- which puts dental
+hygienists (OCCP 3310, SOC 29-1292) with the practitioners although their
+Census code sits among the technologists; the code list does not give the
+summary-table sub-headings. It is checked by comparing PUMS-weighted Tennessee
+totals of the two lines with the published C24010 lines summed over the
+state's tracts, under each placement.
+
 **Variances and `Sigma`.** Successive-differences replicate variance, `4/80`
 times the sum of squared replicate deviations (Fay & Train 1995 is cited in
 the code; check the citation). Published zeros take a modelled zero-cell
