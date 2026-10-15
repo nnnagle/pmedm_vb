@@ -123,8 +123,10 @@ practitioners, -1,288 / +734 with them among the technologists (SEs about
 2,000 PUMS and 1,500 published per line); for men (88) the count is too small
 to tell. The same check confirms OCCP 9005 under transportation (men, 5,443:
 +1,037 / -1,169 against -4,406 / +4,274). Other healthcare practitioners and
-technical (OCCP 3550, SOC 29-9000) are taken with the practitioners, as the
-line's title says; the check has been extended to it and is to be rerun.
+technical (OCCP 3550, SOC 29-9000) are practitioners, as the line's title
+says (rerun on commit f449633): for women (2,176) -1,288 / +734 with them
+among the practitioners against -3,464 / +2,910 among the technologists; for
+men (1,097) +662 / -162 against -435 / +935, closer overall as placed.
 
 **Variances and `Sigma`.** Successive-differences replicate variance, `4/80`
 times the sum of squared replicate deviations (Fay & Train 1995 is cited in

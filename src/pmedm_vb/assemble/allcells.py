@@ -301,7 +301,7 @@ def tenure(geography: str = "block group") -> ConstraintTable:
 #: Tennessee's PUMS-weighted totals match the published lines that way and not
 #: the other (``experiments/check_occupation_lines.py``, ``HANDOFF_paper.md``).
 #: Other healthcare practitioners and technical (29-9000, Census code 3550) go
-#: with the practitioners, as the line's title says, pending the same check.
+#: with the practitioners, as the line's title says and the same check agrees.
 SOC_LINES = {
     "management": (("11",), "management_business_science_arts"),
     "business_financial": (("13",), "management_business_science_arts"),
