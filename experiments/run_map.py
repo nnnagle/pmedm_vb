@@ -16,7 +16,11 @@ Separate steps, because ISAAC's compute nodes cannot reach census.gov::
 :meth:`~pmedm_vb.assemble.inputs.PMEDMInputs.save` under
 ``$PMEDM_VB_DATA/processed/inputs/<area>/<puma>``. A PUMA already saved is
 skipped; ``--rebuild`` rebuilds it, which is needed after changing the
-constraint tables or the assembly code.
+constraint tables or the assembly code. ``--tables all`` assembles (and builds
+held-out tables from) every published cell, totals and subtotals included
+(:mod:`pmedm_vb.assemble.allcells`), in place of the collapsed default set; give
+such a study area its own ``--name``, since the name is what separates the two
+sets' inputs on disk.
 
 **solve** and **vb** run every (PUMA, taper, alpha) combination in a process
 pool. ``vb`` fits the MAP solution first, in the same worker, and starts from
@@ -148,6 +152,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-sweeps", type=int, default=None,
                         help="rake: sweep cap (default: 2000 ipf, 5000 sinkhorn)")
     parser.add_argument(
+        "--tables", choices=["default", "all"], default="default",
+        help="prefetch, assemble, heldout: the collapsed default tables, or every published "
+             "cell (pmedm_vb.assemble.allcells). Use a separate --name for 'all'",
+    )
+    parser.add_argument(
         "--epsilon", type=float, default=None,
         help="assemble, solve, vb: statewide support with this prior share off the "
              "PUMA's own records (default: the PUMA's records only)",
@@ -243,12 +252,12 @@ def pool(workers: int, threads: int) -> ProcessPoolExecutor:
 # -- prefetch ----------------------------------------------------------------
 
 
-def run_prefetch(area: StudyArea) -> None:
-    from pmedm_vb.assemble.constraints import default_tables, heldout_tables
+def run_prefetch(area: StudyArea, tables: str = "default") -> None:
+    from pmedm_vb.assemble.allcells import constraint_tables, heldout_set
     from pmedm_vb.data.prefetch import prefetch
 
-    heldout = [*heldout_tables(area, "tract"), *heldout_tables(area, "block group")]
-    constraints = default_tables(area)
+    heldout = [*heldout_set(area, "tract", tables), *heldout_set(area, "block group", tables)]
+    constraints = constraint_tables(area, tables)
     # The constraint tables' national files too, so table_trees.py runs offline.
     prefetch(area, [*constraints, *heldout], national=[t.table for t in constraints])
 
@@ -257,17 +266,19 @@ def run_prefetch(area: StudyArea) -> None:
 
 
 def assemble_one(
-    area: StudyArea, puma: str, path: Path, epsilon: float | None = None
+    area: StudyArea, puma: str, path: Path, epsilon: float | None = None,
+    tables: str = "default",
 ) -> tuple[str, float]:
     """Worker: build and save one PUMA's problem."""
+    from pmedm_vb.assemble.allcells import constraint_tables
     from pmedm_vb.assemble.build import build_puma
-    from pmedm_vb.assemble.constraints import default_tables
     from pmedm_vb.data.geography import puma_crosswalk_whole
 
     log_to_file(path.parent / "logs" / f"assemble_{puma}.log")
     start = time.perf_counter()
     zones = puma_crosswalk_whole(area)
-    build_puma(area, puma, default_tables(area), zones=zones, epsilon=epsilon).save(path)
+    build_puma(area, puma, constraint_tables(area, tables), zones=zones,
+               epsilon=epsilon).save(path)
     return puma, time.perf_counter() - start
 
 
@@ -292,7 +303,8 @@ def run_assemble(
     workers = min(cores, len(todo))
     failed = []
     with pool(workers, max(1, cores // workers)) as executor:
-        futures = {executor.submit(assemble_one, area, p, root / p, epsilon): p for p in todo}
+        futures = {executor.submit(assemble_one, area, p, root / p, epsilon, args.tables): p
+                   for p in todo}
         for future in as_completed(futures):
             try:
                 puma, seconds = future.result()
@@ -333,15 +345,15 @@ def write_support_summary(root: Path, pumas: list[str], epsilon: float | None) -
 # -- heldout -----------------------------------------------------------------
 
 
-def heldout_one(area: StudyArea, path: Path) -> tuple[str, float]:
+def heldout_one(area: StudyArea, path: Path, table_set: str = "default") -> tuple[str, float]:
     """Worker: build and save one PUMA's held-out tables."""
-    from pmedm_vb.assemble.constraints import heldout_tables
+    from pmedm_vb.assemble.allcells import heldout_set
     from pmedm_vb.assemble.heldout import build_heldout
     from pmedm_vb.assemble.inputs import PMEDMInputs
 
     log_to_file(path.parent / "logs" / f"heldout_{path.name}.log")
     start = time.perf_counter()
-    tables = [*heldout_tables(area, "tract"), *heldout_tables(area, "block group")]
+    tables = [*heldout_set(area, "tract", table_set), *heldout_set(area, "block group", table_set)]
     build_heldout(area, PMEDMInputs.load(path), tables).save(path)
     return path.name, time.perf_counter() - start
 
@@ -358,7 +370,7 @@ def run_heldout(args: argparse.Namespace, area: StudyArea, cores: int) -> None:
     if todo:
         workers = min(cores, len(todo))
         with pool(workers, max(1, cores // workers)) as executor:
-            futures = {executor.submit(heldout_one, area, p): p for p in todo}
+            futures = {executor.submit(heldout_one, area, p, args.tables): p for p in todo}
             for future in as_completed(futures):
                 try:
                     puma, seconds = future.result()
@@ -672,7 +684,7 @@ def main() -> None:
     area = study_area(args)
     cores = available_cores(args.cores)
     if args.step == "prefetch":
-        run_prefetch(area)
+        run_prefetch(area, args.tables)
     elif args.step == "assemble":
         run_assemble(args, area, cores, args.rebuild, args.epsilon)
     elif args.step == "heldout":

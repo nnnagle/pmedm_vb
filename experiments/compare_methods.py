@@ -122,6 +122,7 @@ import scipy.sparse as sp
 from scipy.special import logsumexp
 
 from pmedm_vb import compare
+from pmedm_vb.assemble.allcells import is_subtotal
 from pmedm_vb.assemble.heldout import HeldOut
 from pmedm_vb.assemble.inputs import PMEDMInputs
 from pmedm_vb.config import processed_dir
@@ -755,7 +756,11 @@ def distribution_rows(base: dict, s: dict, mean: np.ndarray,
     at 0) against ``p``: ``tvd_rep`` is its mean over replicates, and
     ``tvd_within_rep`` whether the fit's tvd is at most the replicates' 90th
     percentile. Areas with a published total of 0 are skipped; so are
-    one-category tables, whose tvd is 0 by construction.
+    one-category tables, whose tvd is 0 by construction. A table's shares --
+    here and in :func:`shrinkage_rows` -- are over its leaf cells only: an
+    all-cell table (:mod:`pmedm_vb.assemble.allcells`) also carries its totals
+    and subtotals, whose names end in ``":"``, and they would count each person
+    again. The per-cell measures below use every cell.
 
     Over the table's sampled cells, pooled across areas: ``q`` is the mean of
     ``z^2``, weighted by the published count (``stat = weighted``) and not
@@ -767,20 +772,23 @@ def distribution_rows(base: dict, s: dict, mean: np.ndarray,
     table = np.array([n.split(".")[0] for n in s["names"]])
     rep = s.get("rep")
     out = []
+    leaf = ~np.array([is_subtotal(n) for n in s["names"]], dtype=bool)
     for name in np.unique(table):
         cols = np.flatnonzero(table == name)
+        leaves = np.flatnonzero((table == name) & leaf)
         row_base = dict(base, table=name)
         Yt, Mt = Y[:, cols], mean[:, cols]
-        total, fitted = Yt.sum(axis=1), Mt.sum(axis=1)
+        Yl, Ml = Y[:, leaves], mean[:, leaves]
+        total, fitted = Yl.sum(axis=1), Ml.sum(axis=1)
         keep = (total > 0) & (fitted > 0)
-        if cols.size > 1 and keep.any():
-            p, ph = Yt[keep] / total[keep, None], Mt[keep] / fitted[keep, None]
+        if leaves.size > 1 and keep.any():
+            p, ph = Yl[keep] / total[keep, None], Ml[keep] / fitted[keep, None]
             zero = p == 0
             per_area = {"tvd_zero": 0.5 * np.where(zero, ph, 0).sum(axis=1),
                         "tvd_pos": 0.5 * np.where(zero, 0, np.abs(ph - p)).sum(axis=1)}
             per_area["tvd"] = per_area["tvd_zero"] + per_area["tvd_pos"]
             if rep is not None:
-                Yr = np.maximum(Yt[keep][:, :, None] + 2 * rep[keep][:, cols], 0)
+                Yr = np.maximum(Yl[keep][:, :, None] + 2 * rep[keep][:, leaves], 0)
                 pr = Yr / np.maximum(Yr.sum(axis=1, keepdims=True), 1e-12)
                 tvd_r = 0.5 * np.abs(pr - p[:, :, None]).sum(axis=1)  # (areas, replicates)
                 per_area["tvd_rep"] = tvd_r.mean(axis=1)
@@ -806,7 +814,8 @@ def distribution_rows(base: dict, s: dict, mean: np.ndarray,
                 dict(rb, metric="q", stat="unweighted", value=float(z2.mean())),
                 dict(rb, metric="q", stat="n", value=float(z2.size))]
         out += error_decomposition(rb, Yt, Mt, s["se"][:, cols], mask, metrics, Y.shape, cols)
-        out += shrinkage_rows(row_base, s["subset"], Yt, Mt, s["se"][:, cols], metrics, Y.shape, cols)
+        out += shrinkage_rows(row_base, s["subset"], Yl, Ml, s["se"][:, leaves], metrics, Y.shape,
+                              leaves)
         if "halfwidth_over_moe" in metrics:
             ratio = metrics["halfwidth_over_moe"].reshape(Y.shape)[:, cols][mask]
             ok = ratio > 0

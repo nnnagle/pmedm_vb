@@ -43,7 +43,9 @@ needs attention it exits non-zero, which mails the failure. ``tick`` takes a
 lock under ``<root>/run_paper``, so two drivers never submit the same work.
 
 ``--specs`` chooses the folder of experiment JSONs (``experiments/paper``, or
-``experiments/paper_prior3`` for the models with the multiplier prior).
+``experiments/paper_prior3`` for the models with the multiplier prior,
+``experiments/paper_allcells`` for those with every published cell); the
+experiments missing from a folder are skipped.
 ``--root`` and ``--data-dir`` choose the folders: new ones for a run from
 scratch, the existing ones to resume. ``--dry-run`` prints what one ``advance``
 would submit and changes nothing.
@@ -110,7 +112,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def experiments(args) -> list[dict]:
-    specs = [rx.load_experiment(args.specs / name) for name in EXPERIMENT_FILES]
+    # A folder may hold only some of them (``paper_allcells`` has no roll-up yet).
+    specs = [rx.load_experiment(args.specs / name) for name in EXPERIMENT_FILES
+             if (args.specs / name).exists()]
+    if not specs:
+        raise SystemExit(f"{args.specs} holds none of {EXPERIMENT_FILES}")
     if args.data_dir is not None:
         for spec in specs:
             # Only a different directory replaces the JSON's: the same one spelled

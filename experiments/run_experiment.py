@@ -197,6 +197,8 @@ def area_args(spec: dict) -> list[str]:
             "--year", str(area["year"]), "--span", str(area["span"])]
     for county in area.get("counties", ["093"]):
         args += ["--county", county]
+    if area.get("tables", "default") != "default":
+        args += ["--tables", area["tables"]]
     return args
 
 
@@ -304,14 +306,21 @@ class Submitter:
 
 def check_inputs(spec: dict) -> list[str]:
     """What the jobs need from the data directory and do not find."""
+    from pmedm_vb.assemble.allcells import table_set
     from pmedm_vb.assemble.inputs import TREES_FILE
 
     root = data_dir(spec) / "processed" / "inputs" / area_slug(spec["area"])
+    wanted = spec["area"].get("tables", "default")
     problems = []
     for puma in spec["pumas"]:
         folder = root / puma
         if not (folder / "manifest.json").exists():
             problems.append(f"{folder}: not assembled (run_map.sbatch assemble)")
+            continue
+        built = table_set(json.loads((folder / "manifest.json").read_text())["tract_constraints"])
+        if built != wanted:
+            problems.append(f"{folder}: assembled with the {built!r} tables, the experiment "
+                            f"asks for {wanted!r} -- give that set its own area name")
             continue
         if not (folder / "heldout").exists():
             problems.append(f"{folder}/heldout: missing (run_map.sbatch heldout)")
