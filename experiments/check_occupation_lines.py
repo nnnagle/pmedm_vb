@@ -5,10 +5,14 @@ SOC minor groups, not to every ``C24010`` line, so two placements in
 :data:`pmedm_vb.assemble.allcells.SOC_LINES` are read off SOC and need
 confirming:
 
-- **dental hygienists** (OCCP 3310, SOC 29-1292) -- with the health diagnosing
-  and treating practitioners and other technical occupations (SOC 29-1 and
-  29-9; the placement used), or with the health technologists and technicians
-  (29-2), among whose Census codes 3310 sits;
+- **dental hygienists** (OCCP 3310, SOC 29-1292) -- with the health
+  technologists and technicians (29-2), among whose Census codes 3310 sits (the
+  placement used, since a first run of this check), or with the health
+  diagnosing and treating practitioners and other technical occupations (SOC
+  29-1 and 29-9), where SOC puts them;
+- **other healthcare practitioners and technical occupations** (OCCP 3550, SOC
+  29-9000) -- with the practitioners, as that line's title says (the placement
+  used), or with the technologists, after whose codes 3550 comes;
 - **supervisors of transportation and material moving workers** (OCCP 9005,
   SOC 53-1000) -- transportation, as the code list groups them (9005-9430; the
   placement used), or material moving.
@@ -34,7 +38,7 @@ import argparse
 import numpy as np
 import pandas as pd
 
-from pmedm_vb.assemble.allcells import SOC_LINES
+from pmedm_vb.assemble.allcells import soc_lines
 from pmedm_vb.config import StudyArea
 from pmedm_vb.data.pums import load_pums
 from pmedm_vb.data.variance import SDR_FACTOR, fetch_replicates
@@ -45,7 +49,9 @@ LINES = {"health_practitioners": 17, "health_technologists": 18,
 
 #: The two occupations, the line each is placed in, and the alternative.
 QUESTIONS = (
-    ("dental hygienists", ("291292",), "health_practitioners", "health_technologists"),
+    ("dental hygienists", ("291292",), "health_technologists", "health_practitioners"),
+    ("other healthcare practitioners and technical", ("299000",), "health_practitioners",
+     "health_technologists"),
     ("transportation and material moving supervisors", ("531000",), "transportation",
      "material_moving"),
 )
@@ -77,6 +83,8 @@ def main() -> None:
     weights = ["PWGTP", *(f"PWGTP{r}" for r in range(1, 81))]
     persons[weights] = persons[weights].apply(pd.to_numeric)
     pub = published(area)
+    line_of = {c: (soc_lines(str(c)) or [None])[0] for c in persons["SOCP"].dropna().unique()}
+    persons["line"] = persons["SOCP"].map(line_of)
 
     for name, codes, used, alternative in QUESTIONS:
         moved = persons["SOCP"].isin(codes)
@@ -87,9 +95,7 @@ def main() -> None:
             count = persons.loc[sel & moved, "PWGTP"].sum()
             print(f"  {sex}: weighted count {count:,.0f}")
             for line in (used, alternative):
-                base = sel & persons["SOCP"].isin(
-                    [c for c in persons["SOCP"].unique()
-                     if str(c).startswith(SOC_LINES[line][0])]) & ~moved
+                base = sel & (persons["line"] == line) & ~moved
                 cell = f"C24010_{LINES[line] + offset:03d}"
                 row = pub.loc[cell]
                 for placement, add in (("as placed", line == used), ("alternative", line != used)):

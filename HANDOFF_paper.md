@@ -110,14 +110,21 @@ version did not read, all from the 2020-2024 data dictionary: `RACNUM` and
 `SOCP` (C24010's finer occupation lines) and INDP code ranges (C24030, per the
 2022 Census Industry Code List). In C24010, supervisors of transportation and
 material moving workers (OCCP 9005) are a transportation occupation, as the
-2018 Census Occupation Code List groups them. **Assumption, to be confirmed:**
-the two healthcare lines follow SOC -- practitioners and other technical =
-29-1 and 29-9, technologists and technicians = 29-2 -- which puts dental
-hygienists (OCCP 3310, SOC 29-1292) with the practitioners although their
-Census code sits among the technologists; the code list does not give the
-summary-table sub-headings. It is checked by comparing PUMS-weighted Tennessee
-totals of the two lines with the published C24010 lines summed over the
-state's tracts, under each placement.
+2018 Census Occupation Code List groups them. The code list does not give the
+two healthcare lines' contents, so they were checked
+(`experiments/check_occupation_lines.py`, Slurm job on commit ea8c477):
+PUMS-weighted Tennessee totals of the civilian employed in each line against
+the published C24010 lines summed over the state's tracts, under each
+placement. **Dental hygienists (OCCP 3310, SOC 29-1292) are health
+technologists and technicians**, with whom their Census code sits, not
+practitioners as SOC has it: for women (4,289 weighted) PUMS minus published
+is +3,001 practitioners / -3,555 technologists with them among the
+practitioners, -1,288 / +734 with them among the technologists (SEs about
+2,000 PUMS and 1,500 published per line); for men (88) the count is too small
+to tell. The same check confirms OCCP 9005 under transportation (men, 5,443:
++1,037 / -1,169 against -4,406 / +4,274). Other healthcare practitioners and
+technical (OCCP 3550, SOC 29-9000) are taken with the practitioners, as the
+line's title says; the check has been extended to it and is to be rerun.
 
 **Variances and `Sigma`.** Successive-differences replicate variance, `4/80`
 times the sum of squared replicate deviations (Fay & Train 1995 is cited in

@@ -293,13 +293,15 @@ def tenure(geography: str = "block group") -> ConstraintTable:
 
 #: ``C24010``'s detailed occupation lines as SOC code prefixes (``SOCP``, no
 #: dash), with the C24010 major group each lies in (:data:`OCCP_TO_MAJOR_GROUP`).
-#: Supervisors of transportation and material moving workers (53-1000) are a
-#: transportation occupation, as the 2018 Census Occupation Code List groups
-#: them (9005-9430). **Assumption:** the two healthcare lines follow SOC --
-#: practitioners and other technical are 29-1 and 29-9, technologists and
-#: technicians 29-2 -- which puts dental hygienists (29-1292, Census code 3310)
-#: with the practitioners; the code list does not give the summary-table
-#: sub-headings (``HANDOFF_paper.md``).
+#: A code takes the line of its longest matching prefix. Supervisors of
+#: transportation and material moving workers (53-1000) are a transportation
+#: occupation, as the 2018 Census Occupation Code List groups them (9005-9430).
+#: Dental hygienists (29-1292) are a health technologist, with whom their
+#: Census code (3310) sits, although SOC puts them among the practitioners:
+#: Tennessee's PUMS-weighted totals match the published lines that way and not
+#: the other (``experiments/check_occupation_lines.py``, ``HANDOFF_paper.md``).
+#: Other healthcare practitioners and technical (29-9000, Census code 3550) go
+#: with the practitioners, as the line's title says, pending the same check.
 SOC_LINES = {
     "management": (("11",), "management_business_science_arts"),
     "business_financial": (("13",), "management_business_science_arts"),
@@ -311,7 +313,7 @@ SOC_LINES = {
     "education_library": (("25",), "management_business_science_arts"),
     "arts_media": (("27",), "management_business_science_arts"),
     "health_practitioners": (("291", "299"), "management_business_science_arts"),
-    "health_technologists": (("292",), "management_business_science_arts"),
+    "health_technologists": (("292", "291292"), "management_business_science_arts"),
     "healthcare_support": (("31",), "service"),
     "fire_other_protective": (("331021", "33109", "332", "339"), "service"),
     "law_enforcement": (("331011", "331012", "333"), "service"),
@@ -335,6 +337,15 @@ SOC_LINES = {
 SOC_EXCLUDED = ("55", "9999")
 
 
+def soc_lines(code: str) -> list[str]:
+    """The :data:`SOC_LINES` lines of ``code``'s longest matching prefix (one,
+    unless the table is ambiguous; none for a code outside every line)."""
+    lengths = {line: max((len(p) for p in prefixes if code.startswith(p)), default=0)
+               for line, (prefixes, _) in SOC_LINES.items()}
+    longest = max(lengths.values())
+    return [line for line, n in lengths.items() if n == longest and n > 0]
+
+
 def soc_crosswalk(area: StudyArea) -> pd.Series:
     """``SOCP`` code to its :data:`SOC_LINES` line, from the data dictionary.
 
@@ -351,7 +362,7 @@ def soc_crosswalk(area: StudyArea) -> pd.Series:
         code = str(code)
         if code.startswith(SOC_EXCLUDED) or not code[:2].isdigit():
             continue
-        matches = [line for line, (prefixes, _) in SOC_LINES.items() if code.startswith(prefixes)]
+        matches = soc_lines(code)
         if len(matches) != 1:
             raise ValueError(f"SOCP {code} ({label}) matches {matches or 'no'} C24010 line(s)")
         prefix_group = group_of_prefix.get(str(label)[:3])
