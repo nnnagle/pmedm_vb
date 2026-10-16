@@ -11,7 +11,7 @@ published estimate above zero) and zero cells; and the same per table.
 - **rollup<spec>** -- the structure-aware roll-up of
   :mod:`pmedm_vb.assemble.rollup` on the published leaves (no subtotals), one
   scheme per ``--rollup`` spec (default exp03's ``50h20``: 50 for population
-  tables, 20 for household tables, by each table's universe), nested down the
+  tables, ``B26001`` included, 20 for household tables), nested down the
   levels: the PUMA (its
   tracts summed) is rolled up first; each tract starts from its PUMA's cells
   and merges further only on its own estimates; each block group starts from
@@ -59,6 +59,11 @@ from pmedm_vb.assemble.rollup import RollupSpec, category_tree, rollup, tree_cat
 from pmedm_vb.config import StudyArea, processed_dir
 
 LEVELS = ("puma", "tract", "block group")
+
+#: Tables whose roll-up threshold is not their constraint universe's. ``B26001``
+#: is built over the unit frame (a group-quarters person is one unit) but
+#: counts people, so it takes the persons threshold.
+ROLLUP_UNIVERSE = {"B26001": "person"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -244,7 +249,7 @@ def main() -> None:
 
     all_area = area(args.all_area)
     tree = trees(all_area)
-    universe = {t.table: t.universe for t in all_tables(all_area)}
+    universe = {t.table: t.universe for t in all_tables(all_area)} | ROLLUP_UNIVERSE
     specs = [RollupSpec.parse(text) for text in args.rollup]
     schemes = {"all": Tally(), "pruned": Tally(), **{f"rollup{spec}": Tally() for spec in specs}}
     for puma in args.pumas:
