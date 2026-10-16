@@ -116,11 +116,13 @@ class TreeLine:
     """One category's place in its table's published tree: its parent's
     category name (``None`` for the total) and whether it is exactly the sum of
     its children (always for a leaf; not for ``B23001``'s 65-and-over groups and
-    the totals above them)."""
+    the totals above them); and its own label, the same for the corresponding
+    line of parallel branches (``"0_50"`` in each of ``B17024``'s age groups)."""
 
     name: str
     parent: str | None
     additive: bool
+    label: str
 
 
 #: Each table's tree as :class:`TreeLine` per category, in pre-order, filled by
@@ -146,7 +148,8 @@ def tree_table(table: str, universe: str, variables: tuple[str, ...], geography:
         name = "_".join(path) if path else "total"
         if line.children:
             name += SUBTOTAL_MARK
-        structure.append(TreeLine(name, parent, line.select is None or not line.children))
+        structure.append(TreeLine(name, parent, line.select is None or not line.children,
+                                  path[-1] if path else "total"))
         if not line.children:
             if line.select is None:
                 raise ValueError(f"{table}_{line.order:03d} is a leaf with no selector")
