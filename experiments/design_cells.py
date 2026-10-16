@@ -12,9 +12,9 @@ published estimate above zero) and zero cells; and the same per table.
   :mod:`pmedm_vb.assemble.rollup` on the published leaves (no subtotals), one
   scheme per ``--rollup`` spec (default ``25h10``: 25 for population tables,
   ``B26001`` included, 10 for household tables; exp03 used ``50h20``), nested
-  down the levels: the PUMA (its tracts summed) is rolled up first; each tract starts from its PUMA's cells
-  and merges further only on its own estimates; each block group starts from
-  its tract's cells. A merge is never undone below, so every block group's
+  down the levels: the PUMA (its tracts summed) is rolled up first; each
+  tract starts from its PUMA's cells and merges further only on its own
+  estimates; each block group starts from its tract's cells. A merge is never undone below, so every block group's
   cells are unions of its tract's, and a tract's of its PUMA's. The tree a
   lower level rolls up over is the roll-up's own :func:`~pmedm_vb.assemble.
   rollup.category_tree` of the published tree and the inherited cells, so
