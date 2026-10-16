@@ -189,7 +189,7 @@ class _Partitioner:
                 return ([k], False), [], False
             results = [walk(c) for c in children[i]]
             below = []
-            zeros = [m for (members, _), _, zero in results if zero for m in members]
+            zeros = [m for head, _, zero in results if zero for m in head[0]]
             if zeros:
                 below.append((sorted(zeros), True))
             nonzero = [r for r in results if not r[2]]
