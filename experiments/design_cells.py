@@ -10,8 +10,9 @@ published estimate above zero) and zero cells; and the same per table.
 - **pruned** -- the same cells, simplified per area by the zero rules below.
 - **rollup<spec>** -- the structure-aware roll-up of
   :mod:`pmedm_vb.assemble.rollup` on the published leaves (no subtotals), one
-  scheme per ``--rollup`` spec (default exp03's ``50h20``: 50 for population
-  tables, ``B26001`` included, 20 for household tables), nested down the
+  scheme per ``--rollup`` spec (default ``25h10``: 25 for population tables,
+  ``B26001`` included, 10 for household tables; exp03 used ``50h20``), nested
+  down the
   levels: the PUMA (its
   tracts summed) is rolled up first; each tract starts from its PUMA's cells
   and merges further only on its own estimates; each block group starts from
@@ -75,10 +76,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--year", type=int, default=2024)
     parser.add_argument("--span", type=int, default=5)
     parser.add_argument("--pumas", nargs="+", required=True)
-    parser.add_argument("--rollup", nargs="+", default=["50h20"],
+    parser.add_argument("--rollup", nargs="+", default=["25h10"],
                         help="roll-up thresholds, one scheme each: <persons>h<households>, "
                              "the persons threshold for population tables and the households "
-                             "one for household tables (default exp03's: 50 and 20)")
+                             "one for household tables (default 25 and 10; exp03 used 50h20)")
     return parser.parse_args()
 
 
