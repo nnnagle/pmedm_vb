@@ -111,14 +111,42 @@ def union(selects: list[Select]) -> Select:
     return lambda frame: reduce(or_, (select(frame) for select in selects))
 
 
+@dataclass(frozen=True)
+class TreeLine:
+    """One category's place in its table's published tree: its parent's
+    category name (``None`` for the total) and whether it is exactly the sum of
+    its children (always for a leaf; not for ``B23001``'s 65-and-over groups and
+    the totals above them)."""
+
+    name: str
+    parent: str | None
+    additive: bool
+
+
+#: Each table's tree as :class:`TreeLine` per category, in pre-order, filled by
+#: :func:`tree_table` (the same at every geography); read with :func:`trees`.
+TREES: dict[str, tuple[TreeLine, ...]] = {}
+
+
+def trees(area: StudyArea) -> dict[str, tuple[TreeLine, ...]]:
+    """Every all-cell constraint table's tree, by table."""
+    for table in all_tables(area):
+        assert table.table in TREES
+    return {t.table: TREES[t.table] for t in all_tables(area)}
+
+
 def tree_table(table: str, universe: str, variables: tuple[str, ...], geography: str,
                root: Line, n_cells: int) -> ConstraintTable:
     """One category per published line, in pre-order, every cell used."""
     categories: list[Category] = []
+    structure: list[TreeLine] = []
 
-    def walk(line: Line, path: tuple[str, ...]) -> list[Select]:
+    def walk(line: Line, path: tuple[str, ...], parent: str | None) -> list[Select]:
         """Append ``line``'s category (pre-order) and return its leaf selectors."""
         name = "_".join(path) if path else "total"
+        if line.children:
+            name += SUBTOTAL_MARK
+        structure.append(TreeLine(name, parent, line.select is None or not line.children))
         if not line.children:
             if line.select is None:
                 raise ValueError(f"{table}_{line.order:03d} is a leaf with no selector")
@@ -127,15 +155,16 @@ def tree_table(table: str, universe: str, variables: tuple[str, ...], geography:
             return [line.select]
         index = len(categories)
         categories.append(None)  # placeholder: pre-order, filled once the leaves are known
-        leaves = [s for child in line.children for s in walk(child, (*path, child.label))]
+        leaves = [s for child in line.children
+                  for s in walk(child, (*path, child.label), name)]
         categories[index] = Category(
-            name=name + SUBTOTAL_MARK,
+            name=name,
             select=line.select if line.select is not None else union(leaves),
             published=(f"{table}_{line.order:03d}",),
         )
         return leaves
 
-    walk(root, ())
+    walk(root, (), None)
     orders = [int(c.published[0].rsplit("_", 1)[1]) for c in categories]
     if orders != list(range(1, n_cells + 1)):
         raise AssertionError(
@@ -146,6 +175,7 @@ def tree_table(table: str, universe: str, variables: tuple[str, ...], geography:
     names = [c.name for c in categories]
     if len(set(names)) != len(names):
         raise AssertionError(f"{table}: duplicate category names")
+    TREES[table] = tuple(structure)
     return ConstraintTable(table=table, universe=universe, variables=variables,
                            geography=geography, categories=tuple(categories))
 
