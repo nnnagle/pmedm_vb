@@ -67,19 +67,23 @@ class RollupSpec:
     ``"pruned"`` is not a threshold: the all-cell tables' cells, every subtotal
     included, less what the zero rules remove, per area (an all-zero branch is
     one zero cell, a branch's zero children one merged zero cell, and the row
-    of a branch's only nonzero child, its duplicate, is dropped)."""
+    of a branch's only nonzero child, its duplicate, is dropped).
+    ``"prunedleaves"`` is the same without the subtotals: every nonzero leaf
+    its own cell (a duplicate child too, in place of its parent) and one
+    merged zero cell per branch, a partition of the leaves."""
 
     person: float
     household: float
     nested: bool = False
     pruned: bool = False
+    leaves: bool = False
 
     @classmethod
     def parse(cls, text: str) -> "RollupSpec":
         """``"15"``, ``"15h10"``, ``"15h10n"`` or ``"pruned"`` (the part after
         ``-r`` in a level string)."""
-        if text == "pruned":
-            return cls(person=0.0, household=0.0, pruned=True)
+        if text in ("pruned", "prunedleaves"):
+            return cls(person=0.0, household=0.0, pruned=True, leaves=text == "prunedleaves")
         nested = text.endswith("n")
         person, _, household = text.removesuffix("n").partition("h")
         p = float(person)
@@ -87,7 +91,7 @@ class RollupSpec:
 
     def __str__(self) -> str:
         if self.pruned:
-            return "pruned"
+            return "prunedleaves" if self.leaves else "pruned"
         return (f"{self.person:g}" + ("" if self.household == self.person else f"h{self.household:g}")
                 + ("n" if self.nested else ""))
 

@@ -1,6 +1,6 @@
 {
   "name": "exp02_nullspace",
-  "description": "The pruned cells of exp01 with the null-space reparametrisation; prior zeta ~ N(0, 3^2).",
+  "description": "The pruned cells of exp01 without the subtotals -- every nonzero leaf its own cell and one merged zero cell per branch, a partition of the leaves -- with the null-space reparametrisation; prior zeta ~ N(0, 3^2).",
   "area": {
     "name": "knoxall",
     "state": "47",
@@ -26,7 +26,7 @@
     "taper": "none",
     "variance_floor": "none",
     "hierarchy": "nullspace",
-    "rollup": "pruned",
+    "rollup": "prunedleaves",
     "share_cap": null,
     "cap_strength": null,
     "multiplier_prior_sd": 3

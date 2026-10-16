@@ -160,7 +160,10 @@ class _Partitioner:
         dropped; a branch's zero children are one merged zero cell; and where a
         branch has one nonzero child and is the exact sum of its children, that
         child's own row, the same in the estimate and every replicate, is
-        dropped (its descendants stay). Dropped rows are in no cell."""
+        dropped (its descendants stay). Dropped rows are in no cell. Leaves
+        only (``"prunedleaves"``): no nonzero branch is a cell, so no child is
+        dropped as its duplicate -- every nonzero leaf and the merged zero
+        cells, a partition of the leaves (an all-zero branch by its zero leaves)."""
         lines, additive = entry["lines"], entry["additive"]
         children: dict[int, list[int]] = {}
         for i, parent in enumerate(entry["parents"]):
@@ -170,11 +173,18 @@ class _Partitioner:
         if sorted(index) != sorted(lines):
             raise ValueError(f"{table} ({where}): the categories are not its published lines")
 
+        leaves_only = self.spec.leaves
+
+        def leaves_under(i: int) -> list[int]:
+            if i not in children:
+                return [index[lines[i]]]
+            return [k for c in children[i] for k in leaves_under(c)]
+
         def walk(i: int):
-            """(the line's own cell, the cells below it, whether it is a zero leaf)."""
+            """(the line's own cell or None, the cells below it, whether it is a zero leaf)."""
             k = index[lines[i]]
             if counts[k] == 0:
-                return ([k], True), [], True
+                return (leaves_under(i) if leaves_only else [k], True), [], True
             if i not in children:
                 return ([k], False), [], False
             results = [walk(c) for c in children[i]]
@@ -184,11 +194,12 @@ class _Partitioner:
                 below.append((sorted(zeros), True))
             nonzero = [r for r in results if not r[2]]
             for head, rest, _ in nonzero:
-                below += rest if len(nonzero) == 1 and additive[i] else [head, *rest]
-            return ([k], False), below, False
+                duplicate = len(nonzero) == 1 and additive[i] and not leaves_only
+                below += rest if duplicate or head is None else [head, *rest]
+            return (None if leaves_only else ([k], False)), below, False
 
         head, below, _ = walk(0)
-        parts = [head, *below]
+        parts = ([] if head is None else [head]) + below
         self._tally(where, table, entry, 0.0, counts[list(index.values())], parts, RollupStats())
         return parts
 
@@ -381,7 +392,7 @@ class CollapsedHierarchy:
         used = row_cell >= 0
         unused = [t_names[r // n_tracts] if r < split else b_names[(r - split) // n_zones]
                   for r in np.flatnonzero(~used)]
-        pruned = rolled and threshold.pruned
+        pruned = rolled and threshold.pruned and not threshold.leaves
         if not pruned and any(not is_subtotal(name) for name in unused):
             raise AssertionError("rows of leaf categories were left out of every cell")
 

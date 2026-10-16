@@ -8,6 +8,9 @@ published estimate above zero) and zero cells; and the same per table.
 - **all** -- every published cell (:mod:`pmedm_vb.assemble.allcells`), from the
   all-cell study area's assembled inputs.
 - **pruned** -- the same cells, simplified per area by the zero rules below.
+- **prunedleaves** -- the pruned cells without the subtotals: every nonzero
+  leaf its own cell and one merged zero cell per branch (rule 3 does not
+  apply), a partition of the leaves (paper_v3's exp02).
 - **rollup<spec>** -- the structure-aware roll-up of
   :mod:`pmedm_vb.assemble.rollup` on the published leaves (no subtotals), one
   scheme per ``--rollup`` spec (default ``25h10``: 25 for population tables,
@@ -94,17 +97,20 @@ class Tally:
         row[1] += zero
 
 
-def pruned_cells(lines: tuple[TreeLine, ...], y: dict[str, float]) -> tuple[int, int]:
-    """(count cells, zero cells) of one table in one area under the zero rules."""
+def pruned_cells(lines: tuple[TreeLine, ...], y: dict[str, float],
+                 leaves_only: bool = False) -> tuple[int, int]:
+    """(count cells, zero cells) of one table in one area under the zero rules;
+    ``leaves_only`` without the subtotals (no nonzero branch a cell, so no child
+    dropped as its duplicate)."""
     children: dict[str, list[str]] = {}
     for line in lines:
         if line.parent is not None:
             children.setdefault(line.parent, []).append(line.name)
     additive = {line.name: line.additive for line in lines}
 
-    def walk(name: str) -> tuple[bool, list[bool], bool]:
-        """(the head row's zero flag, the zero flags of the cells below it,
-        whether the subtree is a zero leaf)."""
+    def walk(name: str) -> tuple[bool | None, list[bool], bool]:
+        """(the head row's zero flag, or None for no head row, the zero flags
+        of the cells below it, whether the subtree is a zero leaf)."""
         kids = children.get(name, [])
         if y[name] == 0:
             return True, [], True                    # rule 1 (and a zero leaf)
@@ -114,27 +120,28 @@ def pruned_cells(lines: tuple[TreeLine, ...], y: dict[str, float]) -> tuple[int,
         below = [True] if any(r[2] for r in results) else []   # rule 2
         nonzero = [r for r in results if not r[2]]
         for head, rest, _ in nonzero:
-            if len(nonzero) == 1 and additive[name]:
+            if (len(nonzero) == 1 and additive[name] and not leaves_only) or head is None:
                 below += rest                                  # rule 3
             else:
                 below += [head, *rest]
-        return False, below, False
+        return (None if leaves_only else False), below, False
 
     root = lines[0].name
     head, below, _ = walk(root)
-    flags = [head, *below]
+    flags = ([] if head is None else [head]) + below
     return sum(not z for z in flags), sum(flags)
 
 
 def count_all_and_pruned(inputs: PMEDMInputs, tree: dict[str, tuple[TreeLine, ...]],
-                         all_cells: Tally, pruned: Tally) -> None:
+                         all_cells: Tally, pruned: Tally, leaves: Tally | None = None) -> None:
     by_level = {"puma": (list(inputs.tract_constraints), inputs.Y_T.sum(axis=0)[None, :]),
                 "tract": (list(inputs.tract_constraints), inputs.Y_T),
                 "block group": (list(inputs.bg_constraints), inputs.Y_B)}
     for level, (names, Y) in by_level.items():
         tables = np.array([n.split(".", 1)[0] for n in names])
-        for tally in (all_cells, pruned):
-            tally.areas[level] += Y.shape[0]
+        for tally in (all_cells, pruned, leaves):
+            if tally is not None:
+                tally.areas[level] += Y.shape[0]
         for table in dict.fromkeys(tables):
             cols = np.flatnonzero(tables == table)
             cats = [names[k].split(".", 1)[1] for k in cols]
@@ -144,6 +151,9 @@ def count_all_and_pruned(inputs: PMEDMInputs, tree: dict[str, tuple[TreeLine, ..
                 all_cells.add(level, table, cols.size - zeros, zeros)
                 count, zero = pruned_cells(tree[table], dict(zip(cats, values)))
                 pruned.add(level, table, count, zero)
+                if leaves is not None:
+                    count, zero = pruned_cells(tree[table], dict(zip(cats, values)), True)
+                    leaves.add(level, table, count, zero)
 
 
 class TableRollup:
@@ -250,10 +260,12 @@ def main() -> None:
     tree = trees(all_area)
     universe = {t.table: t.universe for t in all_tables(all_area)} | ROLLUP_UNIVERSE
     specs = [RollupSpec.parse(text) for text in args.rollup]
-    schemes = {"all": Tally(), "pruned": Tally(), **{f"rollup{spec}": Tally() for spec in specs}}
+    schemes = {"all": Tally(), "pruned": Tally(), "prunedleaves": Tally(),
+               **{f"rollup{spec}": Tally() for spec in specs}}
     for puma in args.pumas:
         full = PMEDMInputs.load(processed_dir() / "inputs" / all_area.slug / puma)
-        count_all_and_pruned(full, tree, schemes["all"], schemes["pruned"])
+        count_all_and_pruned(full, tree, schemes["all"], schemes["pruned"],
+                             schemes["prunedleaves"])
         for spec in specs:
             count_rollup(full, tree, universe, spec, schemes[f"rollup{spec}"])
     report(schemes)
