@@ -59,8 +59,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from pmedm_vb.assemble.allcells import is_subtotal
 from pmedm_vb.assemble.inputs import PMEDMInputs
-from pmedm_vb.assemble.rollup import RollupSpec, RollupStats, prune, rollup, tree_categories
+from pmedm_vb.assemble.rollup import (RollupSpec, RollupStats, category_tree, prune, rollup,
+                                      tree_categories)
 from pmedm_vb.assemble.sigma import Sigma
 from pmedm_vb.data.variance import SDR_FACTOR
 
@@ -112,11 +114,21 @@ class _Partitioner:
         self.tally: dict[tuple[str, str], dict] = {}
 
     def __call__(self, counts: np.ndarray, names: list[str], cats: np.ndarray,
-                 where: str) -> list[tuple[list[int], bool]]:
+                 start: list[list[int]], where: str) -> list[tuple[list[int], bool]]:
         table = _table(names[int(cats[0])])
         if table not in self.trees:
             raise ValueError(f"no category tree for {table}; rerun table_trees.py --write-inputs")
         entry = self.trees[table]
+        if self.spec.pruned:
+            if "lines" not in entry:
+                raise ValueError("the pruned cells need the published line trees of an all-cell "
+                                 "study area; these inputs have category trees")
+            return self._pruned(entry, counts, names, cats, where, table)
+        if "lines" in entry:
+            return self._lines(entry, counts, names, cats, start, where, table)
+        if self.spec.nested:
+            raise ValueError("the nested roll-up needs the published line trees of an all-cell "
+                             "study area; these inputs have category trees")
         position = {names[int(k)].split(".", 1)[1]: int(k) for k in cats}
         unknown = sorted(set(position) - set(tree_categories(entry["tree"])))
         if unknown:
@@ -126,16 +138,102 @@ class _Partitioner:
         index = np.array([position[name] for name in order])
         threshold = self.spec.threshold(entry["universe"])
         parts, stats = rollup(tree, counts[index], threshold)
+        self._tally(where, table, entry, threshold, counts[index], parts, stats)
+        return [([int(index[i]) for i in members], zero) for members, zero in parts]
+
+    def _tally(self, where, table, entry, threshold, counts, parts, stats) -> None:
         row = self.tally.setdefault((where, table), dict(
             level=where, table=table, universe=entry["universe"], threshold=threshold,
             areas=0, categories=0, cells=0, zero_cells=0, zero_categories=0, stats=RollupStats()))
         row["areas"] += 1
-        row["categories"] += len(order)
+        row["categories"] += len(counts)
         row["cells"] += len(parts)
         row["zero_cells"] += sum(z for _, z in parts)
-        row["zero_categories"] += int((counts[index] == 0).sum())
+        row["zero_categories"] += int((counts == 0).sum())
         row["stats"].add(stats)
-        return [([int(index[i]) for i in members], zero) for members, zero in parts]
+
+    def _pruned(self, entry: dict, counts: np.ndarray, names: list[str], cats: np.ndarray,
+                where: str, table: str) -> list[tuple[list[int], bool]]:
+        """The pruned cells of an all-cell table in one area: every published
+        line as its own cell, except (bottom-up, so the rules repeat up the
+        tree) a branch whose estimate is zero is one zero cell, its lines below
+        dropped; a branch's zero children are one merged zero cell; and where a
+        branch has one nonzero child and is the exact sum of its children, that
+        child's own row, the same in the estimate and every replicate, is
+        dropped (its descendants stay). Dropped rows are in no cell."""
+        lines, additive = entry["lines"], entry["additive"]
+        children: dict[int, list[int]] = {}
+        for i, parent in enumerate(entry["parents"]):
+            if parent >= 0:
+                children.setdefault(parent, []).append(i)
+        index = {names[int(k)].split(".", 1)[1]: int(k) for k in cats}
+        if sorted(index) != sorted(lines):
+            raise ValueError(f"{table} ({where}): the categories are not its published lines")
+
+        def walk(i: int):
+            """(the line's own cell, the cells below it, whether it is a zero leaf)."""
+            k = index[lines[i]]
+            if counts[k] == 0:
+                return ([k], True), [], True
+            if i not in children:
+                return ([k], False), [], False
+            results = [walk(c) for c in children[i]]
+            below = []
+            zeros = [m for (members, _), _, zero in results if zero for m in members]
+            if zeros:
+                below.append((sorted(zeros), True))
+            nonzero = [r for r in results if not r[2]]
+            for head, rest, _ in nonzero:
+                below += rest if len(nonzero) == 1 and additive[i] else [head, *rest]
+            return ([k], False), below, False
+
+        head, below, _ = walk(0)
+        parts = [head, *below]
+        self._tally(where, table, entry, 0.0, counts[list(index.values())], parts, RollupStats())
+        return parts
+
+    def _lines(self, entry: dict, counts: np.ndarray, names: list[str], cats: np.ndarray,
+               start: list[list[int]], where: str, table: str) -> list[tuple[list[int], bool]]:
+        """The roll-up of an all-cell table's leaves over its published tree
+        (``entry`` from :func:`~pmedm_vb.assemble.allcells.line_trees`). The
+        subtotals are left out: the cells partition the leaves. Nested, the
+        blocks inherited from the level above (``start``) are the categories the
+        tree is built over -- :func:`~pmedm_vb.assemble.rollup.category_tree` of
+        the published lines and those blocks, so a parallel merge above carries
+        down as one merged branch -- and they are only merged further."""
+        lines, labels = entry["lines"], entry["labels"]
+        children: dict[int, list[int]] = {}
+        for i, parent in enumerate(entry["parents"]):
+            if parent >= 0:
+                children.setdefault(parent, []).append(i)
+        leaf_names = {lines[i] for i in range(len(lines)) if i not in children}
+        category = {int(k): names[int(k)].split(".", 1)[1] for k in cats}
+        unknown = sorted(set(category.values()) - set(lines))
+        if unknown:
+            raise ValueError(f"{table}: categories {unknown} are not lines of its published tree")
+        leaves = [k for k in category if category[k] in leaf_names]
+        if self.spec.nested:
+            blocks = [sorted(k for k in b if category.get(k) in leaf_names) for b in start]
+            blocks = [b for b in blocks if b]
+        else:
+            blocks = [[k] for k in leaves]
+        if sorted(k for b in blocks for k in b) != sorted(leaves):
+            raise ValueError(f"{table} ({where}): the inherited cells do not partition the leaves")
+        threshold = self.spec.threshold(entry["universe"])
+        stats = RollupStats()
+        if len(blocks) == 1:
+            parts = [(blocks[0], bool(counts[blocks[0]].sum() == 0))]
+        else:
+            key = {"+".join(category[k] for k in b): b for b in blocks}
+            tree, _ = category_tree(children, lines, labels,
+                                    [(name, tuple(category[k] for k in b)) for name, b in key.items()])
+            order = tree_categories(tree)
+            totals = np.array([counts[key[name]].sum() for name in order])
+            rolled, stats = rollup(tree, totals, threshold)
+            parts = [(sorted(k for i in members for k in key[order[i]]), zero)
+                     for members, zero in rolled]
+        self._tally(where, table, entry, threshold, counts[leaves], parts, stats)
+        return parts
 
     def report(self) -> list[dict]:
         out = []
@@ -231,7 +329,7 @@ class CollapsedHierarchy:
             partition = _Partitioner(inputs, threshold)
 
             def cells_of(counts, names, cats, start, where):
-                return partition(counts, names, cats, where)
+                return partition(counts, names, cats, start, where)
         else:
             def cells_of(counts, names, cats, start, where):
                 return collapse_blocks(counts, start, big, merge_zeros)
@@ -277,23 +375,32 @@ class CollapsedHierarchy:
                                       name=f"B{z}:" + "+".join(b_names[k] for k in members)))
         # Order: tract cells first, then block group cells (already so).
         m = len(cells)
-        assert (row_cell >= 0).all()
+        # Every row is in a cell, except an all-cell table's subtotals under a
+        # roll-up of its leaves, and the rows the pruned cells drop: they
+        # constrain nothing, and their multiplier is 0.
+        used = row_cell >= 0
+        unused = [t_names[r // n_tracts] if r < split else b_names[(r - split) // n_zones]
+                  for r in np.flatnonzero(~used)]
+        pruned = rolled and threshold.pruned
+        if not pruned and any(not is_subtotal(name) for name in unused):
+            raise AssertionError("rows of leaf categories were left out of every cell")
 
         # Targets, replicates, variances.
-        targets = inputs.targets().astype(float)
-        rep_row = SDR_FACTOR * np.square(inputs.sigma_l).sum(axis=1)
-        floor_row = inputs.zero_cell_variances()
+        rc = row_cell[used]
+        targets = inputs.targets().astype(float)[used]
+        rep_row = SDR_FACTOR * np.square(inputs.sigma_l[used]).sum(axis=1)
+        floor_row = inputs.zero_cell_variances()[used]
         Y_c = np.zeros(m)
-        np.add.at(Y_c, row_cell, targets)
+        np.add.at(Y_c, rc, targets)
         l_c = np.zeros((m, inputs.sigma_l.shape[1]))
-        np.add.at(l_c, row_cell, inputs.sigma_l)
+        np.add.at(l_c, rc, inputs.sigma_l[used])
         s_c = SDR_FACTOR * np.square(l_c).sum(axis=1)
         excess = np.zeros(m)
-        np.add.at(excess, row_cell, np.maximum(inputs.sigma_v - rep_row, 0.0))
+        np.add.at(excess, rc, np.maximum(inputs.sigma_v[used] - rep_row, 0.0))
         max_v = np.zeros(m)
-        np.maximum.at(max_v, row_cell, inputs.sigma_v)
+        np.maximum.at(max_v, rc, inputs.sigma_v[used])
         floor_c = np.zeros(m)
-        np.maximum.at(floor_c, row_cell, floor_row)
+        np.maximum.at(floor_c, rc, floor_row)
         cell_zero = np.array([c["zero"] for c in cells])
         v_c = np.where(cell_zero, np.maximum(max_v, s_c), s_c + excess)
 
@@ -438,9 +545,11 @@ class CollapsedHierarchy:
         return theta - self.project(theta)
 
     def collapse(self, g: np.ndarray) -> np.ndarray:
-        """``C g``: sum today's rows into cells; ``g`` is ``(m_full,)`` or ``(m_full, k)``."""
+        """``C g``: sum today's rows into cells; ``g`` is ``(m_full,)`` or ``(m_full, k)``.
+        Rows in no cell (an all-cell table's subtotals under a roll-up) drop out."""
         out = np.zeros((self.m,) + g.shape[1:])
-        np.add.at(out, self.row_cell, g)
+        used = self.row_cell >= 0
+        np.add.at(out, self.row_cell[used], np.asarray(g)[used])
         return out
 
     def puma_sum(self, g: np.ndarray) -> np.ndarray:
@@ -451,7 +560,8 @@ class CollapsedHierarchy:
         return out
 
     def lambda_data(self, xi: np.ndarray) -> np.ndarray:
-        lam = self.project(xi[: self.m])[self.row_cell]
+        lam = self.project(xi[: self.m])[np.maximum(self.row_cell, 0)]
+        lam[self.row_cell < 0] = 0.0                 # rows in no cell carry no multiplier
         if self.n_puma:
             rows = self.puma_of_row >= 0
             lam[rows] += xi[self.m:][self.puma_of_row[rows]]
@@ -536,7 +646,9 @@ class _TorchCollapsed:
         self._proj.group = torch.as_tensor(h.group[grouped], device=device)
         counts = h._counts(h.group) if grouped.size else np.zeros(0)
         self._proj.counts = torch.as_tensor(counts, dtype=torch.float64, device=device)
-        self.row_cell = torch.as_tensor(h.row_cell, device=device)
+        self.row_cell = torch.as_tensor(np.maximum(h.row_cell, 0), device=device)
+        self.unused = (torch.as_tensor(h.row_cell < 0, device=device)
+                       if (h.row_cell < 0).any() else None)
         tract = np.flatnonzero(h.puma_of_row >= 0)
         self.tract_rows = torch.as_tensor(tract, device=device)
         self.tract_puma = torch.as_tensor(h.puma_of_row[tract], device=device)
@@ -546,6 +658,8 @@ class _TorchCollapsed:
 
     def lambda_data(self, xi):
         lam = self.project(xi[:, : self.m])[:, self.row_cell]
+        if self.unused is not None:                  # rows in no cell carry no multiplier
+            lam = lam.masked_fill(self.unused, 0.0)
         if self.n_puma:
             lam = lam.index_add(1, self.tract_rows, xi[:, self.m:][:, self.tract_puma])
         return lam

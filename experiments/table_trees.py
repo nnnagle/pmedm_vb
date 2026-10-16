@@ -84,6 +84,11 @@ def parse_args() -> argparse.Namespace:
                         help="also write the category trees into every PUMA's inputs under "
                              "processed/inputs/AREA (e.g. knox-2024-5yr), for the "
                              "structure-aware roll-up (the -r hierarchy levels)")
+    parser.add_argument("--tables", choices=["default", "all"], default="default",
+                        help="'all': write the all-cell tables' published line trees "
+                             "(pmedm_vb.assemble.allcells.line_trees) into the --write-inputs "
+                             "areas and stop -- no download, no check (the trees were checked "
+                             "when allcells was written)")
     parser.add_argument("--out", type=Path, required=True)
     return parser.parse_args()
 
@@ -354,10 +359,34 @@ def fetch_us(area: StudyArea, table: str) -> pd.DataFrame:
     return frame.assign(geoid="US").set_index(["geoid", "cell"])
 
 
+def write_line_trees(area: StudyArea, inputs_areas: list[str]) -> None:
+    """Write the all-cell line trees into every PUMA's inputs of each area."""
+    from pmedm_vb.assemble.allcells import line_trees, table_set
+
+    trees = line_trees(area)
+    for name in inputs_areas:
+        root = processed_dir() / "inputs" / name
+        dirs = sorted(d for d in root.iterdir() if (d / "manifest.json").exists())
+        if not dirs:
+            raise SystemExit(f"no inputs under {root}")
+        for d in dirs:
+            built = table_set(json.loads((d / "manifest.json").read_text())["tract_constraints"])
+            if built != "all":
+                raise SystemExit(f"{d} was assembled with the {built!r} tables; line trees are "
+                                 f"for all-cell inputs only")
+            (d / TREES_FILE).write_text(json.dumps(trees, indent=1) + "\n")
+        print(f"wrote the all-cell line trees ({TREES_FILE}) into {len(dirs)} inputs under {root}")
+
+
 def main() -> None:
     args = parse_args()
     area = StudyArea(name=args.name, state=args.state, year=args.year,
                      counties=tuple(args.county), span=args.span)
+    if args.tables == "all":
+        if not args.write_inputs:
+            raise SystemExit("--tables all only writes the line trees: give --write-inputs")
+        write_line_trees(area, args.write_inputs)
+        return
     args.out.mkdir(parents=True, exist_ok=True)
     specs: dict[str, dict[str, object]] = {}
     tables = default_tables(area)

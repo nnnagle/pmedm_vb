@@ -138,6 +138,8 @@ def _cell_rows(inputs: PMEDMInputs, h, level: str) -> list[tuple]:
     members: dict[int, list[int]] = {}
     cell_area: dict[int, int] = {}
     for c, k, a in zip(cell, category, area):
+        if c < 0:      # an all-cell table's subtotal under a roll-up of its leaves
+            continue
         members.setdefault(int(c), []).append(int(k))
         cell_area[int(c)] = int(a)
     groups: dict[tuple[int, ...], list[int]] = {}

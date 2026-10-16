@@ -44,8 +44,9 @@ lock under ``<root>/run_paper``, so two drivers never submit the same work.
 
 ``--specs`` chooses the folder of experiment JSONs (``experiments/paper``, or
 ``experiments/paper_prior3`` for the models with the multiplier prior,
-``experiments/paper_allcells`` for those with every published cell); the
-experiments missing from a folder are skipped.
+``experiments/paper_allcells`` for those with every published cell,
+``experiments/paper_v3`` for the pruned cells and the nested full-table
+roll-up); the experiments missing from a folder are skipped.
 ``--root`` and ``--data-dir`` choose the folders: new ones for a run from
 scratch, the existing ones to resume. ``--dry-run`` prints what one ``advance``
 would submit and changes nothing.
@@ -254,6 +255,8 @@ def advance_data(specs, jobs: Jobs, args) -> bool:
                         ["table_trees.py", "--name", a["name"], "--state", a.get("state", "47"),
                          "--county", *a.get("counties", ["093"]), "--year", str(a["year"]),
                          "--span", str(a["span"]), "--write-inputs", rx.area_slug(a),
+                         *(["--tables", a["tables"]] if a.get("tables", "default") != "default"
+                           else []),
                          "--out", str(rx.data_dir(spec) / "table_trees")], TREES_SLURM)
         return False
     return True

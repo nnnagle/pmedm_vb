@@ -57,20 +57,39 @@ import numpy as np
 
 @dataclass(frozen=True)
 class RollupSpec:
-    """Thresholds of the roll-up: persons, and households (or housing units)."""
+    """Thresholds of the roll-up: persons, and households (or housing units).
+
+    ``nested`` (an ``n`` suffix, ``"25h10n"``) rolls up top-down instead of
+    each area on its own: the PUMA first, each tract starting from its PUMA's
+    cells, each block group from its tract's, so a merge is never undone at a
+    smaller scale (:class:`~pmedm_vb.assemble.collapse.CollapsedHierarchy`).
+
+    ``"pruned"`` is not a threshold: the all-cell tables' cells, every subtotal
+    included, less what the zero rules remove, per area (an all-zero branch is
+    one zero cell, a branch's zero children one merged zero cell, and the row
+    of a branch's only nonzero child, its duplicate, is dropped)."""
 
     person: float
     household: float
+    nested: bool = False
+    pruned: bool = False
 
     @classmethod
     def parse(cls, text: str) -> "RollupSpec":
-        """``"15"`` or ``"15h10"`` (the part after ``-r`` in a level string)."""
-        person, _, household = text.partition("h")
+        """``"15"``, ``"15h10"``, ``"15h10n"`` or ``"pruned"`` (the part after
+        ``-r`` in a level string)."""
+        if text == "pruned":
+            return cls(person=0.0, household=0.0, pruned=True)
+        nested = text.endswith("n")
+        person, _, household = text.removesuffix("n").partition("h")
         p = float(person)
-        return cls(person=p, household=float(household) if household else p)
+        return cls(person=p, household=float(household) if household else p, nested=nested)
 
     def __str__(self) -> str:
-        return f"{self.person:g}" + ("" if self.household == self.person else f"h{self.household:g}")
+        if self.pruned:
+            return "pruned"
+        return (f"{self.person:g}" + ("" if self.household == self.person else f"h{self.household:g}")
+                + ("n" if self.nested else ""))
 
     def threshold(self, universe: str) -> float:
         if universe == "person":

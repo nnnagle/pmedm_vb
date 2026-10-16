@@ -137,6 +137,32 @@ def trees(area: StudyArea) -> dict[str, tuple[TreeLine, ...]]:
     return {t.table: TREES[t.table] for t in all_tables(area)}
 
 
+#: Tables whose roll-up threshold is not their constraint universe's. ``B26001``
+#: is built over the unit frame (a group-quarters person is one unit) but
+#: counts people, so it takes the persons threshold.
+ROLLUP_UNIVERSE = {"B26001": "person"}
+
+
+def line_trees(area: StudyArea) -> dict[str, dict]:
+    """The all-cell tables' published trees in the form the roll-up reads from
+    the inputs (``table_trees.json``; :class:`~pmedm_vb.assemble.collapse.
+    CollapsedHierarchy`): per table its lines in pre-order, each line's parent
+    (an index, ``-1`` for the total), label and whether it is the exact sum of
+    its children, and the universe whose threshold it rolls up at. A threshold
+    roll-up partitions the leaves, the subtotals left out of the fit; the
+    pruned cells (``"pruned"``) keep them, less what the zero rules remove."""
+    universe = {t.table: t.universe for t in all_tables(area)} | ROLLUP_UNIVERSE
+    out = {}
+    for table, lines in trees(area).items():
+        index = {line.name: i for i, line in enumerate(lines)}
+        out[table] = {"universe": universe[table],
+                      "lines": [line.name for line in lines],
+                      "parents": [-1 if line.parent is None else index[line.parent] for line in lines],
+                      "labels": [line.label for line in lines],
+                      "additive": [line.additive for line in lines]}
+    return out
+
+
 def tree_table(table: str, universe: str, variables: tuple[str, ...], geography: str,
                root: Line, n_cells: int) -> ConstraintTable:
     """One category per published line, in pre-order, every cell used."""

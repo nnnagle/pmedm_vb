@@ -367,7 +367,8 @@ class CollapsedHessian(DualHessian):
         G = np.zeros((h.m_full, k + g))
         tract_rows = np.flatnonzero(h.puma_of_row >= 0)
         G[tract_rows, h.puma_of_row[tract_rows]] = inv[h.m + h.puma_of_row[tract_rows]]
-        G[:, k:] = Ws[: h.m][h.row_cell]
+        G[:, k:] = Ws[: h.m][np.maximum(h.row_cell, 0)]
+        G[h.row_cell < 0, k:] = 0.0                  # rows in no cell carry no multiplier
         G[tract_rows, k:] += Ws[h.m + h.puma_of_row[tract_rows]]
         F = np.zeros((h.size, k + g))
         GSG = np.zeros((k + g, k + g))

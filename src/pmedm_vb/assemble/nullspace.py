@@ -127,7 +127,8 @@ class NullSpaceHierarchy(CollapsedHierarchy):
         # E: tract category -> PUMA cell
         E = np.zeros((c_t, k))
         for cat in range(c_t):
-            E[cat, self.puma_of_row[cat * n_tracts]] = 1.0
+            if self.puma_of_row[cat * n_tracts] >= 0:     # a category in no PUMA cell: none
+                E[cat, self.puma_of_row[cat * n_tracts]] = 1.0
         y_cells, l_cells = self.Y_c, self.l_c
         y_p, l_p = self.Y_P, self.l_P
         local, lifts, dropped = [], [], 0
@@ -139,14 +140,17 @@ class NullSpaceHierarchy(CollapsedHierarchy):
             pos[cells] = np.arange(cells.size)
             zones = np.flatnonzero(zone_tract == t)
             rows_t = np.arange(c_t) * n_tracts + t
+            rows_t = rows_t[self.row_cell[rows_t] >= 0]       # rows in no cell carry nothing
             blocks_theta, blocks_p = [], []
             for z in zones:
                 support = np.flatnonzero(inputs.q[z] > 0)
                 d = np.zeros((support.size, cells.size))
                 xt = x_t[support].toarray()
-                np.add.at(d.T, pos[self.row_cell[rows_t]], xt.T)
+                np.add.at(d.T, pos[self.row_cell[rows_t]], xt[:, rows_t // n_tracts].T)
                 rows_b = split + np.arange(c_b) * n_zones + z
-                np.add.at(d.T, pos[self.row_cell[rows_b]], x_b[support].toarray().T)
+                keep_b = self.row_cell[rows_b] >= 0
+                np.add.at(d.T, pos[self.row_cell[rows_b[keep_b]]],
+                          x_b[support].toarray()[:, keep_b].T)
                 blocks_theta.append(d)
                 blocks_p.append(xt @ E)
             D_t, D_p = np.vstack(blocks_theta), np.vstack(blocks_p)
@@ -223,7 +227,8 @@ class NullSpaceHierarchy(CollapsedHierarchy):
 
     def lambda_data(self, xi: np.ndarray) -> np.ndarray:
         z = self.zeta(xi)
-        lam = z[: self.m][self.row_cell]
+        lam = z[: self.m][np.maximum(self.row_cell, 0)]
+        lam[self.row_cell < 0] = 0.0                 # rows in no cell carry no multiplier
         rows = self.puma_of_row >= 0
         lam[rows] += z[self.m:][self.puma_of_row[rows]]
         return lam
@@ -290,7 +295,9 @@ class _TorchNull:
             self.V = None
         self.W = torch.as_tensor(h.W, dtype=torch.float64, device=device)
         self.inv_scale = torch.as_tensor(1.0 / h.scale, dtype=torch.float64, device=device)
-        self.row_cell = torch.as_tensor(h.row_cell, device=device)
+        self.row_cell = torch.as_tensor(np.maximum(h.row_cell, 0), device=device)
+        self.unused = (torch.as_tensor(h.row_cell < 0, device=device)
+                       if (h.row_cell < 0).any() else None)
         tract = np.flatnonzero(h.puma_of_row >= 0)
         self.tract_rows = torch.as_tensor(tract, device=device)
         self.tract_puma = torch.as_tensor(h.puma_of_row[tract], device=device)
@@ -311,6 +318,8 @@ class _TorchNull:
     def lambda_data(self, xi):
         z = self.zeta(xi)
         lam = z[:, : self.m][:, self.row_cell]
+        if self.unused is not None:                  # rows in no cell carry no multiplier
+            lam = lam.masked_fill(self.unused, 0.0)
         if self.n_puma:
             lam = lam.index_add(1, self.tract_rows, z[:, self.m:][:, self.tract_puma])
         return lam

@@ -62,8 +62,10 @@ DEFAULT_ROOT = Path("/lustre/isaac24/proj/UTK0496/pmedm_vb_runs/paper")
 
 #: Slurm options per stage, on top of each script's header.
 RAKE_SLURM = ["--partition=short", "--qos=short", "--time=01:00:00", "--cpus-per-task=4"]
-FITS_SLURM = ["--cpus-per-task=48"]
-HMC_SLURM = ["--time=24:00:00"]
+#: MAP and VB on campus (12 h): the all-cell problems outgrow short's hour.
+FITS_SLURM = ["--partition=campus", "--qos=campus", "--time=12:00:00", "--cpus-per-task=48"]
+#: Each PUMA's HMC bundle (short runs, then the long references) on campus-gpu.
+HMC_SLURM = ["--partition=campus-gpu", "--qos=campus-gpu", "--time=24:00:00"]
 GPU_PARTITION = "campus-gpu"
 
 #: Keys whose difference does not make a different experiment.
