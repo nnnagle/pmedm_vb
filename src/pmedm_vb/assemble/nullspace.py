@@ -60,10 +60,24 @@ NULL_RTOL = 1e-9
 CONSISTENCY_RTOL = 1e-8
 
 
+def _svd(a: np.ndarray, full_matrices: bool):
+    """``np.linalg.svd`` (LAPACK ``gesdd``), retried with ``gesvd`` when it does
+    not converge -- as it failed to on one tract of PUMA 4701503 under one BLAS
+    thread count and not another."""
+    try:
+        return np.linalg.svd(a, full_matrices=full_matrices)
+    except np.linalg.LinAlgError:
+        import scipy.linalg
+
+        logger.warning("SVD (gesdd) did not converge on a %d x %d matrix; retrying with gesvd",
+                       *a.shape)
+        return scipy.linalg.svd(a, full_matrices=full_matrices, lapack_driver="gesvd")
+
+
 def _orth(a: np.ndarray, rtol: float = 1e-10) -> np.ndarray:
     if not a.size:
         return a.reshape(a.shape[0], 0)
-    u, s, _ = np.linalg.svd(a, full_matrices=False)
+    u, s, _ = _svd(a, full_matrices=False)
     return u[:, s > rtol * max(s.max(), 1.0)] if s.size else u[:, :0]
 
 
@@ -71,7 +85,7 @@ def _null(a: np.ndarray, rtol: float) -> np.ndarray:
     """Orthonormal basis of the null space of ``a`` (columns)."""
     if a.shape[0] == 0:
         return np.eye(a.shape[1])
-    _, s, vt = np.linalg.svd(a, full_matrices=a.shape[0] < a.shape[1])
+    _, s, vt = _svd(a, full_matrices=a.shape[0] < a.shape[1])
     rank = int((s > rtol * s.max()).sum()) if s.size and s.max() > 0 else 0
     return vt[rank:].T
 
@@ -82,7 +96,7 @@ def _consistent(V: np.ndarray, y: np.ndarray, L: np.ndarray) -> tuple[np.ndarray
         return V, 0
     R = V.T @ np.column_stack([y, L])                         # (r, 81)
     scale = max(np.abs(y).max(initial=0.0), np.abs(L).max(initial=0.0), 1.0)
-    u, s, _ = np.linalg.svd(R, full_matrices=True)
+    u, s, _ = _svd(R, full_matrices=True)
     rank = int((s > CONSISTENCY_RTOL * scale * np.sqrt(V.shape[0])).sum())
     return V @ u[:, rank:], rank
 

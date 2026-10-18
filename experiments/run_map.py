@@ -663,6 +663,10 @@ def run_sweep(
     write_summary(rows, out)
     failures = sum(bool(row["error"]) for row in rows)
     logger.info("summary: %s (%d failed)", out / "summary.csv", failures)
+    if failures:
+        # A failed fit fails the job, so Slurm reports it and an afterok
+        # dependent (the PUMA's HMC) is not released.
+        raise SystemExit(f"{failures} fit(s) failed; see {out / 'logs'}")
 
 
 def rake_name_of(row: dict) -> str:

@@ -283,7 +283,9 @@ class Submitter:
                    f"--job-name={self.spec['name']}-{stage}-{puma}" + (f"-{method}" if method else ""),
                    f"--output={self.exp / 'logs' / 'slurm-%j.log'}", *slurm]
         if after:
-            command.append(f"--dependency=afterok:{after}")
+            # A failed prerequisite cancels the job rather than leaving it
+            # pending for good, so a later call resubmits it.
+            command += [f"--dependency=afterok:{after}", "--kill-on-invalid-dep=yes"]
         command += [str(EXPERIMENTS / script), *args]
         self.count += 1
         if self.dry_run:
