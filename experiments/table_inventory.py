@@ -42,19 +42,23 @@ the all-cell set::
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from design_cells import LEVELS as TREE_LEVELS, Tally, count_all_and_pruned
+from design_cells import (LEVELS as TREE_LEVELS, ROLLUP_UNIVERSE, Tally, count_all_and_pruned,
+                          count_rollup)
 
-from pmedm_vb.assemble.allcells import is_subtotal, table_set, trees
+from pmedm_vb.assemble.allcells import all_tables, is_subtotal, table_set, trees
 from pmedm_vb.assemble.constraints import HELDOUT_RELATION
 from pmedm_vb.assemble.heldout import HeldOut
 from pmedm_vb.assemble.inputs import PMEDMInputs
+from pmedm_vb.assemble.rollup import RollupSpec
 from pmedm_vb.config import StudyArea, processed_dir
 from pmedm_vb.data.variance import table_list
+from pmedm_vb.progress import logger
 
 LEVELS = ("block group", "tract")
 TOKENS = {"lt": "<", "le": "<=", "gt": ">", "ge": ">="}
@@ -71,6 +75,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--year", type=int, default=2024)
     parser.add_argument("--span", type=int, default=5)
     parser.add_argument("--seed", type=int, default=0, help="for breaking ties")
+    parser.add_argument("--rollup", default="25h10n",
+                        help="the roll-up whose cells are counted beside the published and pruned")
+    parser.add_argument("--experiments", type=Path, default=None,
+                        help="a folder of experiment JSONs (e.g. experiments/paper_v3): adds each "
+                             "experiment's parameters per PUMA (slow: builds every null space)")
     parser.add_argument("--out", type=Path, required=True)
     return parser.parse_args()
 
@@ -181,23 +190,29 @@ def count_published(inputs: PMEDMInputs, tally: Tally) -> None:
             tally.add(level, table, block.size - zeros, zeros)
 
 
-def tallies(area: StudyArea, pumas: list[str]) -> dict[str, tuple[Tally, Tally | None]]:
-    """Per PUMA, the published cells and, for the all-cell set, the pruned ones.
+def tallies(area: StudyArea, pumas: list[str], rollup: RollupSpec
+            ) -> dict[str, tuple[Tally, Tally | None, Tally | None]]:
+    """Per PUMA, the published cells and, for the all-cell set, the pruned and
+    the rolled-up ones (``design_cells.py``'s counts, which match the fitted
+    hierarchies').
 
     PUMA cells are the tract estimates summed per PUMA, one per category, as
     the ``--hierarchy puma`` rows are.
     """
-    tree, out = None, {}
+    tree, universe, out = None, None, {}
     for puma in pumas:
         inputs = PMEDMInputs.load(processed_dir() / "inputs" / area.slug / puma)
-        published, pruned = Tally(), Tally()
+        published, pruned, rolled = Tally(), Tally(), Tally()
         if table_set(list(inputs.tract_constraints)) == "all":
-            tree = tree or trees(area)
+            if tree is None:
+                tree = trees(area)
+                universe = {t.table: t.universe for t in all_tables(area)} | ROLLUP_UNIVERSE
             count_all_and_pruned(inputs, tree, published, pruned)
+            count_rollup(inputs, tree, universe, rollup, rolled)
         else:
             count_published(inputs, published)
-            pruned = None
-        out[puma] = (published, pruned)
+            pruned = rolled = None
+        out[puma] = (published, pruned, rolled)
     return out
 
 
@@ -206,13 +221,15 @@ def fmt(cell: list[int] | None) -> str:
     return "–" if cell is None else f"{cell[0] + cell[1]:,} ({cell[1]:,})"
 
 
-def columns(pruned: bool) -> list[tuple[str, str, int]]:
-    """(header, level, which tally) per column: published, then pruned, per level."""
+def columns(all_cells: bool, rollup: str) -> list[tuple[str, str, int]]:
+    """(header, level, which tally) per column: published, then pruned and
+    rolled up for the all-cell set, per level."""
     out = []
     for level in TREE_LEVELS:
-        out.append((f"{LEVEL_LABELS[level]} (zeros)", level, 0))
-        if pruned:
-            out.append((f"{LEVEL_LABELS[level]} pruned (zeros)", level, 1))
+        out.append((f"{LEVEL_LABELS[level]}: published (zeros)", level, 0))
+        if all_cells:
+            out.append((f"{LEVEL_LABELS[level]}: pruned (zeros)", level, 1))
+            out.append((f"{LEVEL_LABELS[level]}: roll-up {rollup} (zeros)", level, 2))
     return out
 
 
@@ -222,13 +239,13 @@ def add(total: list[int] | None, cell: list[int] | None) -> list[int] | None:
     return list(cell) if total is None else [total[0] + cell[0], total[1] + cell[1]]
 
 
-def cell_counts(counts: dict[str, tuple[Tally, Tally | None]]) -> pd.DataFrame:
+def cell_counts(counts: dict[str, tuple[Tally, Tally | None, Tally | None]],
+                rollup: str) -> pd.DataFrame:
     """Per constraint table and level: cells (areas x categories) and published
-    zeros, summed over the PUMAs; with the pruned cells beside them for the
-    all-cell set."""
-    pruned = all(p is not None for _, p in counts.values())
-    cols = columns(pruned)
-    tables = sorted({table for pub, _ in counts.values() for _, table in pub.cells})
+    zeros, summed over the PUMAs; with the pruned and rolled-up cells beside
+    them for the all-cell set."""
+    cols = columns(all(pair[1] is not None for pair in counts.values()), rollup)
+    tables = sorted({table for pair in counts.values() for _, table in pair[0].cells})
     rows, total = [], {header: None for header, _, _ in cols}
     for table in tables:
         row = {"Table": table}
@@ -246,11 +263,12 @@ def cell_counts(counts: dict[str, tuple[Tally, Tally | None]]) -> pd.DataFrame:
     return frame
 
 
-def puma_counts(counts: dict[str, tuple[Tally, Tally | None]]) -> pd.DataFrame:
+def puma_counts(counts: dict[str, tuple[Tally, Tally | None, Tally | None]],
+                rollup: str) -> pd.DataFrame:
     """Per PUMA: constraint cells at each level and the published zeros among
-    them, over every constraint table; pruned beside them for the all-cell set."""
-    pruned = all(p is not None for _, p in counts.values())
-    cols = columns(pruned)
+    them, over every constraint table; pruned and rolled up beside them for the
+    all-cell set."""
+    cols = columns(all(pair[1] is not None for pair in counts.values()), rollup)
     rows, total = [], {header: None for header, _, _ in cols}
     for puma, pair in counts.items():
         row = {"PUMA ID": puma}
@@ -266,6 +284,54 @@ def puma_counts(counts: dict[str, tuple[Tally, Tally | None]]) -> pd.DataFrame:
     frame = pd.DataFrame(rows)
     for header, _, _ in cols:
         frame[header] = frame[header].map(fmt)
+    return frame
+
+
+def parameters(area: StudyArea, pumas: list[str], folder: Path) -> pd.DataFrame:
+    """Per PUMA, each experiment's parameters: the solver's coordinates (the
+    count its MAP and VB logs print) and how many of them the allocation
+    identifies.
+
+    The identified count is the coordinates less every direction along which
+    no allocation weight moves: the null space of the experiment's own cells,
+    found as the null-space level finds it (``nullspace.py``), counting the
+    directions it removes and those it keeps as inconsistent alike. Neither
+    count depends on ``alpha``: the null space comes from ``X`` and the
+    targets and replicates, ``Sigma`` only rescales it, so the first ``alpha``
+    serves.
+    """
+    from run_experiment import level
+
+    from pmedm_vb.assemble.hierarchy import Hierarchy
+
+    specs = [json.loads(path.read_text()) for path in sorted(folder.glob("exp*.json"))]
+    rows = []
+    for puma in pumas:
+        inputs = PMEDMInputs.load(processed_dir() / "inputs" / area.slug / puma)
+        row = {"PUMA ID": puma}
+        for spec in specs:
+            model = spec["model"]
+            options = dict(
+                alpha=spec["alphas"][0],
+                taper=None if model["taper"] == "none" else model["taper"],
+                variance_floor=(None if str(model["variance_floor"]) == "none"
+                                else model["variance_floor"]))
+            fitted = Hierarchy.build(inputs, level(spec), **options)
+            null = (fitted if model["hierarchy"] == "nullspace" else
+                    Hierarchy.build(inputs, "nullspace" + (f"-r{model['rollup']}"
+                                                           if model.get("rollup") else ""),
+                                    **options))
+            unseen = null.n_removed + null.n_inconsistent
+            row[f"{spec['name']}: coordinates"] = fitted.size
+            row[f"{spec['name']}: identified"] = null.size - unseen
+            logger.info("%s %s: %d coordinates, %d identified", puma, spec["name"],
+                        fitted.size, null.size - unseen)
+        rows.append(row)
+    frame = pd.DataFrame(rows)
+    total = {"PUMA ID": "Total", **frame.drop(columns="PUMA ID").sum().to_dict()}
+    frame = pd.concat([frame, pd.DataFrame([total])], ignore_index=True)
+    for column in frame.columns[1:]:
+        frame[column] = frame[column].map(lambda v: f"{int(v):,}")
     return frame
 
 
@@ -296,12 +362,16 @@ def main() -> None:
     frame.to_csv(args.out / "table_inventory.csv", index=False)
     (args.out / "table_inventory.md").write_text(markdown(frame))
     (args.out / "table_inventory.tex").write_text(latex(frame))
-    counts = tallies(area, args.puma)
-    cells = cell_counts(counts)
+    rollup = RollupSpec.parse(args.rollup)
+    counts = tallies(area, args.puma, rollup)
+    cells = cell_counts(counts, str(rollup))
     cells.to_csv(args.out / "table_cells.csv", index=False)
     (args.out / "table_cells.md").write_text(simple_markdown(cells))
     (args.out / "table_cells.tex").write_text(simple_latex(cells))
-    by_puma = puma_counts(counts)
+    by_puma = puma_counts(counts, str(rollup))
+    if args.experiments is not None:
+        by_puma = by_puma.merge(parameters(area, args.puma, args.experiments),
+                                on="PUMA ID", how="left")
     by_puma.to_csv(args.out / "puma_cells.csv", index=False)
     (args.out / "puma_cells.md").write_text(simple_markdown(by_puma))
     (args.out / "puma_cells.tex").write_text(simple_latex(by_puma))
