@@ -13,6 +13,7 @@
 repo    experiments/figures/fig_accuracy.R      Figure D
 repo    experiments/figures/fig_cost.R          Figure C
 repo    experiments/figures/fig_draws.R         Figure B
+repo    experiments/figures/fig_examples.R      Figure A
 tables  table1_*.csv                            Figure C
 tables  table2_*.csv                            Figures C, D
 tables  table2t_*.csv                           Figures C, D
@@ -20,3 +21,4 @@ tables  table3_*.csv                            Figures C, D
 tables  table3t_*.csv                           Figure C
 tables  table5_*.csv                            Figure C
 tables  draws_sample.csv                        Figure B
+tables  draw_examples.csv                       Figure A (experiments/draw_examples.py)
