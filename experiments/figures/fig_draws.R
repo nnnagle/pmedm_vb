@@ -89,11 +89,25 @@ plot_draws <- function(data) {
   floor_line <- data.frame(metric = factor(DRAWS_METRICS[["min_bg_n_eff"]],
                                            levels = unname(DRAWS_METRICS)))
 
+  # Bandwidth: Sheather & Jones (1991), which follows clusters such as IPF's
+  # one tight mode per PUMA that the default (Silverman's rule, set by the whole
+  # spread) blurs together. Groups mostly at one value, as MAP + Laplace's n_eff
+  # of 1, keep the default: there SJ fails, or collapses to a spike.
+  key <- interaction(data$metric, data$alpha_label, data$method, data$experiment, drop = TRUE)
+  sj <- vapply(split(log10(data$value), key), function(v) {
+    max(table(v)) <= length(v) / 2 && !inherits(try(bw.SJ(v), silent = TRUE), "try-error")
+  }, logical(1))
+  by_sj <- !single & sj[as.character(key)]
+  violin <- function(part, bw) {
+    geom_violin(data = part, position = dodge, scale = "width", width = 0.8, bw = bw,
+                linewidth = 0.2, colour = "grey30", alpha = 0.75)
+  }
+
   ggplot(data, aes(x = method, y = value, fill = experiment)) +
     geom_hline(data = floor_line, aes(yintercept = DRAWS_FLOOR), linetype = "dashed",
                linewidth = 0.3, colour = "grey45") +
-    geom_violin(data = data[!single, ], position = dodge, scale = "width", width = 0.8,
-                linewidth = 0.2, colour = "grey30", alpha = 0.75) +
+    violin(data[by_sj, ], "SJ") +
+    violin(data[!single & !by_sj, ], "nrd0") +
     stat_summary(data = data[!single, ], aes(group = experiment), fun = median,
                  geom = "point", position = dodge, shape = 21, size = 1.1, fill = "white",
                  colour = "black", stroke = 0.3) +
