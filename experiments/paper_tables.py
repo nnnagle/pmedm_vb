@@ -135,7 +135,7 @@ def cell_statistics(cells: pd.DataFrame) -> list[dict]:
     rows = []
 
     def add(table, key, label, subset, column, fn, sampled):
-        part = cells[cells.subset == subset]
+        part = cells[cells.subset.isin([subset] if isinstance(subset, str) else subset)]
         if sampled:
             part = part[part.sampled.fillna(False).astype(bool)]
         if column not in part:
@@ -149,8 +149,11 @@ def cell_statistics(cells: pd.DataFrame) -> list[dict]:
             "covers_published", mean, True)
         add(table, "absz_p90", "|z| p90", subset, "abs_z", quantile(0.90), True)
         add(table, "hw_p50", "Half-width / MOE", subset, "halfwidth_over_moe", quantile(0.50), True)
-    for kind, subset in (("rel", "heldout_related_block_group"),
-                         ("less", "heldout_less_related_block_group")):
+    held_out = ("heldout_related_block_group", "heldout_less_related_block_group")
+    add("3", "all_cover", "All: posterior 90% interval contains published", held_out,
+        "covers_published", mean, True)
+    add("3", "all_absz_p90", "All: |z| p90", held_out, "abs_z", quantile(0.90), True)
+    for kind, subset in (("rel", held_out[0]), ("less", held_out[1])):
         name = "Related" if kind == "rel" else "Less related"
         add("3", f"{kind}_cover", f"{name}: posterior 90% interval contains published", subset,
             "covers_published", mean, True)
@@ -227,6 +230,7 @@ def scores_statistics(scores: pd.DataFrame, whiten: str = "vb_skewed") -> list[d
 #: Decimals per statistic; "min" is whole minutes, "khat" median [min, max].
 DIGITS = {"fit": "min", "sampling": "min", "total": "min",
           "post_cover": 2, "absz_p90": 2, "hw_p50": 2,
+          "all_cover": 2, "all_absz_p90": 2,
           "rel_cover": 2, "rel_absz_p90": 2, "less_cover": 2, "less_absz_p90": 2,
           "mdiff_p50": 2, "mdiff_p99": 2, "width_p10": 2, "width_p50": 2, "khat": "khat",
           "walls": 3, "neff_min_p50": 1, "neff_lt": 3, "hhz_gt": 3, "hhz_p50": 2}
@@ -263,8 +267,9 @@ TITLES = {
           "posterior in Table 4."),
     "2t": ("Fit to the published tract constraints", "As Table 2, for tract cells."),
     "3": ("Held-out block-group accuracy",
-          "Held-out ACS tables at block-group level, related and less related to the "
-          "constraints; cells of the four PUMAs pooled, sampled cells only. Posterior 90% "
+          "Held-out ACS tables at block-group level: all of them, then those related and "
+          "less related to the constraints; cells of the four PUMAs pooled, sampled cells "
+          "only. Posterior 90% "
           "interval contains published, and |z|, as in Table 2. The interval is for the true "
           "count, while the published value also carries sampling error, so coverage below "
           "0.90 is expected even for a correct model."),

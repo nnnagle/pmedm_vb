@@ -7,8 +7,8 @@
 #   bottom  the share of cells whose published value lies in the method's
 #           posterior 90% interval.
 # Columns of panels: fitted block-group cells (Table 2), fitted tract cells
-# (Table 2t), held-out related and held-out less related block-group cells
-# (Table 3). Sampled cells only, as in the tables. HMC reference is left out
+# (Table 2t), and every held-out block-group cell together (Table 3's "All";
+# the held-out tables one by one are a separate figure). Sampled cells only, as in the tables. HMC reference is left out
 # (it matches HMC short to two decimals; their agreement is Figure E). Raking
 # has no alpha and is drawn once.
 #
@@ -52,13 +52,11 @@ ALPHA_LABELS <- c(expression(alpha == 0.01), expression(alpha == 1), "raking (no
 
 # (table, key) -> panel column and metric.
 PANELS <- data.frame(
-  table = c("2", "2", "2t", "2t", "3", "3", "3", "3"),
-  key = c("post_cover", "absz_p90", "post_cover", "absz_p90",
-          "rel_cover", "rel_absz_p90", "less_cover", "less_absz_p90"),
+  table = c("2", "2", "2t", "2t", "3", "3"),
+  key = c("post_cover", "absz_p90", "post_cover", "absz_p90", "all_cover", "all_absz_p90"),
   target = c("Fitted block group", "Fitted block group", "Fitted tract", "Fitted tract",
-             "Held-out related", "Held-out related",
-             "Held-out less related", "Held-out less related"),
-  metric = rep(c("cover", "absz_p90"), 4)
+             "Held-out block group", "Held-out block group"),
+  metric = rep(c("cover", "absz_p90"), 3)
 )
 TARGETS <- unique(PANELS$target)
 
@@ -90,7 +88,7 @@ plot_accuracy <- function(data) {
   data$group <- interaction(data$experiment, data$alpha_label)
   dodge <- position_dodge(width = 0.75)
 
-  # Reference lines on the held-out panels only: there the published value is
+  # Reference lines on the held-out panel only: there the published value is
   # independent of the fit, so sampling error alone gives |z| p90 = 1.645, and
   # 0.90 is a benchmark for coverage (below it is expected, as the interval is
   # for the true count). Fitted cells have no such benchmark.
