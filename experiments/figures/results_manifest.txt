@@ -13,7 +13,8 @@
 repo    experiments/figures/fig_accuracy.R      Figure D
 repo    experiments/figures/fig_cost.R          Figure C
 tables  table1_*.csv                            Figure C
-tables  table2_*.csv                            Figure D
-tables  table2t_*.csv                           Figure D
+tables  table2_*.csv                            Figures C, D
+tables  table2t_*.csv                           Figures C, D
 tables  table3_*.csv                            Figures C, D
+tables  table3t_*.csv                           Figure C
 tables  table5_*.csv                            Figure C

@@ -67,7 +67,8 @@ CELL_COLUMNS = ["method", "puma", "alpha", "subset", "sampled", "abs_z",
                 "covers_published",
                 "halfwidth_over_moe", "median_diff_ref_sd", "width_ratio_ref"]
 CELL_SUBSETS = ("constrained_block_group", "constrained_tract",
-                "heldout_related_block_group", "heldout_less_related_block_group")
+                "heldout_related_block_group", "heldout_less_related_block_group",
+                "heldout_related_tract", "heldout_less_related_tract")
 DRAW_COLUMNS = ["method", "puma", "alpha", "max_share_of_N", "min_bg_n_eff", "max_abs_hh_z",
                 "count_hh_abs_z_gt_5"]
 
@@ -186,18 +187,22 @@ def cell_statistics(cells: pd.DataFrame) -> list[dict]:
             "covers_published", mean, True)
         add(table, "absz_p90", "|z| p90", subset, "abs_z", quantile(0.90), True)
         add(table, "hw_p50", "Half-width / MOE", subset, "halfwidth_over_moe", quantile(0.50), True)
-    held_out = ("heldout_related_block_group", "heldout_less_related_block_group")
-    add("3", "all_cover", "All: posterior 90% interval contains published", held_out,
-        "covers_published", mean, True)
-    add("3", "all_absz_p90", "All: |z| p90", held_out, "abs_z", quantile(0.90), True)
-    add("3", "all_is", "All: interval score / SE, mean", held_out, "interval_score", mean, True)
-    for kind, subset in (("rel", held_out[0]), ("less", held_out[1])):
-        name = "Related" if kind == "rel" else "Less related"
-        add("3", f"{kind}_cover", f"{name}: posterior 90% interval contains published", subset,
+        add(table, "is", "Interval score / SE, mean", subset, "interval_score", mean, True)
+    for table, level in (("3", "block_group"), ("3t", "tract")):
+        held_out = (f"heldout_related_{level}", f"heldout_less_related_{level}")
+        add(table, "all_cover", "All: posterior 90% interval contains published", held_out,
             "covers_published", mean, True)
-        add("3", f"{kind}_absz_p90", f"{name}: |z| p90", subset, "abs_z", quantile(0.90), True)
-        add("3", f"{kind}_is", f"{name}: interval score / SE, mean", subset, "interval_score",
-            mean, True)
+        add(table, "all_absz_p90", "All: |z| p90", held_out, "abs_z", quantile(0.90), True)
+        add(table, "all_is", "All: interval score / SE, mean", held_out, "interval_score", mean,
+            True)
+        for kind, subset in (("rel", held_out[0]), ("less", held_out[1])):
+            name = "Related" if kind == "rel" else "Less related"
+            add(table, f"{kind}_cover", f"{name}: posterior 90% interval contains published",
+                subset, "covers_published", mean, True)
+            add(table, f"{kind}_absz_p90", f"{name}: |z| p90", subset, "abs_z", quantile(0.90),
+                True)
+            add(table, f"{kind}_is", f"{name}: interval score / SE, mean", subset,
+                "interval_score", mean, True)
     subset = "constrained_block_group"
     add("4", "mdiff_p50", "Median diff. p50", subset, "median_diff_ref_sd", quantile(0.50), False)
     add("4", "mdiff_p99", "Median diff. p99", subset, "median_diff_ref_sd", quantile(0.99), False)
@@ -269,7 +274,7 @@ def scores_statistics(scores: pd.DataFrame, whiten: str = "vb_skewed") -> list[d
 
 #: Decimals per statistic; "min" is whole minutes, "khat" median [min, max].
 DIGITS = {"fit": "min", "sampling": "min", "total": "min",
-          "post_cover": 2, "absz_p90": 2, "hw_p50": 2,
+          "post_cover": 2, "absz_p90": 2, "hw_p50": 2, "is": 2,
           "all_cover": 2, "all_absz_p90": 2, "all_is": 2,
           "rel_cover": 2, "rel_absz_p90": 2, "rel_is": 2,
           "less_cover": 2, "less_absz_p90": 2, "less_is": 2,
@@ -304,8 +309,9 @@ TITLES = {
           "posterior it depends on how strongly each cell's own estimate determines its "
           "posterior. |z| = |posterior mean - published| / SE, 90th percentile over cells; "
           "half-width of the posterior 90% interval over the published MOE, median over "
-          "cells. Calibration of the fitted cells is assessed against the reference "
-          "posterior in Table 4."),
+          "cells. Interval score / SE as in Table 3; the published values were used in "
+          "fitting, so here it too describes the fit. Calibration of the fitted cells is "
+          "assessed against the reference posterior in Table 4."),
     "2t": ("Fit to the published tract constraints", "As Table 2, for tract cells."),
     "3": ("Held-out block-group accuracy",
           "Held-out ACS tables at block-group level: all of them, then those related and "
@@ -319,6 +325,7 @@ TITLES = {
           "the published value falls outside it, in published SEs, mean over cells "
           "(Gneiting and Raftery 2007); lower is better, and a method that knew every true "
           "count would score about 4.1."),
+    "3t": ("Held-out tract accuracy", "As Table 3, for tract cells."),
     "4": ("Agreement with the reference HMC",
           "Block-group constraint cells of the four PUMAs pooled. Median diff.: |median - "
           "reference median| in reference sds; width ratio: 90% interval width over the "
