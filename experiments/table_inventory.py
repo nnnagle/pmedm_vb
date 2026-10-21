@@ -28,15 +28,21 @@ all-cell set, each level also has the cells left after pruning, the zero rules
 of ``design_cells.py`` (``--rollup pruned``, the cells experiment 1 fits), with
 their zeros.
 
-And the same counts per PUMA, over all constraint tables.
+And the same counts per PUMA, over all constraint tables. Both have a row per
+(table or PUMA, level).
+
+With ``--experiments`` (a folder of experiment JSONs), a separate table of each
+experiment's parameters per PUMA: the solver's coordinates and, in
+parentheses, how many of them the allocation identifies.
 
 Writes ``<out>/table_inventory.md``, ``.tex`` (booktabs) and ``.csv``, the
 cell counts by table as ``<out>/table_cells.*`` and by PUMA as
-``<out>/puma_cells.*``. ``--name`` picks the assembled inputs: ``knoxall`` for
-the all-cell set::
+``<out>/puma_cells.*``, and the parameters as ``<out>/parameters.*``.
+``--name`` picks the assembled inputs: ``knoxall`` for the all-cell set::
 
     $CONDA_PREFIX/bin/python experiments/table_inventory.py --name knoxall \\
-        --puma 4701501 4701502 4701503 4701504 --out $RUNS/table_inventory
+        --puma 4701501 4701502 4701503 4701504 --experiments experiments/paper_v3 \\
+        --out $RUNS/table_inventory
 """
 
 from __future__ import annotations
@@ -221,22 +227,48 @@ def fmt(cell: list[int] | None) -> str:
     return "–" if cell is None else f"{cell[0] + cell[1]:,} ({cell[1]:,})"
 
 
-def columns(all_cells: bool, rollup: str) -> list[tuple[str, str, int]]:
-    """(header, level, which tally) per column: published, then pruned and
-    rolled up for the all-cell set, per level."""
-    out = []
-    for level in TREE_LEVELS:
-        out.append((f"{LEVEL_LABELS[level]}: published (zeros)", level, 0))
-        if all_cells:
-            out.append((f"{LEVEL_LABELS[level]}: pruned (zeros)", level, 1))
-            out.append((f"{LEVEL_LABELS[level]}: roll-up {rollup} (zeros)", level, 2))
-    return out
-
-
 def add(total: list[int] | None, cell: list[int] | None) -> list[int] | None:
     if cell is None:
         return total
     return list(cell) if total is None else [total[0] + cell[0], total[1] + cell[1]]
+
+
+def long_rows(key: str, groups: list[tuple[str, list, object]], rollup: str) -> pd.DataFrame:
+    """One row per (group, level) with the published, pruned and rolled-up
+    cells and their zeros; the group named on its first row only, a level
+    with no cells left out, and a Total group last.
+
+    ``groups`` is ``(name, tallies, select)``: the PUMAs' tally triples to sum,
+    and ``select(table)``, which of their tables count towards the group.
+    """
+    schemes = [("published (zeros)", 0), ("pruned (zeros)", 1),
+               (f"roll-up {rollup} (zeros)", 2)]
+    if any(t[1] is None for _, tallies_, _ in groups for t in tallies_):
+        schemes = schemes[:1]                       # a collapsed set: nothing to prune
+    totals = {level: [None] * len(schemes) for level in TREE_LEVELS}
+    rows = []
+
+    def emit(name: str, cells: dict[str, list]) -> None:
+        first = True
+        for level in TREE_LEVELS:
+            if cells[level][0] is None:
+                continue
+            rows.append({key: name if first else "", "Level": LEVEL_LABELS[level],
+                         **{header: fmt(c) for (header, _), c in zip(schemes, cells[level])}})
+            first = False
+
+    for name, tallies_, select in groups:
+        cells = {level: [None] * len(schemes) for level in TREE_LEVELS}
+        for triple in tallies_:
+            for j, (_, which) in enumerate(schemes):
+                for (level, table), value in triple[which].cells.items():
+                    if select(table):
+                        cells[level][j] = add(cells[level][j], value)
+        for level in TREE_LEVELS:
+            totals[level] = [add(t, c) for t, c in zip(totals[level], cells[level])]
+        emit(name, cells)
+    emit("Total", totals)
+    return pd.DataFrame(rows)
 
 
 def cell_counts(counts: dict[str, tuple[Tally, Tally | None, Tally | None]],
@@ -244,23 +276,9 @@ def cell_counts(counts: dict[str, tuple[Tally, Tally | None, Tally | None]],
     """Per constraint table and level: cells (areas x categories) and published
     zeros, summed over the PUMAs; with the pruned and rolled-up cells beside
     them for the all-cell set."""
-    cols = columns(all(pair[1] is not None for pair in counts.values()), rollup)
-    tables = sorted({table for pair in counts.values() for _, table in pair[0].cells})
-    rows, total = [], {header: None for header, _, _ in cols}
-    for table in tables:
-        row = {"Table": table}
-        for header, level, which in cols:
-            cell = None
-            for tally_pair in counts.values():
-                cell = add(cell, tally_pair[which].cells.get((level, table)))
-            row[header] = cell
-            total[header] = add(total[header], cell)
-        rows.append(row)
-    rows.append({"Table": "Total", **total})
-    frame = pd.DataFrame(rows)
-    for header, _, _ in cols:
-        frame[header] = frame[header].map(fmt)
-    return frame
+    tables = sorted({table for triple in counts.values() for _, table in triple[0].cells})
+    return long_rows("Table", [(table, list(counts.values()), lambda t, table=table: t == table)
+                               for table in tables], rollup)
 
 
 def puma_counts(counts: dict[str, tuple[Tally, Tally | None, Tally | None]],
@@ -268,29 +286,14 @@ def puma_counts(counts: dict[str, tuple[Tally, Tally | None, Tally | None]],
     """Per PUMA: constraint cells at each level and the published zeros among
     them, over every constraint table; pruned and rolled up beside them for the
     all-cell set."""
-    cols = columns(all(pair[1] is not None for pair in counts.values()), rollup)
-    rows, total = [], {header: None for header, _, _ in cols}
-    for puma, pair in counts.items():
-        row = {"PUMA ID": puma}
-        for header, level, which in cols:
-            cell = None
-            for (lvl, _), value in pair[which].cells.items():
-                if lvl == level:
-                    cell = add(cell, value)
-            row[header] = cell
-            total[header] = add(total[header], cell)
-        rows.append(row)
-    rows.append({"PUMA ID": "Total", **total})
-    frame = pd.DataFrame(rows)
-    for header, _, _ in cols:
-        frame[header] = frame[header].map(fmt)
-    return frame
+    return long_rows("PUMA ID", [(puma, [triple], lambda t: True)
+                                 for puma, triple in counts.items()], rollup)
 
 
 def parameters(area: StudyArea, pumas: list[str], folder: Path) -> pd.DataFrame:
-    """Per PUMA, each experiment's parameters: the solver's coordinates (the
-    count its MAP and VB logs print) and how many of them the allocation
-    identifies.
+    """Per PUMA, each experiment's parameters, as ``coordinates (identified)``:
+    the solver's coordinates (the count its MAP and VB logs print) and how many
+    of them the allocation identifies.
 
     The identified count is the coordinates less every direction along which
     no allocation weight moves: the null space of the experiment's own cells,
@@ -300,9 +303,12 @@ def parameters(area: StudyArea, pumas: list[str], folder: Path) -> pd.DataFrame:
     targets and replicates, ``Sigma`` only rescales it, so the first ``alpha``
     serves.
     """
+    from paper_tables import EXPERIMENTS
     from run_experiment import level
 
     from pmedm_vb.assemble.hierarchy import Hierarchy
+
+    labels = dict(EXPERIMENTS)
 
     specs = [json.loads(path.read_text()) for path in sorted(folder.glob("exp*.json"))]
     rows = []
@@ -322,17 +328,17 @@ def parameters(area: StudyArea, pumas: list[str], folder: Path) -> pd.DataFrame:
                                                            if model.get("rollup") else ""),
                                     **options))
             unseen = null.n_removed + null.n_inconsistent
-            row[f"{spec['name']}: coordinates"] = fitted.size
-            row[f"{spec['name']}: identified"] = null.size - unseen
+            row[labels.get(spec["name"], spec["name"])] = (fitted.size, null.size - unseen)
             logger.info("%s %s: %d coordinates, %d identified", puma, spec["name"],
                         fitted.size, null.size - unseen)
         rows.append(row)
+    columns = [c for c in rows[0] if c != "PUMA ID"]
+    rows.append({"PUMA ID": "Total", **{c: tuple(map(sum, zip(*(r[c] for r in rows))))
+                                         for c in columns}})
     frame = pd.DataFrame(rows)
-    total = {"PUMA ID": "Total", **frame.drop(columns="PUMA ID").sum().to_dict()}
-    frame = pd.concat([frame, pd.DataFrame([total])], ignore_index=True)
-    for column in frame.columns[1:]:
-        frame[column] = frame[column].map(lambda v: f"{int(v):,}")
-    return frame
+    for column in columns:
+        frame[column] = frame[column].map(lambda v: f"{v[0]:,} ({v[1]:,})")
+    return frame.rename(columns={c: f"{c}: coordinates (identified)" for c in columns})
 
 
 def simple_markdown(frame: pd.DataFrame) -> str:
@@ -342,11 +348,14 @@ def simple_markdown(frame: pd.DataFrame) -> str:
 
 
 def simple_latex(frame: pd.DataFrame) -> str:
-    lines = [r"\begin{tabular}{l" + "r" * (len(frame.columns) - 1) + "}", r"\toprule",
-             " & ".join(frame.columns) + r" \\", r"\midrule"]
-    for r in frame.itertuples(index=False):
+    text = 2 if "Level" in frame.columns else 1     # left-aligned columns
+    lines = [r"\begin{tabular}{" + "l" * text + "r" * (len(frame.columns) - text) + "}",
+             r"\toprule", " & ".join(frame.columns) + r" \\", r"\midrule"]
+    for i, r in enumerate(frame.itertuples(index=False)):
         if r[0] == "Total":
             lines.append(r"\midrule")
+        elif i and r[0] and text == 2:
+            lines.append(r"\addlinespace")             # a new group of levels
         lines.append(" & ".join(latex_escape(str(c)).replace("–", "--") for c in r) + r" \\")
     lines += [r"\bottomrule", r"\end{tabular}"]
     return "\n".join(lines) + "\n"
@@ -369,12 +378,15 @@ def main() -> None:
     (args.out / "table_cells.md").write_text(simple_markdown(cells))
     (args.out / "table_cells.tex").write_text(simple_latex(cells))
     by_puma = puma_counts(counts, str(rollup))
-    if args.experiments is not None:
-        by_puma = by_puma.merge(parameters(area, args.puma, args.experiments),
-                                on="PUMA ID", how="left")
     by_puma.to_csv(args.out / "puma_cells.csv", index=False)
     (args.out / "puma_cells.md").write_text(simple_markdown(by_puma))
     (args.out / "puma_cells.tex").write_text(simple_latex(by_puma))
+    if args.experiments is not None:
+        params = parameters(area, args.puma, args.experiments)
+        params.to_csv(args.out / "parameters.csv", index=False)
+        (args.out / "parameters.md").write_text(simple_markdown(params))
+        (args.out / "parameters.tex").write_text(simple_latex(params))
+        print(simple_markdown(params))
     missing = frame.loc[frame.title == "", "table"].tolist()
     print(markdown(frame))
     print(simple_markdown(cells))
