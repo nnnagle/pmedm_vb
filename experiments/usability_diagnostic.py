@@ -57,6 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from laplace_diagnostic import load_vb  # noqa: E402
 from run_experiment import area_slug, data_dir, fit_name  # noqa: E402
 
+from pmedm_vb.assemble.allcells import table_leaves  # noqa: E402
 from pmedm_vb.assemble.hierarchy import Hierarchy  # noqa: E402
 from pmedm_vb.assemble.inputs import PMEDMInputs  # noqa: E402
 from pmedm_vb.config import processed_dir  # noqa: E402
@@ -95,7 +96,7 @@ class Usability:
         gq = (inputs.units["is_group_quarters"].to_numpy(bool)
               if "is_group_quarters" in inputs.units else np.zeros(inputs.n_units, bool))
         self.hh = ~gq
-        tenure = [k for k, c in enumerate(inputs.bg_constraints) if c.startswith("B25003.")]
+        tenure = table_leaves(inputs.bg_constraints, "B25003")  # owner + renter, not the total
         if not tenure:
             raise SystemExit("no B25003 rows in the block-group constraints")
         n_zones = inputs.Y_B.shape[0]

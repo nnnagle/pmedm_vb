@@ -85,6 +85,14 @@ def is_subtotal(name: str) -> bool:
     return name.endswith(SUBTOTAL_MARK)
 
 
+def table_leaves(names, table: str) -> list[int]:
+    """The positions in ``names`` (``"{table}.{category}"``) of ``table``'s
+    cells that are not subtotals: its categories counted once, as
+    ``B25003``'s owner and renter, without the all-cell set's ``total:``."""
+    return [k for k, name in enumerate(names)
+            if name.startswith(f"{table}.") and not is_subtotal(name)]
+
+
 def table_set(names: list[str]) -> str:
     """Which :data:`TABLE_SETS` member built these constraint names: only the
     all-cell set has subtotals."""

@@ -50,6 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from laplace_diagnostic import load_vb  # noqa: E402
 
+from pmedm_vb.assemble.allcells import table_leaves  # noqa: E402
 from pmedm_vb.assemble.hierarchy import Hierarchy  # noqa: E402
 from pmedm_vb.assemble.inputs import PMEDMInputs  # noqa: E402
 from pmedm_vb.config import processed_dir  # noqa: E402
@@ -106,7 +107,7 @@ class Ratios:
         self.band = np.digitize(self.size, [s for s, _ in SIZE_BANDS[1:]])
         # Block-group diversity: household records only, in the block groups with more
         # than HH_MIN published occupied households (B25003); None without B25003.
-        tenure = [k for k, c in enumerate(inputs.bg_constraints) if c.startswith("B25003.")]
+        tenure = table_leaves(inputs.bg_constraints, "B25003")  # owner + renter, not the total
         self.hh = ~self.gq
         published = inputs.Y_B[:, tenure].sum(axis=1) if tenure else None
         self.hh_zones = (published > HH_MIN) if tenure else None

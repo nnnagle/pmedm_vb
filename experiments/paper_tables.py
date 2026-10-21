@@ -16,8 +16,9 @@ block-group n_eff and largest cell, for the figures of the draws::
 Rows are methods, one panel per alpha, columns each statistic for each
 experiment. Pooling:
 
-- Over cells (Tables 2-4): every cell of every PUMA together, so quantiles are
-  quantiles of the pooled cells. z and coverage use the *sampled* cells only
+- Over cells (Tables 2-4): every leaf cell of every PUMA together (a table's
+  published categories; its totals and subtotals, sums of them, left out), so
+  quantiles are quantiles of the pooled cells. z and coverage use the *sampled* cells only
   (a nonzero published estimate whose variance is a sampling variance, not a
   zero cell's modelled one). Coverage, in Tables 2 and 3, is whether the
   posterior 90% interval (the draws' 5th to 95th percentiles) contains the
@@ -40,6 +41,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
+
+from pmedm_vb.assemble.allcells import SUBTOTAL_MARK
 
 #: (folder, label)
 EXPERIMENTS = [("exp01_baseline", "Baseline"), ("exp02_nullspace", "Null space"),
@@ -110,11 +113,19 @@ def parse_args() -> argparse.Namespace:
 
 
 def read_detail(folder: Path, kind: str, columns: list[str], subsets=None) -> pd.DataFrame:
-    """Every ``<method>_<kind>.parquet`` under ``folder``, with the columns it has."""
+    """Every ``<method>_<kind>.parquet`` under ``folder``, with the columns it has.
+
+    Cells are leaf cells only: an all-cell table's totals and subtotals (names
+    ending in ``":"``) are sums of its leaves, so counting them as cells would
+    count the same people again and weight the large aggregates."""
     frames = []
     for path in sorted(folder.glob(f"*/*_{kind}.parquet")):
-        have = [c for c in columns if c in pq.read_schema(path).names]
-        frame = pd.read_parquet(path, columns=have)
+        names = pq.read_schema(path).names
+        have = [c for c in columns if c in names]
+        leaves_only = kind == "cells" and "cell" in names
+        frame = pd.read_parquet(path, columns=have + (["cell"] if leaves_only else []))
+        if leaves_only:
+            frame = frame[~frame.pop("cell").str.endswith(SUBTOTAL_MARK)]
         if subsets is not None:
             frame = frame[frame.subset.isin(subsets)]
         for column in frame.columns:
@@ -315,7 +326,8 @@ TITLES = {
                   "VB drawing (with rejection when truncated), or HMC. Fits ran on 48-core CPU "
                   "nodes, HMC on one GPU; county totals are in the CSV."),
     "2": ("Fit to the published block-group constraints",
-          "All block-group constraint cells of the four PUMAs pooled; sampled cells only "
+          "All block-group constraint leaf cells of the four PUMAs pooled (published "
+          "categories; totals and subtotals left out); sampled cells only "
           "(nonzero estimates with a sampling variance). Posterior 90% interval contains "
           "published: the share of cells whose published estimate lies between the 5th and "
           "95th percentiles of the method's draws. The published values were used in "
@@ -329,8 +341,8 @@ TITLES = {
     "2t": ("Fit to the published tract constraints", "As Table 2, for tract cells."),
     "3": ("Held-out block-group accuracy",
           "Held-out ACS tables at block-group level: all of them, then those related and "
-          "less related to the constraints; cells of the four PUMAs pooled, sampled cells "
-          "only. Posterior 90% "
+          "less related to the constraints; leaf cells of the four PUMAs pooled, sampled "
+          "cells only. Posterior 90% "
           "interval contains published, and |z|, as in Table 2. The interval is for the true "
           "count, while the published value also carries sampling error, so coverage below "
           "0.90 is expected even for a correct model. Interval score / SE: the width of a "
@@ -341,7 +353,7 @@ TITLES = {
           "count would score about 4.1."),
     "3t": ("Held-out tract accuracy", "As Table 3, for tract cells."),
     "4": ("Agreement with the reference HMC",
-          "Block-group constraint cells of the four PUMAs pooled. Median diff.: |median - "
+          "Block-group constraint leaf cells of the four PUMAs pooled. Median diff.: |median - "
           "reference median| in reference sds; width ratio: 90% interval width over the "
           "reference's. k-hat: PSIS k-hat of the method's density against the posterior, one "
           "per fit, median [min, max] over PUMAs (methods with a density only)."),

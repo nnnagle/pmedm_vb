@@ -122,7 +122,7 @@ import scipy.sparse as sp
 from scipy.special import logsumexp
 
 from pmedm_vb import compare
-from pmedm_vb.assemble.allcells import is_subtotal
+from pmedm_vb.assemble.allcells import is_subtotal, table_leaves
 from pmedm_vb.assemble.heldout import HeldOut
 from pmedm_vb.assemble.inputs import PMEDMInputs
 from pmedm_vb.config import processed_dir
@@ -264,7 +264,7 @@ def truncated_draws(args, inputs: PMEDMInputs, rng, h, q) -> tuple[np.ndarray, d
     ``--draws`` are kept or ``--trunc-max-factor`` times that many are spent.
     Returns the kept draws (solver coordinates) and the acceptance counts."""
     op = ConstraintOperator(inputs)
-    tenure = [k for k, c in enumerate(inputs.bg_constraints) if c.startswith("B25003.")]
+    tenure = table_leaves(inputs.bg_constraints, "B25003")  # owner + renter, not the total
     hh = ~inputs.units["is_group_quarters"].to_numpy(bool)
     published = inputs.Y_B[:, tenure].sum(axis=1)
     zones = published > args.hh_min
@@ -479,7 +479,7 @@ class Accumulator:
         # Household records, and the block groups with more than hh_min published
         # occupied households, for each household's share of its block group's
         # households. None without B25003 among the block group constraints.
-        tenure = [k for k, c in enumerate(inputs.bg_constraints) if c.startswith("B25003.")]
+        tenure = table_leaves(inputs.bg_constraints, "B25003")  # owner + renter, not the total
         if tenure and "is_group_quarters" in inputs.units:
             self.hh_units = ~inputs.units["is_group_quarters"].to_numpy(bool)
             published = inputs.Y_B[:, tenure].sum(axis=1)
@@ -653,7 +653,7 @@ def household_consistency(inputs, sets, acc, variance_floor) -> dict[str, np.nda
     (its B25003 cells summed) against the published total, with the SE the square
     root of the cells' summed variances under the model's variance floor (their
     covariance ignored); and the published households of that block group."""
-    tenure = [k for k, c in enumerate(inputs.bg_constraints) if c.startswith("B25003.")]
+    tenure = table_leaves(inputs.bg_constraints, "B25003")  # owner + renter, not the total
     index = next((i for i, s in enumerate(sets) if s["subset"] == "constrained_block_group"), None)
     if not tenure or index is None:
         return None
