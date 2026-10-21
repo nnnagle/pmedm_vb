@@ -2,18 +2,19 @@
 
 For one experiment, PUMA and alpha, and the methods in ``METHODS``, draws the
 weights ``W`` exactly as the scoring does (``compare_methods.method_draws``,
-with the arguments ``score_experiment.cell_calls`` gives it) and, in three
+with the arguments ``score_experiment.cell_calls`` gives it) and, in four
 block groups, keeps each draw's household shares: each household record's
 share of the block group's households, as in compare_methods.py's n_eff (block
 groups with more than ``--hh-min`` published occupied households, B25003's
 owner and renter cells).
 
-The three block groups (``case``), each taken once:
+The four block groups (``case``), each taken once, in this order:
 
-- ``typical``: the block group whose median n_eff over ``--select-draws`` HMC
-  reference draws is the median over the eligible block groups;
 - ``ipf``: the IPF fit's smallest n_eff;
-- ``vb``: the smallest median n_eff over ``--select-draws`` VB Gaussian draws.
+- ``hmc``: the smallest median n_eff over ``--select-draws`` HMC reference draws;
+- ``vb``: the smallest median n_eff over ``--select-draws`` VB Gaussian draws;
+- ``typical``: the block group whose median n_eff over the HMC reference draws
+  is the median over the eligible block groups.
 
 If one is already taken, the next in line is used. Each case shows the same
 ``--draws`` draws per method (IPF: its one fit), chosen at random among the
@@ -125,9 +126,10 @@ def pick_cases(neff: dict[str, np.ndarray]) -> dict[str, int]:
     hmc = np.median(neff["hmc_ref"], axis=0)
     vb = np.median(neff["vb_gaussian"], axis=0)
     cases = {"ipf": first_free(np.argsort(neff["ipf"][0], kind="stable"))}
-    cases["typical"] = first_free(np.argsort(np.abs(hmc - np.median(hmc)), kind="stable"))
+    cases["hmc"] = first_free(np.argsort(hmc, kind="stable"))
     cases["vb"] = first_free(np.argsort(vb, kind="stable"))
-    return {case: cases[case] for case in ("typical", "ipf", "vb")}
+    cases["typical"] = first_free(np.argsort(np.abs(hmc - np.median(hmc)), kind="stable"))
+    return {case: cases[case] for case in ("typical", "hmc", "ipf", "vb")}
 
 
 def main() -> None:
@@ -144,7 +146,7 @@ def main() -> None:
     households = np.flatnonzero(~inputs.units["is_group_quarters"].to_numpy(bool))
     published = inputs.Y_B[:, table_leaves(inputs.bg_constraints, "B25003")].sum(axis=1)
     zones = np.flatnonzero(published > args.hh_min)
-    if zones.size < 3:
+    if zones.size < 4:
         raise SystemExit(f"only {zones.size} block groups over {args.hh_min:g} households")
 
     # Every method's household shares in every eligible block group: all the

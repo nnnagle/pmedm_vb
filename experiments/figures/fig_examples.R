@@ -1,8 +1,8 @@
 # Figure A: what a draw looks like, from draw_examples.py's draw_examples.csv.
 #
-# Three block groups of one PUMA (columns): a typical one (the median HMC
-# reference n_eff), the IPF fit's least spread one and VB Gaussian's least
-# spread one. One row per method. Each bar is one draw, a whole synthetic
+# Four block groups of one PUMA (columns): a typical one (the median HMC
+# reference n_eff), and the least spread one (smallest n_eff; for HMC and VB,
+# the median over draws) of the HMC reference, the IPF fit and VB Gaussian. One row per method. Each bar is one draw, a whole synthetic
 # population: the block group's households stacked by the household record they
 # copy, largest first. The block group's five records with the largest mean
 # share over the shown draws (averaged over the methods) are coloured, the same
@@ -36,6 +36,7 @@ EXAMPLES_METHODS <- c(
 )
 EXAMPLES_CASES <- c(
   typical = "Typical block group",
+  hmc = "HMC reference's least spread",
   ipf = "IPF's least spread",
   vb = "VB Gaussian's least spread"
 )
@@ -93,7 +94,7 @@ plot_examples <- function(data) {
                    fill = group)) +
     geom_rect(data = data[rest, ], colour = NA) +
     geom_rect(data = data[!rest, ], colour = "white", linewidth = 0.1) +
-    geom_text(data = bars, aes(x = draw, y = 1.02, label = label), vjust = 0, size = 1.8,
+    geom_text(data = bars, aes(x = draw, y = 1.02, label = label), vjust = 0, size = 1.5,
               colour = "grey30", inherit.aes = FALSE) +
     facet_grid(method ~ case_label) +
     scale_x_continuous(breaks = NULL, expand = expansion(add = 0.3)) +
