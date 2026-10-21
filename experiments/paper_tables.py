@@ -3,10 +3,12 @@
 Reads, for each experiment, the scoring ``<root>/<experiment>/scores/<tag>``:
 ``detail/*/<method>_cells.parquet`` (every scored cell),
 ``detail/*/<method>_draws.parquet`` (every draw) and ``all_scores.csv``
-(timings and PSIS k-hat), and writes five tables, plus the tract version of
-Table 2, each as LaTeX (booktabs), CSV (long: one row per experiment, alpha,
-method and statistic, unrounded, with ``n`` the cells, draws or PUMAs behind
-it) and Markdown (all in ``tables.md``)::
+(timings and PSIS k-hat), and writes five tables, plus the tract versions of
+Tables 2 and 3, each as LaTeX (booktabs), CSV (long: one row per experiment,
+alpha, method and statistic, unrounded, with ``n`` the cells, draws or PUMAs
+behind it) and Markdown (all in ``tables.md``); and ``draws_sample.csv``, up
+to 1,000 random draws of each (experiment, method, alpha, PUMA) with their
+block-group n_eff and largest cell, for the figures of the draws::
 
     sbatch --export=ALL,PMEDM_VB_DATA=$PMEDM_VB_DATA experiments/run_python.sbatch \\
         paper_tables.py --root $PAPER --tag paper1 --out $PAPER/tables
@@ -69,8 +71,20 @@ CELL_COLUMNS = ["method", "puma", "alpha", "subset", "sampled", "abs_z",
 CELL_SUBSETS = ("constrained_block_group", "constrained_tract",
                 "heldout_related_block_group", "heldout_less_related_block_group",
                 "heldout_related_tract", "heldout_less_related_tract")
-DRAW_COLUMNS = ["method", "puma", "alpha", "max_share_of_N", "min_bg_n_eff", "max_abs_hh_z",
-                "count_hh_abs_z_gt_5"]
+DRAW_COLUMNS = ["method", "puma", "alpha", "max_share_of_N", "min_bg_n_eff", "median_bg_n_eff",
+                "max_abs_hh_z", "count_hh_abs_z_gt_5"]
+#: Draws kept per (method, alpha, PUMA) in draws_sample.csv, for the figures
+#: of the draws' distributions (experiments/figures/fig_draws.R).
+SAMPLE_DRAWS = 1000
+SAMPLE_COLUMNS = ["method", "puma", "alpha", "min_bg_n_eff", "median_bg_n_eff", "max_share_of_N"]
+
+
+def sample_draws(draws: pd.DataFrame, seed: int = 0) -> pd.DataFrame:
+    """At most SAMPLE_DRAWS draws of each (method, alpha, PUMA), at random."""
+    have = [c for c in SAMPLE_COLUMNS if c in draws]
+    shuffled = draws[have].sample(frac=1.0, random_state=seed)
+    return (shuffled.groupby(["method", "alpha", "puma"]).head(SAMPLE_DRAWS)
+            .sort_values(["method", "alpha", "puma"]).reset_index(drop=True))
 
 
 def parse_args() -> argparse.Namespace:
@@ -467,7 +481,7 @@ def main() -> None:
     args = parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     labels = dict(EXPERIMENTS)
-    experiments, stats, pooled = [], [], set()
+    experiments, stats, pooled, samples = [], [], set(), []
     for name in args.experiments:
         folder = args.root / name / "scores" / args.tag
         if not (folder / "all_scores.csv").exists():
@@ -477,8 +491,10 @@ def main() -> None:
         cells = keep(read_detail(folder / "detail", "cells", CELL_COLUMNS, CELL_SUBSETS), args)
         rows = cell_statistics(cells)
         del cells
-        rows += draw_statistics(keep(read_detail(folder / "detail", "draws", DRAW_COLUMNS), args),
-                                args)
+        draws = keep(read_detail(folder / "detail", "draws", DRAW_COLUMNS), args)
+        rows += draw_statistics(draws, args)
+        samples.append(sample_draws(draws).assign(experiment=name))
+        del draws
         scores = keep(pd.read_csv(folder / "all_scores.csv", dtype={"puma": str}), args)
         pooled |= set(scores.puma.astype(str))
         record = args.root / name / "experiment.json"
@@ -506,6 +522,7 @@ def main() -> None:
         (args.out / f"{slug}.tex").write_text(latex(stats, table, experiments))
         md.append(markdown(stats, table, experiments))
     (args.out / "tables.md").write_text("\n".join(md))
+    pd.concat(samples, ignore_index=True).to_csv(args.out / "draws_sample.csv", index=False)
     print(f"wrote {args.out}")
 
 
