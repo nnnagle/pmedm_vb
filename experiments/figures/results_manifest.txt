@@ -1,0 +1,19 @@
+# What results.zip carries to the Quarto project (experiments/figures/make_results.py).
+#
+# One file or glob per line: <source> <path> <used by>
+#   source  repo    a path relative to the repository root
+#           tables  a path relative to the paper tables' folder
+#                   (experiments/paper_tables.py --out, e.g. <root>/tables_compare)
+#   used by the figures that read it, for reference only
+#
+# Everything lands flat in results/, where each figure script expects its CSVs:
+#   source("results/fig_cost.R"); plot_cost(cost_data("results"))
+# Add a line here whenever a figure gains a script or a data file.
+
+repo    experiments/figures/fig_accuracy.R      Figure D
+repo    experiments/figures/fig_cost.R          Figure C
+tables  table1_*.csv                            Figure C
+tables  table2_*.csv                            Figure D
+tables  table2t_*.csv                           Figure D
+tables  table3_*.csv                            Figures C, D
+tables  table5_*.csv                            Figure C

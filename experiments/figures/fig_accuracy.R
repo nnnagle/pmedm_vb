@@ -8,9 +8,9 @@
 #           posterior 90% interval.
 # Columns of panels: fitted block-group cells (Table 2), fitted tract cells
 # (Table 2t), and every held-out block-group cell together (Table 3's "All";
-# the held-out tables one by one are a separate figure). Sampled cells only, as in the tables. HMC reference is left out
-# (it matches HMC short to two decimals; their agreement is Figure E). Raking
-# has no alpha and is drawn once.
+# the held-out tables one by one are a separate figure). Sampled cells only,
+# as in the tables. HMC reference is left out (it matches HMC short to two
+# decimals; their agreement is Figure E). Raking has no alpha and is drawn once.
 #
 # Reads table2_*.csv, table2t_*.csv and table3_*.csv from the paper tables'
 # folder (experiments/paper_tables.py --out, e.g. <root>/tables_compare), and
@@ -31,7 +31,7 @@ suppressPackageStartupMessages({
 })
 
 # Display labels, in the order the methods are drawn (top to bottom).
-METHODS <- c(
+ACC_METHODS <- c(
   ipf = "IPF",
   ipf_multinomial = "IPF, multinomial",
   map_laplace = "MAP + Laplace",
@@ -39,26 +39,26 @@ METHODS <- c(
   vb_skewed = "VB skewed",
   hmc_short = "HMC short"
 )
-EXPERIMENTS <- c(
+ACC_EXPERIMENTS <- c(
   exp01_baseline = "Baseline",
   exp02_nullspace = "Null space",
   exp03_rollup = "Roll-up"
 )
 # Categorical slots 1-3 of the reference palette, checked for colour-vision
 # deficiency separation; shape carries alpha, so colour is not the only cue.
-EXPERIMENT_COLOURS <- c(Baseline = "#2a78d6", `Null space` = "#eb6834", `Roll-up` = "#1baf7a")
-ALPHA_SHAPES <- c(`alpha = 0.01` = 16, `alpha = 1` = 17, `raking (no alpha)` = 15)
-ALPHA_LABELS <- c(expression(alpha == 0.01), expression(alpha == 1), "raking (no alpha)")
+ACC_EXPERIMENT_COLOURS <- c(Baseline = "#2a78d6", `Null space` = "#eb6834", `Roll-up` = "#1baf7a")
+ACC_ALPHA_SHAPES <- c(`alpha = 0.01` = 16, `alpha = 1` = 17, `raking (no alpha)` = 15)
+ACC_ALPHA_LABELS <- c(expression(alpha == 0.01), expression(alpha == 1), "raking (no alpha)")
 
 # (table, key) -> panel column and metric.
-PANELS <- data.frame(
+ACC_PANELS <- data.frame(
   table = c("2", "2", "2t", "2t", "3", "3"),
   key = c("post_cover", "absz_p90", "post_cover", "absz_p90", "all_cover", "all_absz_p90"),
   target = c("Fitted block group", "Fitted block group", "Fitted tract", "Fitted tract",
              "Held-out block group", "Held-out block group"),
   metric = rep(c("cover", "absz_p90"), 3)
 )
-TARGETS <- unique(PANELS$target)
+ACC_TARGETS <- unique(ACC_PANELS$target)
 
 accuracy_data <- function(tables_dir) {
   files <- list.files(tables_dir, pattern = "^table(2|2t|3)_.*\\.csv$", full.names = TRUE)
@@ -66,25 +66,25 @@ accuracy_data <- function(tables_dir) {
     stop("expected table2_*.csv, table2t_*.csv and table3_*.csv in ", tables_dir)
   }
   raw <- do.call(rbind, lapply(files, read.csv, colClasses = c(table = "character")))
-  data <- merge(raw, PANELS, by = c("table", "key"))
-  data <- data[data$method %in% names(METHODS) & data$experiment %in% names(EXPERIMENTS), ]
+  data <- merge(raw, ACC_PANELS, by = c("table", "key"))
+  data <- data[data$method %in% names(ACC_METHODS) & data$experiment %in% names(ACC_EXPERIMENTS), ]
   # Raking is fitted once and scored in both alpha cells: keep one copy.
   raking <- data$method %in% c("ipf", "ipf_multinomial")
   data <- data[!raking | abs(data$alpha - min(data$alpha)) < 1e-9, ]
   data$alpha_label <- ifelse(data$method %in% c("ipf", "ipf_multinomial"), "raking (no alpha)",
                              paste("alpha =", format(data$alpha, drop0trailing = TRUE)))
-  data$experiment <- unname(EXPERIMENTS[data$experiment])
-  data$method <- unname(METHODS[data$method])
+  data$experiment <- unname(ACC_EXPERIMENTS[data$experiment])
+  data$method <- unname(ACC_METHODS[data$method])
   data <- data[!is.na(data$value), ]
   data[order(data$metric, data$target, data$method, data$experiment, data$alpha_label),
        c("metric", "target", "method", "experiment", "alpha_label", "value", "n")]
 }
 
 plot_accuracy <- function(data) {
-  data$method <- factor(data$method, levels = rev(unname(METHODS)))  # first at the top
-  data$experiment <- factor(data$experiment, levels = unname(EXPERIMENTS))
-  data$alpha_label <- factor(data$alpha_label, levels = names(ALPHA_SHAPES))
-  data$target <- factor(data$target, levels = TARGETS)
+  data$method <- factor(data$method, levels = rev(unname(ACC_METHODS)))  # first at the top
+  data$experiment <- factor(data$experiment, levels = unname(ACC_EXPERIMENTS))
+  data$alpha_label <- factor(data$alpha_label, levels = names(ACC_ALPHA_SHAPES))
+  data$target <- factor(data$target, levels = ACC_TARGETS)
   data$group <- interaction(data$experiment, data$alpha_label)
   dodge <- position_dodge(width = 0.75)
 
@@ -92,7 +92,7 @@ plot_accuracy <- function(data) {
   # independent of the fit, so sampling error alone gives |z| p90 = 1.645, and
   # 0.90 is a benchmark for coverage (below it is expected, as the interval is
   # for the true count). Fitted cells have no such benchmark.
-  held_out <- factor(TARGETS[startsWith(TARGETS, "Held-out")], levels = TARGETS)
+  held_out <- factor(ACC_TARGETS[startsWith(ACC_TARGETS, "Held-out")], levels = ACC_TARGETS)
   panel <- function(part, reference) {
     ggplot(part, aes(x = method, y = value, colour = experiment, shape = alpha_label,
                      group = group)) +
@@ -102,8 +102,8 @@ plot_accuracy <- function(data) {
       facet_wrap(~target, nrow = 1, drop = FALSE) +
       coord_flip() +
       scale_x_discrete(drop = FALSE) +  # the same rows in both panel rows
-      scale_colour_manual(values = EXPERIMENT_COLOURS, name = "Experiment", drop = FALSE) +
-      scale_shape_manual(values = ALPHA_SHAPES, labels = ALPHA_LABELS, name = NULL,
+      scale_colour_manual(values = ACC_EXPERIMENT_COLOURS, name = "Experiment", drop = FALSE) +
+      scale_shape_manual(values = ACC_ALPHA_SHAPES, labels = ACC_ALPHA_LABELS, name = NULL,
                          drop = FALSE) +
       labs(x = NULL) +
       theme_bw(base_size = 8) +

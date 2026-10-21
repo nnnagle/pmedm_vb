@@ -131,8 +131,45 @@ def mean(x: pd.Series) -> float:
 # Each statistic is (table, key, label, value) per (alpha, method).
 
 
+#: A central 90% interval's z and the interval score's level.
+Z90, LEVEL = 1.645, 0.10
+
+
+def interval_score(cells: pd.DataFrame) -> pd.Series:
+    """Each cell's interval score, in published SEs: the 90% predictive
+    interval's width, plus 2 / 0.10 times how far the published value falls
+    outside it (Gneiting & Raftery 2007, *JASA* 102). Lower is better; it
+    rewards an interval that is narrow and contains the value, so it judges
+    the centre and the spread together.
+
+    The predictive interval is for the published value: the posterior's own
+    90% interval (half-width h, its 5th to 95th percentiles) widened by the
+    published value's sampling error, the two half-widths added in quadrature,
+    sqrt(h^2 + (Z90 SE)^2), about the posterior mean. That is exact for normal
+    draws; built from the draws' quantiles rather than their sd, it is not set
+    by a few extreme draws. From the stored ``halfwidth_over_moe`` = h /
+    (Z90 SE) and ``abs_z`` = |mean - Y| / SE, the half-width in SEs is
+    Z90 sqrt(1 + halfwidth_over_moe^2).
+    """
+    half = Z90 * np.sqrt(1.0 + np.square(cells["halfwidth_over_moe"]))
+    return 2 * half + 2 / LEVEL * np.maximum(cells["abs_z"] - half, 0.0)
+
+
+def oracle_interval_score() -> float:
+    """The expected score of a method that knows every true count exactly
+    (no spread, so the interval is the true count +- Z90 SE): the published
+    value is then off by a standard normal number of SEs."""
+    from math import erf, exp, pi, sqrt
+
+    density = exp(-Z90 * Z90 / 2) / sqrt(2 * pi)
+    upper_tail = 0.5 * (1 - erf(Z90 / sqrt(2)))
+    return 2 * Z90 + 2 / LEVEL * 2 * (density - Z90 * upper_tail)
+
+
 def cell_statistics(cells: pd.DataFrame) -> list[dict]:
     rows = []
+    if {"abs_z", "halfwidth_over_moe"} <= set(cells.columns):
+        cells = cells.assign(interval_score=interval_score(cells))
 
     def add(table, key, label, subset, column, fn, sampled):
         part = cells[cells.subset.isin([subset] if isinstance(subset, str) else subset)]
@@ -153,11 +190,14 @@ def cell_statistics(cells: pd.DataFrame) -> list[dict]:
     add("3", "all_cover", "All: posterior 90% interval contains published", held_out,
         "covers_published", mean, True)
     add("3", "all_absz_p90", "All: |z| p90", held_out, "abs_z", quantile(0.90), True)
+    add("3", "all_is", "All: interval score / SE, mean", held_out, "interval_score", mean, True)
     for kind, subset in (("rel", held_out[0]), ("less", held_out[1])):
         name = "Related" if kind == "rel" else "Less related"
         add("3", f"{kind}_cover", f"{name}: posterior 90% interval contains published", subset,
             "covers_published", mean, True)
         add("3", f"{kind}_absz_p90", f"{name}: |z| p90", subset, "abs_z", quantile(0.90), True)
+        add("3", f"{kind}_is", f"{name}: interval score / SE, mean", subset, "interval_score",
+            mean, True)
     subset = "constrained_block_group"
     add("4", "mdiff_p50", "Median diff. p50", subset, "median_diff_ref_sd", quantile(0.50), False)
     add("4", "mdiff_p99", "Median diff. p99", subset, "median_diff_ref_sd", quantile(0.99), False)
@@ -230,8 +270,9 @@ def scores_statistics(scores: pd.DataFrame, whiten: str = "vb_skewed") -> list[d
 #: Decimals per statistic; "min" is whole minutes, "khat" median [min, max].
 DIGITS = {"fit": "min", "sampling": "min", "total": "min",
           "post_cover": 2, "absz_p90": 2, "hw_p50": 2,
-          "all_cover": 2, "all_absz_p90": 2,
-          "rel_cover": 2, "rel_absz_p90": 2, "less_cover": 2, "less_absz_p90": 2,
+          "all_cover": 2, "all_absz_p90": 2, "all_is": 2,
+          "rel_cover": 2, "rel_absz_p90": 2, "rel_is": 2,
+          "less_cover": 2, "less_absz_p90": 2, "less_is": 2,
           "mdiff_p50": 2, "mdiff_p99": 2, "width_p10": 2, "width_p50": 2, "khat": "khat",
           "walls": 3, "neff_min_p50": 1, "neff_lt": 3, "hhz_gt": 3, "hhz_p50": 2}
 
@@ -272,7 +313,12 @@ TITLES = {
           "only. Posterior 90% "
           "interval contains published, and |z|, as in Table 2. The interval is for the true "
           "count, while the published value also carries sampling error, so coverage below "
-          "0.90 is expected even for a correct model."),
+          "0.90 is expected even for a correct model. Interval score / SE: the width of a "
+          "90% predictive interval for the published value (about the posterior mean, the "
+          "posterior 90% half-width and 1.645 SE added in quadrature) plus 20 times how far "
+          "the published value falls outside it, in published SEs, mean over cells "
+          "(Gneiting and Raftery 2007); lower is better, and a method that knew every true "
+          "count would score about 4.1."),
     "4": ("Agreement with the reference HMC",
           "Block-group constraint cells of the four PUMAs pooled. Median diff.: |median - "
           "reference median| in reference sds; width ratio: 90% interval width over the "

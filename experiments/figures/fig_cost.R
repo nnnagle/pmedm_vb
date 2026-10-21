@@ -3,8 +3,13 @@
 # x: total minutes per PUMA (log scale), Table 1's "Total" (for HMC, the VB
 # Gaussian fit that whitens it plus sampling). One column of panels per alpha;
 # raking has no alpha and appears in both. Two rows:
-#   top     held-out |z| p90 (log scale), over every held-out block-group cell
-#           (Table 3's "All"): the accuracy of the estimates;
+#   top     held-out interval score (log scale), the mean over every held-out
+#           block-group cell of its 90% predictive interval's width plus 20
+#           times how far the published value falls outside it, in published
+#           SEs (Table 3's "All: interval score"; Gneiting & Raftery 2007): the
+#           accuracy of the whole distribution, centre and spread, on cells the
+#           fit never saw. Lower is better; the dashed line (about 4.1) is the
+#           expected score of a method that knew every true count;
 #   bottom  the share of draws with no single (record, block group) cell above
 #           1% of N (one minus Table 5's "Draws with a cell > 0.01 N"): how
 #           often a draw is a plausible population.
@@ -12,8 +17,8 @@
 # method's Baseline point to its Null space and to its Roll-up point, to show
 # what each remedy buys. IPF is shown by its multinomial draws only: the IPF fit
 # itself has the same cost and the same estimates. MAP + Laplace's held-out
-# |z| p90 (about 5 to 12) is left off the top row, which would otherwise squeeze
-# every other method into a strip; each panel notes its range.
+# score is far above the others and is left off the top row, which would
+# otherwise squeeze every other method into a strip; each panel notes its range.
 #
 # Reads table1_*.csv, table3_*.csv and table5_*.csv from the paper tables'
 # folder (experiments/paper_tables.py --out, e.g. <root>/tables_compare), and
@@ -33,7 +38,7 @@ suppressPackageStartupMessages({
 })
 
 # Display labels, in legend order.
-METHODS <- c(
+COST_METHODS <- c(
   ipf_multinomial = "IPF, multinomial",
   map_laplace = "MAP + Laplace",
   vb_gaussian = "VB Gaussian",
@@ -41,17 +46,21 @@ METHODS <- c(
   hmc_short = "HMC short",
   hmc_ref = "HMC reference"
 )
-EXPERIMENTS <- c(
+COST_EXPERIMENTS <- c(
   exp01_baseline = "Baseline",
   exp02_nullspace = "Null space",
   exp03_rollup = "Roll-up"
 )
 # Categorical slots 1-6 of the reference palette, checked for colour-vision
 # deficiency separation; shape (the experiment) and the legend are the other cues.
-METHOD_COLOURS <- setNames(c("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"),
-                           unname(METHODS))
-EXPERIMENT_SHAPES <- c(Baseline = 16, `Null space` = 17, `Roll-up` = 15)
-WALL <- 0.01  # Table 5's share of N that makes a cell a wall
+COST_METHOD_COLOURS <- setNames(c("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"),
+                           unname(COST_METHODS))
+COST_EXPERIMENT_SHAPES <- c(Baseline = 16, `Null space` = 17, `Roll-up` = 15)
+COST_WALL <- 0.01  # Table 5's share of N that makes a cell a wall
+# The expected interval score of a method that knew every true count: the
+# published value is then off by a standard normal number of SEs.
+COST_ORACLE_SCORE <- 2 * 1.645 +
+  2 / 0.10 * 2 * (dnorm(1.645) - 1.645 * pnorm(1.645, lower.tail = FALSE))
 
 cost_data <- function(tables_dir) {
   read <- function(number) {
@@ -67,20 +76,21 @@ cost_data <- function(tables_dir) {
   }
   data <- Reduce(function(a, b) merge(a, b, by = c("experiment", "alpha", "method")),
                  list(pick(read("1"), "total", "minutes"),
-                      pick(read("3"), "all_absz_p90", "heldout_absz_p90"),
+                      pick(read("3"), "all_is", "heldout_score"),
                       pick(read("5"), "walls", "walls")))
-  data <- data[data$method %in% names(METHODS) & data$experiment %in% names(EXPERIMENTS), ]
+  data <- data[data$method %in% names(COST_METHODS) &
+                 data$experiment %in% names(COST_EXPERIMENTS), ]
   data$plausible <- 1 - data$walls
   data$alpha_label <- paste("alpha ==", format(data$alpha, drop0trailing = TRUE))
-  data$experiment <- unname(EXPERIMENTS[data$experiment])
-  data$method <- unname(METHODS[data$method])
-  data <- data[order(data$alpha, data$method, match(data$experiment, EXPERIMENTS)), ]
-  data[, c("alpha_label", "method", "experiment", "minutes", "heldout_absz_p90", "plausible")]
+  data$experiment <- unname(COST_EXPERIMENTS[data$experiment])
+  data$method <- unname(COST_METHODS[data$method])
+  data <- data[order(data$alpha, data$method, match(data$experiment, COST_EXPERIMENTS)), ]
+  data[, c("alpha_label", "method", "experiment", "minutes", "heldout_score", "plausible")]
 }
 
 plot_cost <- function(data) {
-  data$method <- factor(data$method, levels = unname(METHODS))
-  data$experiment <- factor(data$experiment, levels = unname(EXPERIMENTS))
+  data$method <- factor(data$method, levels = unname(COST_METHODS))
+  data$experiment <- factor(data$experiment, levels = unname(COST_EXPERIMENTS))
   # One arrow per remedy, from the method's Baseline point.
   base <- data[data$experiment == "Baseline", ]
   remedies <- merge(data[data$experiment != "Baseline", ], base,
@@ -97,8 +107,8 @@ plot_cost <- function(data) {
       facet_wrap(~alpha_label, nrow = 1, labeller = label_parsed) +
       scale_x_log10(limits = range(data$minutes), breaks = c(1, 10, 100, 1000),
                     labels = c("1", "10", "100", "1,000")) +  # the same in both rows
-      scale_colour_manual(values = METHOD_COLOURS, name = "Method", drop = FALSE) +
-      scale_shape_manual(values = EXPERIMENT_SHAPES, name = "Experiment", drop = FALSE) +
+      scale_colour_manual(values = COST_METHOD_COLOURS, name = "Method", drop = FALSE) +
+      scale_shape_manual(values = COST_EXPERIMENT_SHAPES, name = "Experiment", drop = FALSE) +
       theme_bw(base_size = 8) +
       theme(panel.grid.minor = element_blank(),
             panel.grid.major = element_line(colour = "grey90", linewidth = 0.3),
@@ -110,20 +120,20 @@ plot_cost <- function(data) {
   off_scale <- do.call(rbind, lapply(split(data[laplace, ], data$alpha_label[laplace]), function(d)
     data.frame(alpha_label = d$alpha_label[1],
                label = sprintf("MAP + Laplace off scale (%.1f to %.1f)",
-                               min(d$heldout_absz_p90), max(d$heldout_absz_p90)))))
-  top <- panel("heldout_absz_p90", data[!laplace, ],
+                               min(d$heldout_score), max(d$heldout_score)))))
+  top <- panel("heldout_score", data[!laplace, ],
                remedies[remedies$method != "MAP + Laplace", ]) +
     geom_text(data = off_scale, aes(label = label), x = -Inf, y = -Inf, hjust = -0.05,
-              vjust = -0.8, size = 2.3, colour = METHOD_COLOURS[["MAP + Laplace"]],
+              vjust = -0.8, size = 2.3, colour = COST_METHOD_COLOURS[["MAP + Laplace"]],
               inherit.aes = FALSE) +
-    # sampling error alone would give |z| p90 = 1.645 on held-out cells
-    geom_hline(yintercept = 1.645, linetype = "dashed", linewidth = 0.3, colour = "grey45") +
+    geom_hline(yintercept = COST_ORACLE_SCORE, linetype = "dashed", linewidth = 0.3,
+               colour = "grey45") +
     scale_y_log10() +
-    labs(x = NULL, y = "Held-out |z| p90 (log scale)")
+    labs(x = NULL, y = "Held-out interval score / SE (log scale)")
   bottom <- panel("plausible") +
     scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
     labs(x = "Total minutes per PUMA (log scale)",
-         y = paste0("Share of draws with no cell above ", 100 * WALL, "% of N")) +
+         y = paste0("Share of draws with no cell above ", 100 * COST_WALL, "% of N")) +
     theme(strip.text = element_blank())
   top / bottom + plot_layout(guides = "collect")
 }
