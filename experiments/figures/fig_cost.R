@@ -125,7 +125,7 @@ plot_cost <- function(data) {
                   `Fitted tract` = "Interval score / SE:\nfitted tract",
                   `Held-out block group` = "Interval score / SE:\nheld-out block group",
                   `Held-out tract` = "Interval score / SE:\nheld-out tract",
-                  `Plausible draws` = paste0("Share of draws with no\ncell above ",
+                  `Plausible draws` = paste0("Plausible draws: share\nwith no cell > ",
                                              100 * COST_WALL, "% of N"))
 
   ggplot(shown, aes(x = minutes, y = value, colour = method)) +
