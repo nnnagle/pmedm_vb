@@ -3,7 +3,7 @@
 # x: total minutes per PUMA (log scale), Table 1's "Total" (for HMC, the VB
 # Gaussian fit that whitens it plus sampling). One column of panels per alpha;
 # raking has no alpha and appears in both. Two rows:
-#   top     held-out interval score (log scale), the mean over every held-out
+#   top     held-out interval score, the mean over every held-out
 #           block-group cell of its 90% predictive interval's width plus 20
 #           times how far the published value falls outside it, in published
 #           SEs (Table 3's "All: interval score"; Gneiting & Raftery 2007): the
@@ -123,13 +123,16 @@ plot_cost <- function(data) {
                                min(d$heldout_score), max(d$heldout_score)))))
   top <- panel("heldout_score", data[!laplace, ],
                remedies[remedies$method != "MAP + Laplace", ]) +
-    geom_text(data = off_scale, aes(label = label), x = -Inf, y = -Inf, hjust = -0.05,
-              vjust = -0.8, size = 2.3, colour = COST_METHOD_COLOURS[["MAP + Laplace"]],
+    geom_text(data = off_scale, aes(label = label), x = -Inf, y = Inf, hjust = -0.05,
+              vjust = 1.6, size = 2.3, colour = COST_METHOD_COLOURS[["MAP + Laplace"]],
               inherit.aes = FALSE) +
     geom_hline(yintercept = COST_ORACLE_SCORE, linetype = "dashed", linewidth = 0.3,
                colour = "grey45") +
-    scale_y_log10() +
-    labs(x = NULL, y = "Held-out interval score / SE (log scale)")
+    # The method legend comes from the bottom row, which has every method; this
+    # row lacks MAP + Laplace, so its own would differ and be drawn twice.
+    guides(colour = "none") +
+    scale_y_continuous(expand = expansion(mult = c(0.05, 0.18))) +  # room for the note
+    labs(x = NULL, y = "Held-out interval score / SE")
   bottom <- panel("plausible") +
     scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
     labs(x = "Total minutes per PUMA (log scale)",
