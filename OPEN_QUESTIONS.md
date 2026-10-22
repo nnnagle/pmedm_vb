@@ -9,6 +9,7 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 | 1 | HMC draws consistent with Sigma on fitted cells? | per cell at alpha 0.01: bulk yes, tails no; waiting on job 6457912 for pooled and d/m |
 | 2 | n_eff against D/H for IPF | not started: the share-distribution check is not written |
 | 3 | Why IPF does not converge | waiting: `ipf_diagnosis.py` submitted |
+| 4 | Tweedie error for small cells and zeros, keeping Sigma | idea; nothing written |
 
 ## Open
 
@@ -131,6 +132,42 @@ what would answer it. Move an entry to **Answered** with its answer when done.
   attributed to each.
 - **Answer from:** which causes account for IPF's misses, and whether any
   block group's tables are inconsistent on the data.
+
+### 4. A Tweedie error model for small cells and zeros, keeping Sigma?
+
+- **Status:** idea; nothing written or run.
+- **Why:** for large cells a Gaussian sampling error is plausible; for small
+  cells, and most obviously zeros, it cannot be (a published count is
+  nonnegative, often exactly zero). The model's error is Gaussian with Sigma
+  for every cell.
+- **Proposal:** Sigma(alpha) = D + (1 - alpha)(4/80) L L' (`sigma.py`). Keep the
+  low-rank, correlated part Gaussian; give the diagonal part a Tweedie error,
+  1 < p < 2 (compound Poisson-gamma: Jorgensen 1987, JRSS B; computation Dunn
+  and Smyth 2005, Statistics and Computing): mean the allocated count mu,
+  variance phi mu^p, positive probability at exactly zero, near Gaussian for
+  large mu. phi_i set so the variance at the published value is D_i: second
+  moments still Sigma there, correlations untouched. Motivation, not fact: a
+  published count is roughly a sum over a random number of sampled people of
+  their positive weights (ACS weights are also raked to controls).
+- **Effect on the model (derived from `pmedm_derivation.md`, not checked
+  against a reference):** the Gaussian term's conjugate gives the dual's
+  (1/2) lambda' Sigma lambda; with the split, the low-rank part stays
+  quadratic and each cell's Tweedie penalty (its deviance, convex in mu) adds
+  its own convex conjugate, so the dual stays convex. Precedent: `rake.py`'s
+  unbalanced Sinkhorn already uses a Poisson-type KL penalty (no zeros, no
+  correlations).
+- **Caution:** its penalty for over-allocation grows more slowly than the
+  Gaussian's (like sqrt(mu) at Y = 0 for p = 1.5), so it would allow more
+  over-allocation into small and zero cells, not less. Illustration, 72
+  people in a published zero: Gaussian (sd 10.6) about 23 nats; Tweedie with
+  the variance at mu = 1 set to 72, about 0.24 nats. A better error model, not
+  a way to trim extreme draws (that would act on concentration instead: a
+  tighter multiplier prior, the share cap `--share-cap`).
+- **Choices to make:** p (fixed, e.g. 1.5, or estimated across cell sizes);
+  how to calibrate phi for zero cells, where D_i is the modelled zero
+  variance but the Tweedie variance depends on mu.
+- **Answer from:** a fit with the Tweedie diagonal, compared with today's on
+  held-out accuracy, small-cell and zero-cell fit, and the draws' tails.
 
 ## Answered
 
