@@ -388,6 +388,10 @@ TITLES = {
 }
 
 
+#: Tables written once per experiment (LaTeX and Markdown; the CSV stays one file,
+#: which Figure C reads), the rest with the experiments side by side.
+PER_EXPERIMENT = {"1"}
+
 #: The sentence each table's note gains about the raking (no-alpha) rows.
 RAKING_NOTES = {
     "default": " IPF has no alpha: one fit per PUMA, shown once.",
@@ -433,19 +437,29 @@ def wide(stats: pd.DataFrame, table: str, experiments: list[tuple[str, str]]) ->
     return [(k, labels[k]) for k in keys], [label for _, label in experiments], panels
 
 
-def latex(stats, table, experiments) -> str:
+def latex(stats, table, experiments, part: str | None = None) -> str:
+    """The table as LaTeX; ``part`` (an experiment's name) for one written per
+    experiment: its title gains the experiment's label and its label the name."""
     groups, exps, panels = wide(stats, table, experiments)
     n = len(exps)
     title, note = TITLES[table]
     note = note + RAKING_NOTES.get(table, RAKING_NOTES["default"])
+    if part is not None:
+        title = f"{title}: {exps[0]}"
     lines = ["% requires \\usepackage{booktabs}",
              "\\begin{table}", "\\centering", f"\\caption{{{title}}}",
-             f"\\label{{tab:{table}}}",
-             "\\begin{tabular}{l" + "".join(" " + "r" * n for _ in groups) + "}", "\\toprule",
-             " & " + " & ".join(f"\\multicolumn{{{n}}}{{c}}{{{tex(label)}}}" for _, label in groups)
-             + " \\\\",
-             " ".join(f"\\cmidrule(lr){{{2 + i * n}-{1 + (i + 1) * n}}}" for i in range(len(groups))),
-             "Method & " + " & ".join(tex(e) for _ in groups for e in exps) + " \\\\", "\\midrule"]
+             f"\\label{{tab:{table}}}" if part is None else f"\\label{{tab:{table}-{part}}}",
+             "\\begin{tabular}{l" + "".join(" " + "r" * n for _ in groups) + "}", "\\toprule"]
+    if n == 1:
+        lines += ["Method & " + " & ".join(tex(label) for _, label in groups) + " \\\\",
+                  "\\midrule"]
+    else:
+        lines += [" & " + " & ".join(f"\\multicolumn{{{n}}}{{c}}{{{tex(label)}}}"
+                                     for _, label in groups) + " \\\\",
+                  " ".join(f"\\cmidrule(lr){{{2 + i * n}-{1 + (i + 1) * n}}}"
+                           for i in range(len(groups))),
+                  "Method & " + " & ".join(tex(e) for _ in groups for e in exps) + " \\\\",
+                  "\\midrule"]
     for i, (alpha, rows) in enumerate(panels):
         if i:
             lines.append("\\addlinespace")
@@ -467,12 +481,15 @@ def tex(text: str) -> str:
     return text.replace(" < ", " $<$ ").replace(" > ", " $>$ ")
 
 
-def markdown(stats, table, experiments) -> str:
+def markdown(stats, table, experiments, part: str | None = None) -> str:
     groups, exps, panels = wide(stats, table, experiments)
     title, note = TITLES[table]
     note = (note + RAKING_NOTES.get(table, RAKING_NOTES["default"])).replace(
         "no alpha", "no $\\alpha$").replace("each alpha's", "each $\\alpha$'s")
-    header = ["Method"] + [f"{label}: {e}".replace("|", "\\|") for _, label in groups for e in exps]
+    if part is not None:
+        title = f"{title}: {exps[0]}"
+    header = ["Method"] + [(label if len(exps) == 1 else f"{label}: {e}").replace("|", "\\|")
+                           for _, label in groups for e in exps]
     lines = [f"### Table {table}. {title}", "", "| " + " | ".join(header) + " |",
              "|" + "---|" + "---:|" * (len(header) - 1)]
     for alpha, rows in panels:
@@ -554,8 +571,17 @@ def main() -> None:
             continue
         slug = f"table{table}_" + re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_")
         stats[stats.table == table].to_csv(args.out / f"{slug}.csv", index=False)
-        (args.out / f"{slug}.tex").write_text(latex(stats, table, experiments))
-        md.append(markdown(stats, table, experiments))
+        if table not in PER_EXPERIMENT:
+            (args.out / f"{slug}.tex").write_text(latex(stats, table, experiments))
+            md.append(markdown(stats, table, experiments))
+            continue
+        (args.out / f"{slug}.tex").unlink(missing_ok=True)  # the side-by-side version
+        for experiment in experiments:
+            name = experiment[0]
+            one = stats[stats.experiment == name]
+            short = re.sub(r"^exp\d+_", "", name)
+            (args.out / f"{slug}_{short}.tex").write_text(latex(one, table, [experiment], name))
+            md.append(markdown(one, table, [experiment], name))
     (args.out / "tables.md").write_text("\n".join(md))
     pd.concat(samples, ignore_index=True).to_csv(args.out / "draws_sample.csv", index=False)
     # Last, so that a run cut short leaves the folder unstamped (run_paper.py).
