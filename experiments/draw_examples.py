@@ -12,7 +12,8 @@ records among H households drawn by the shares, over H).
 The four block groups (``case``), each taken once, in this order:
 
 - ``ipf``: the IPF fit's smallest D/H;
-- ``hmc``: the smallest median D/H over ``--select-draws`` HMC reference draws;
+- ``hmc``: the smallest median D/H over the HMC reference draws (``--ref-draws``,
+  the trace thinned as the scoring does: the scored draws);
 - ``vb``: the smallest median D/H over ``--select-draws`` VB Gaussian draws;
 - ``typical``: the block group whose median D/H over the HMC reference draws
   is the median over the eligible block groups.
@@ -24,9 +25,8 @@ records over ``--min-share`` of the block group's households, and one row
 (record -1) for all the others together, with each draw's D/H (``dh``) and
 n_eff, and
 ``highlight``: the rank (1 to ``--top``) of the case's records with the largest
-mean share over the shown draws, averaged over the methods but the IPF fit
-(IPF multinomial stands for it; counting both would count the IPF solution
-twice), empty for the rest::
+mean share over all the HMC reference draws, empty for the rest: the records
+the posterior favours there, against which every method's bars are read::
 
     PMEDM_VB_DATA=/lustre/isaac24/scratch/$USER/pmedm_vb_paper_data \\
     $CONDA_PREFIX/bin/python experiments/draw_examples.py \\
@@ -67,8 +67,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--puma", required=True)
     parser.add_argument("--alpha", type=float, default=0.01)
     parser.add_argument("--hh-min", type=float, default=100)
+    parser.add_argument("--ref-draws", type=int, default=4000,
+                        help="HMC reference draws, thinned as the scoring does: they choose "
+                             "the block groups and the coloured records")
     parser.add_argument("--select-draws", type=int, default=400,
-                        help="VB and HMC draws that choose the block groups")
+                        help="VB Gaussian draws that choose its block group")
     parser.add_argument("--draws", type=int, default=12, help="draws shown per method")
     parser.add_argument("--top", type=int, default=5, help="records highlighted per case")
     parser.add_argument("--min-share", type=float, default=0.002,
@@ -160,11 +163,13 @@ def main() -> None:
         raise SystemExit(f"only {zones.size} block groups over {args.hh_min:g} households")
 
     # Every method's household shares in every eligible block group: all the
-    # selection draws' D/H, and the shown draws' shares.
+    # selection draws' D/H, and the shown draws' shares; and the HMC reference's
+    # mean shares over all its draws.
     dh, shares = {}, {}
+    ref_mean = np.zeros((zones.size, households.size))
     for method in METHODS:
-        margs[method].draws = {"ipf": 1, "ipf_multinomial": args.draws}.get(method,
-                                                                         args.select_draws)
+        margs[method].draws = {"ipf": 1, "ipf_multinomial": args.draws,
+                               "hmc_ref": args.ref_draws}.get(method, args.select_draws)
         source, _ = cm.method_draws(margs[method], inputs, rng, hierarchy)
         n = source["lam"].shape[1] if "lam" in source else margs[method].draws
         shown = set(rng.choice(n, min(args.draws, n), replace=False).tolist())
@@ -172,6 +177,8 @@ def main() -> None:
         for d, W in enumerate(weights(source, inputs)):
             s = household_shares(W, zones, households)
             values.append(distinct_per_household(s, H))
+            if method == "hmc_ref":
+                ref_mean += s / n
             if d in shown:
                 kept.append(s)
         dh[method], shares[method] = np.array(values), np.array(kept)
@@ -182,8 +189,8 @@ def main() -> None:
         zone = int(zones[position])
         geoid = str(inputs.zones.iloc[zone].iloc[0])
         by_method = {m: shares[m][:, position, :] for m in METHODS}
-        pooled = np.mean([s.mean(axis=0) for m, s in by_method.items() if m != "ipf"], axis=0)
-        highlight = {int(j): rank + 1 for rank, j in enumerate(np.argsort(-pooled)[:args.top])}
+        favoured = np.argsort(-ref_mean[position])[:args.top]
+        highlight = {int(j): rank + 1 for rank, j in enumerate(favoured)}
         print(f"{case}: block group {geoid} (row {zone}), {published[zone]:,.0f} households; "
               f"D/H IPF {dh['ipf'][0, position]:.3f}, HMC reference median "
               f"{np.median(dh['hmc_ref'][:, position]):.3f}, VB Gaussian median "
@@ -205,7 +212,8 @@ def main() -> None:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(args.out, index=False)
     write_stamp(args.out, EXAMPLES_SCRIPTS, experiment=args.experiment, puma=args.puma,
-                alpha=args.alpha, draws=args.draws, select_draws=args.select_draws,
+                alpha=args.alpha, draws=args.draws, ref_draws=args.ref_draws,
+                select_draws=args.select_draws,
                 seed=args.seed)
     print(f"wrote {len(frame):,} rows to {args.out}")
 

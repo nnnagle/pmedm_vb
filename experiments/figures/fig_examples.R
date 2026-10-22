@@ -5,12 +5,12 @@
 # median over draws) of the HMC reference, the IPF fit and VB Gaussian. One row
 # per method. Each bar is one draw, a whole synthetic population: the block
 # group's households stacked by the household record they copy, largest first.
-# The block group's five records with the largest mean share over the shown
-# draws (averaged over the methods but the IPF fit, which IPF multinomial
-# stands for) are coloured, the same record the same colour in every bar of the
-# column; every other record is grey, with records under 1% of the households
-# together in the light grey at the top (EXAMPLES_SMALL). The number above
-# each bar is its D/H, distinct household records per household (as Figure B).
+# The block group's five records with the largest mean share over all 4,000 HMC
+# reference draws -- the records the posterior favours there -- are coloured,
+# the same record the same colour in every bar of the column; every other
+# record is grey, with records under 1% of the households together in the light
+# grey at the top (EXAMPLES_SMALL). The number above each bar is its D/H,
+# distinct household records per household (as Figure B).
 # IPF is one fit: its one bar is repeated.
 #
 # Reads draw_examples.csv from the paper tables' folder (experiments/
@@ -104,7 +104,7 @@ plot_examples <- function(data) {
     scale_y_continuous(breaks = c(0, 0.5, 1), labels = c("0", "50%", "100%"),
                        expand = expansion(mult = c(0, 0.14))) +
     scale_fill_manual(values = EXAMPLES_COLOURS, drop = FALSE,
-                      name = "Household records, by mean share\nin the block group") +
+                      name = "Household records, by the HMC\nreference's mean share") +
     labs(x = "Draws (IPF: its one fit, repeated); above each bar its D/H",
          y = "Share of the block group's households") +
     theme_bw(base_size = 8) +
