@@ -1,13 +1,22 @@
 # Open questions
 
 Questions under investigation, so that several can be worked on at once. Each
-entry: the question, why it came up, what is running or needed, and what would
-answer it. Move an entry to **Answered** with its answer when done.
+entry: its status, the question, why it came up, what is running or needed, and
+what would answer it. Move an entry to **Answered** with its answer when done.
+
+| # | Question | Status (2026-10-22) |
+|---|---|---|
+| 1 | Tails of single HMC draws' \|z\| | waiting: `draw_z.py` rerun with per-cell statistics submitted |
+| 2 | n_eff against D/H for IPF | not started: the share-distribution check is not written |
+| 3 | Why IPF does not converge | waiting: `ipf_diagnosis.py` submitted |
 
 ## Open
 
 ### 1. How heavy are the tails of single HMC draws against the published tables?
 
+- **Status:** waiting on the `draw_z.py` rerun with the per-cell statistics
+  (commit 6ef931e); results in `$R/draw_z_cells.csv` and the "Per cell over
+  the draws" part of its slurm log.
 - **Why:** in PUMA 4701503 (Baseline, alpha 0.01), the least diverse HMC
   reference draw (draw 1457 of 4,000) puts 72 women aged 70-75 in block group
   470930038014, where the published count is 0 (modelled SE 8.5): z = +8.5 on a
@@ -35,12 +44,15 @@ answer it. Move an entry to **Answered** with its answer when done.
   (variance 2-3 for counts of 1-2, `floored_variances`), and the runs use no
   floor, so a miss of tens of people is z of 10-20. The 4701503 draw's z = +8.5
   stands out only because the typical draw fits that cell (median 1.0).
-- **Next (proposed):** per cell, over all draws: how often |z| > 5.9, its
-  median z, published value and SE; the most persistent misfits listed. That
-  separates persistent misfit from excursions and tests the small-SE reading.
+- **Running:** per cell, over all draws: how often |z| > 5.9, its median z,
+  published value and SE; persistent misfits (median |z| > 5.9) against
+  excursions per group, and the most persistent misfits listed. That separates
+  persistent misfit from excursions and tests the small-SE reading.
 
 ### 2. Why do n_eff and D/H rank IPF against the posterior differently?
 
+- **Status:** not started; nothing running. Next: write the share-distribution
+  check under **Needed**.
 - **Why:** at alpha 0.01, IPF's smallest block-group n_eff (about 12) is above
   the HMC reference's median (about 9), but its smallest D/H (about 0.06) is
   below HMC's median (about 0.11) (Figure B, n_eff and D/H versions). Likewise
@@ -66,6 +78,8 @@ answer it. Move an entry to **Answered** with its answer when done.
 
 ### 3. Why doesn't IPF converge?
 
+- **Status:** waiting on `ipf_diagnosis.py` (commit fecf662); results in
+  `$R/ipf_diagnosis/ipf_diagnosis.txt` and `ipf_cells.csv`.
 - **Why:** none of the 12 IPF fits (3 experiments x 4 PUMAs) converged: all
   stopped at 2,000 sweeps. Worst miss |log(m / Y)|: Baseline 1.9-2.8, Null
   space 2.1-2.9, Roll-up 0.53-1.58. Infeasible rows (a published nonzero cell
@@ -78,7 +92,7 @@ answer it. Move an entry to **Answered** with its answer when done.
   attainable by reweighting the PUMA's records: missing carriers, carriers
   removed by published zeros, or records whose bundles of categories cannot add
   up to every margin at once.
-- **Running next:** `experiments/ipf_diagnosis.py` (rewritten for paper_v3):
+- **Running:** `experiments/ipf_diagnosis.py` (rewritten for paper_v3):
   per experiment and PUMA, on IPF's fitted cells, no-carrier and removed-by-zero
   cells, same-universe table totals that differ (the tables' consistency on the
   data), and an exact LP per block group: can nonnegative weights meet every
