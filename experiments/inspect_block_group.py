@@ -90,6 +90,10 @@ def parse_args() -> argparse.Namespace:
                         help="--least-diverse: the draws the scoring thinned the trace to")
     parser.add_argument("--pums", action="store_true",
                         help="--least-diverse: the records' PUMS household attributes")
+    parser.add_argument("--cells", nargs="+", default=[],
+                        help="--least-diverse: cells (constraint or held-out names, e.g. "
+                             "B19001.ge_200000) to report in the block group and its tract: "
+                             "published, allocated, and the records that supply them")
     parser.add_argument("--out", type=Path, required=True)
     return parser.parse_args()
 
@@ -221,6 +225,35 @@ def least_diverse_report(args, spec, exp, inputs, households, published_hh) -> l
                          heldout.Y[level][area, keep], np.sqrt(heldout.v[level][area, keep]), rows))
         return sets
 
+    def asked_cells(zone: int) -> list[tuple]:
+        """(label, published, SE, areas summed, carrying records, their counts) for each
+        --cells name, wherever it is a constraint or held-out cell."""
+        t = int(tracts[zone])
+        in_tract = np.flatnonzero(tracts == t)
+        sources = [("block group", inputs.bg_constraints, inputs.X_B, inputs.Y_B[zone],
+                    lambda k: variance[inputs.Y_T.size + k * n_b + zone], [zone]),
+                   ("tract", inputs.tract_constraints, inputs.X_T, inputs.Y_T[t],
+                    lambda k: variance[k * n_t + t], in_tract)]
+        for level, area, rows in (("block group", zone, [zone]), ("tract", t, in_tract)):
+            sources.append((f"{level}, held out", heldout.names[level], heldout.X[level],
+                            heldout.Y[level][area],
+                            lambda k, level=level, area=area: heldout.v[level][area, k], rows))
+        out = []
+        for name in args.cells:
+            found = False
+            for level, names, X, Y, var, rows in sources:
+                if name not in names:
+                    continue
+                found = True
+                k = list(names).index(name)
+                column = np.asarray(sp.csr_matrix(X)[:, k].todense()).ravel()
+                carriers = np.flatnonzero(column > 0)
+                out.append((f"{name} [{level}]", float(Y[k]), float(np.sqrt(var(k))), rows,
+                            carriers, column[carriers]))
+            if not found:
+                raise SystemExit(f"--cells {name}: not a constraint or held-out cell of this PUMA")
+        return out
+
     serial = inputs.units["SERIALNO"].astype(str).to_numpy()
     lines = [f"{args.experiment}, PUMA {args.puma}, alpha {args.alpha:g}: the {len(picks)} HMC "
              f"reference draws (of {n}) with the smallest block-group D/H, over the "
@@ -229,15 +262,20 @@ def least_diverse_report(args, spec, exp, inputs, households, published_hh) -> l
         position = int(np.argmin(dh[d]))
         zone = int(zones[position])
         sets = cell_sets(zone)
-        # Every draw's allocation in this block group and its tract's cells.
+        asked = asked_cells(zone)
+        # Every draw's allocation in this block group and its tract's cells, and
+        # each asked cell's contribution from every record carrying it.
         s_all = np.empty((n, hh.size))
         outcomes = [np.empty((n, len(cols))) for _, _, _, cols, _, _, _ in sets]
         X_sets = [sp.csr_matrix(X)[:, cols].T.tocsr() for _, _, X, cols, _, _, _ in sets]
+        supplied = [np.empty((n, carriers.size)) for *_, carriers, _ in asked]
         for e in range(n):
             W = weights(e)
             s_all[e] = shares(W, [zone])[0]
             for i, (_, _, _, _, _, _, rows) in enumerate(sets):
                 outcomes[i][e] = X_sets[i] @ W[rows].sum(axis=0)
+            for i, (_, _, _, rows, carriers, x) in enumerate(asked):
+                supplied[i][e] = W[rows][:, carriers].sum(axis=0) * x
         own = dh[:, position]
         lines += [f"Draw {d} (#{rank}): block group {inputs.zones.iloc[zone].iloc[0]} (row {zone}), "
                   f"{published_hh[zone]:,.0f} households",
@@ -263,7 +301,31 @@ def least_diverse_report(args, spec, exp, inputs, households, published_hh) -> l
                     worst.append(f"    {name.split(',')[0]:<11} {names[cols[k]]:<60} published "
                                  f"{Y[k]:7.1f} (SE {se[k]:5.1f}); this draw {values[d, k]:7.1f}, "
                                  f"z {z[d, j]:+5.1f}; all draws' median {median[j]:7.1f}")
-        lines += ["  This draw's worst held-out cells:", *worst,
+        lines.append("  This draw's worst held-out cells:")
+        lines += worst
+        if asked:
+            lines.append("  Cells asked for (--cells): published (SE); allocated in this draw, "
+                         "z; all draws' median [5%, 95%]; the records supplying them")
+        for (label, Y, se, _, carriers, x), values in zip(asked, supplied):
+            total = values.sum(axis=1)
+            z = (total[d] - Y) / se if se > 0 else np.nan
+            n_gq = int((~households[carriers]).sum())
+            largest = values.max(axis=1) / np.where(total > 0, total, np.nan)
+            often = np.bincount(values.argmax(axis=1), minlength=carriers.size)
+            lines += [f"    {label}: {Y:,.1f} ({se:,.1f}); {total[d]:,.1f}, z {z:+.1f}; "
+                      f"{np.median(total):,.1f} [{np.quantile(total, 0.05):,.1f}, "
+                      f"{np.quantile(total, 0.95):,.1f}]",
+                      f"      carried by {carriers.size - n_gq} household and {n_gq} group-quarters "
+                      f"records; the largest supplier's share of the cell over all draws: median "
+                      f"{np.nanmedian(largest):.0%}, 95% {np.nanquantile(largest, 0.95):.0%} "
+                      f"(most often record {int(carriers[often.argmax()])}, in "
+                      f"{often.max() / n:.0%} of draws); in this draw:"]
+            for j in np.argsort(-values[d])[:3]:
+                unit = int(carriers[j])
+                lines.append(f"        record {unit} (SERIALNO {serial[unit]}): {values[d, j]:,.1f} "
+                             f"({values[d, j] / total[d]:.0%}); all draws' median "
+                             f"{np.median(values[:, j]):,.1f}")
+        lines += [
                   "  Records with the largest shares in this draw (share; copies, share x H; "
                   "share over all draws, median and 95%):"]
         top = np.argsort(-s_all[d])[:args.top]
