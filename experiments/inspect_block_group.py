@@ -18,6 +18,23 @@ the HMC reference:
   the HMC draws, its design weight and the published categories it contributes
   to (its row of X, the people or units it adds to each).
 
+With ``--least-diverse N`` it reports instead on the N HMC reference draws (of
+the ``--scored-draws`` the scoring thins the trace to, so the same draws) whose
+smallest block-group D/H is smallest -- D the expected number of distinct
+household records among the block group's H published households drawn by the
+shares, as compare_methods.py -- and, for each, on the block group giving it:
+
+- its D/H in the draw against its D/H over all the draws;
+- the draw's fit there against the other draws': the root mean square z,
+  (allocated - published) / SE, over the block group's and its tract's
+  constraint leaf cells and held-out leaf cells, with the draw's worst held-out
+  cells; copying a few records many times is unrealistic in a way the data can
+  show when it spoils the held-out tables the fit never saw;
+- the records with the largest shares in the draw: each one's PUMS SERIALNO,
+  share and copies (share x H), its share over all the draws, its published
+  categories and, with ``--pums``, its household's PUMS attributes, which no
+  table constrains (``PUMS_HOUSING``, and each person's age and sex).
+
 Writes the report to ``--out`` and prints it. Reads the experiment's saved fits,
 so it needs ``PMEDM_VB_DATA`` pointing at the experiment's data::
 
@@ -40,12 +57,19 @@ import scipy.sparse as sp
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from run_experiment import area_slug, fit_name, rake_output  # noqa: E402
+import compare_methods as cm  # noqa: E402
+from run_experiment import area_slug, fit_name, rake_output, study_area  # noqa: E402
 
 from pmedm_vb.assemble.allcells import is_subtotal, table_leaves  # noqa: E402
+from pmedm_vb.assemble.heldout import HeldOut  # noqa: E402
 from pmedm_vb.assemble.inputs import PMEDMInputs  # noqa: E402
 from pmedm_vb.config import processed_dir  # noqa: E402
-from pmedm_vb.solvers.base import weights_from_lambda  # noqa: E402
+from pmedm_vb.solvers.base import ConstraintOperator, weights_from_lambda  # noqa: E402
+
+#: Household attributes shown with --pums, where the vintage has them: persons,
+#: household type, tenure, units in structure, bedrooms, vehicles, household
+#: income (not ADJINC-adjusted) and when moved in.
+PUMS_HOUSING = ("NP", "HHT", "TEN", "BLD", "BDSP", "VEH", "HINCP", "MV")
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,6 +84,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hh-min", type=float, default=100)
     parser.add_argument("--draws", type=int, default=400, help="HMC reference draws used")
     parser.add_argument("--top", type=int, default=8, help="records listed")
+    parser.add_argument("--least-diverse", type=int, default=0,
+                        help="report on the N HMC reference draws with the smallest D/H instead")
+    parser.add_argument("--scored-draws", type=int, default=4000,
+                        help="--least-diverse: the draws the scoring thinned the trace to")
+    parser.add_argument("--pums", action="store_true",
+                        help="--least-diverse: the records' PUMS household attributes")
     parser.add_argument("--out", type=Path, required=True)
     return parser.parse_args()
 
@@ -91,6 +121,167 @@ def describe_record(unit: int, inputs: PMEDMInputs, x_b: sp.csr_matrix) -> str:
     return "; ".join(parts)
 
 
+def leaf_cells(names) -> np.ndarray:
+    return np.array([k for k, name in enumerate(names) if not is_subtotal(name)], dtype=int)
+
+
+def value_labels(area, variables) -> dict[str, dict[str, str]]:
+    """Each variable's single-code value labels, from the PUMS data dictionary."""
+    from pmedm_vb.data import pums
+
+    frame = pums.data_dictionary(area)
+    frame = frame[(frame["record"] == "VAL") & frame["variable"].isin(variables)
+                  & (frame["lo"] == frame["hi"])]
+    out: dict[str, dict[str, str]] = {}
+    for row in frame.itertuples():
+        out.setdefault(row.variable, {})[str(row.lo).lstrip("0") or "0"] = row.label
+    return out
+
+
+def code_of(value) -> str:
+    if pd.isna(value):
+        return "NA"
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return str(value).lstrip("0") or "0"
+
+
+def pums_attributes(area, serials: list[str]) -> dict[str, str]:
+    """Each household's PUMS_HOUSING attributes, and its persons' ages and sexes."""
+    from pmedm_vb.data import pums
+
+    declared = set(pums.variables(area)["variable"])
+    housing_vars = [v for v in PUMS_HOUSING if v in declared]
+    person_vars = [v for v in ("AGEP", "SEX") if v in declared]
+    housing = pums.load_pums(area, housing_vars, record_type="housing", replicate_weights=False)
+    housing = housing[housing["SERIALNO"].isin(serials)].set_index("SERIALNO")
+    persons = pums.load_pums(area, person_vars, record_type="person", replicate_weights=False)
+    persons = persons[persons["SERIALNO"].isin(serials)]
+    labels = value_labels(area, housing_vars + ["SEX"])
+    out = {}
+    for serial in serials:
+        parts = []
+        if serial in housing.index:
+            row = housing.loc[serial]
+            for v in housing_vars:
+                code = code_of(row[v])
+                parts.append(f"{v}={labels.get(v, {}).get(code, code)[:40]}")
+        members = persons[persons["SERIALNO"] == serial].sort_values("SPORDER")
+        if len(members) and "AGEP" in members:
+            sexes = labels.get("SEX", {})
+            parts.append("persons " + ", ".join(
+                f"{code_of(m.AGEP)}{sexes.get(code_of(m.SEX), '?')[:1] if 'SEX' in members else ''}"
+                for m in members.itertuples()))
+        out[serial] = "; ".join(parts) if parts else "not found in the PUMS files"
+    return out
+
+
+def least_diverse_report(args, spec, exp, inputs, households, published_hh) -> list[str]:
+    """The ``--least-diverse`` report (see the module docstring)."""
+    hh = np.flatnonzero(households)
+    zones = np.flatnonzero(published_hh > args.hh_min)
+    H = published_hh[zones]
+    trace = exp / args.puma / "hmc_ref" / f"{fit_name(spec, args.puma, args.alpha)}_trace.npz"
+    with np.load(trace) as saved:
+        lam = cm.thinned(saved["lam"], args.scored_draws)
+    op = ConstraintOperator(inputs)
+    n = lam.shape[1]
+
+    def weights(d: int) -> np.ndarray:
+        return inputs.N * np.exp(cm.log_p_of(inputs, op, lam[:, d]))
+
+    def shares(W: np.ndarray, rows) -> np.ndarray:
+        w = W[np.ix_(rows, hh)]
+        return w / w.sum(axis=1, keepdims=True)
+
+    dh = np.empty((n, zones.size))
+    for d in range(n):
+        dh[d] = cm.expected_distinct(shares(weights(d), zones), H) / H
+    picks = np.argsort(dh.min(axis=1), kind="stable")[:args.least_diverse]
+
+    # The cell sets of each pick's block group and tract: (name, level, columns
+    # of X, published, SE, the areas summed).
+    heldout = HeldOut.load(processed_dir() / "inputs" / area_slug(spec["area"]) / args.puma)
+    variance = inputs.floored_variances(None)
+    tracts = inputs.zone_tracts()
+    n_t, n_b = inputs.Y_T.shape[0], inputs.Y_B.shape[0]
+
+    def cell_sets(zone: int) -> list[tuple]:
+        t = int(tracts[zone])
+        in_tract = np.flatnonzero(tracts == t)
+        bg, tr = leaf_cells(inputs.bg_constraints), leaf_cells(inputs.tract_constraints)
+        sets = [("block group, constraints", inputs.bg_constraints, inputs.X_B, bg,
+                 inputs.Y_B[zone, bg], np.sqrt(variance[inputs.Y_T.size + bg * n_b + zone]), [zone]),
+                ("tract, constraints", inputs.tract_constraints, inputs.X_T, tr,
+                 inputs.Y_T[t, tr], np.sqrt(variance[tr * n_t + t]), in_tract)]
+        for level, area, rows in (("block group", zone, [zone]), ("tract", t, in_tract)):
+            names = heldout.names[level]
+            keep = leaf_cells(names)
+            sets.append((f"{level}, held out", names, heldout.X[level], keep,
+                         heldout.Y[level][area, keep], np.sqrt(heldout.v[level][area, keep]), rows))
+        return sets
+
+    serial = inputs.units["SERIALNO"].astype(str).to_numpy()
+    lines = [f"{args.experiment}, PUMA {args.puma}, alpha {args.alpha:g}: the {len(picks)} HMC "
+             f"reference draws (of {n}) with the smallest block-group D/H, over the "
+             f"{zones.size} block groups with more than {args.hh_min:g} households", ""]
+    for rank, d in enumerate(picks, start=1):
+        position = int(np.argmin(dh[d]))
+        zone = int(zones[position])
+        sets = cell_sets(zone)
+        # Every draw's allocation in this block group and its tract's cells.
+        s_all = np.empty((n, hh.size))
+        outcomes = [np.empty((n, len(cols))) for _, _, _, cols, _, _, _ in sets]
+        X_sets = [sp.csr_matrix(X)[:, cols].T.tocsr() for _, _, X, cols, _, _, _ in sets]
+        for e in range(n):
+            W = weights(e)
+            s_all[e] = shares(W, [zone])[0]
+            for i, (_, _, _, _, _, _, rows) in enumerate(sets):
+                outcomes[i][e] = X_sets[i] @ W[rows].sum(axis=0)
+        own = dh[:, position]
+        lines += [f"Draw {d} (#{rank}): block group {inputs.zones.iloc[zone].iloc[0]} (row {zone}), "
+                  f"{published_hh[zone]:,.0f} households",
+                  f"  D/H {own[d]:.3f} (~{own[d] * published_hh[zone]:.0f} distinct records); "
+                  f"over all draws median {np.median(own):.3f}, 5% {np.quantile(own, 0.05):.3f}, "
+                  f"this draw's rank {int((own < own[d]).sum()) + 1} of {n}; the block group's "
+                  f"median D/H ranks {int((np.median(dh, axis=0) < np.median(own)).sum()) + 1} "
+                  f"of {zones.size} (1 = least diverse)",
+                  "  Fit, root mean square z over the cells with an SE (this draw; all draws' "
+                  "5%, 50%, 95%; this draw's percentile):"]
+        worst = []
+        for (name, names, _, cols, Y, se, _), values in zip(sets, outcomes):
+            ok = se > 0
+            z = (values[:, ok] - Y[ok]) / se[ok]
+            rms = np.sqrt(np.mean(np.square(z), axis=1))
+            lines.append(f"    {name:<26} {rms[d]:6.2f};  {np.quantile(rms, 0.05):6.2f} "
+                         f"{np.median(rms):6.2f} {np.quantile(rms, 0.95):6.2f};  "
+                         f"{(rms < rms[d]).mean():.0%}  ({int(ok.sum())} cells)")
+            if "held out" in name:
+                median = np.median(values[:, ok], axis=0)
+                for j in np.argsort(-np.abs(z[d]))[:3]:
+                    k = np.flatnonzero(ok)[j]
+                    worst.append(f"    {name.split(',')[0]:<11} {names[cols[k]]:<60} published "
+                                 f"{Y[k]:7.1f} (SE {se[k]:5.1f}); this draw {values[d, k]:7.1f}, "
+                                 f"z {z[d, j]:+5.1f}; all draws' median {median[j]:7.1f}")
+        lines += ["  This draw's worst held-out cells:", *worst,
+                  "  Records with the largest shares in this draw (share; copies, share x H; "
+                  "share over all draws, median and 95%):"]
+        top = np.argsort(-s_all[d])[:args.top]
+        attributes = (pums_attributes(study_area(spec["area"]), [serial[hh[j]] for j in top])
+                      if args.pums else {})
+        x_b = sp.csr_matrix(inputs.X_B)
+        for j in top:
+            unit = int(hh[j])
+            lines += [f"    record {unit}, SERIALNO {serial[unit]}: {s_all[d, j]:.3f}; "
+                      f"{s_all[d, j] * published_hh[zone]:.0f} copies; "
+                      f"{np.median(s_all[:, j]):.3f}, {np.quantile(s_all[:, j], 0.95):.3f}",
+                      f"      tables: {describe_record(unit, inputs, x_b)}"]
+            if args.pums:
+                lines.append(f"      PUMS: {attributes[serial[unit]]}")
+        lines.append("")
+    return lines
+
+
 def main() -> None:
     args = parse_args()
     exp = args.root / args.experiment
@@ -101,6 +292,13 @@ def main() -> None:
     tenure = table_leaves(inputs.bg_constraints, "B25003")
     published_hh = inputs.Y_B[:, tenure].sum(axis=1)
     eligible = published_hh > args.hh_min
+    if args.least_diverse:
+        report = "\n".join(least_diverse_report(args, spec, exp, inputs, households,
+                                                 published_hh))
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(report + "\n")
+        print(report)
+        return
 
     with np.load(rake_output(spec, exp, args.puma, "ipf")) as saved:
         W_ipf = np.asarray(saved["W"], dtype=float)

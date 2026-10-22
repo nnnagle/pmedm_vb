@@ -146,12 +146,16 @@ def git_commit() -> str:
     return out.stdout.strip() + ("-dirty" if dirty else "")
 
 
-def area_slug(area: dict) -> str:
+def study_area(area: dict):
     from pmedm_vb.config import StudyArea
 
     return StudyArea(name=area["name"], state=area.get("state", "47"),
                      counties=tuple(area.get("counties", ["093"])), year=area["year"],
-                     span=area["span"]).slug
+                     span=area["span"])
+
+
+def area_slug(area: dict) -> str:
+    return study_area(area).slug
 
 
 def data_dir(spec: dict) -> Path:
