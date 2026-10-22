@@ -8,7 +8,7 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 |---|---|---|
 | 1 | HMC draws consistent with Sigma on fitted cells? | alpha 0.01: bulk matches Sigma's diagonal, tails do not, correlations do not (d/m 18-27) |
 | 2 | n_eff against D/H for IPF | not started: the share-distribution check is not written |
-| 3 | Why IPF does not converge | `ipf_diagnosis.py` finished; output not yet read |
+| 3 | Why IPF does not converge | exp03 4701504: every miss is in a block group the LP cannot meet exactly; other PUMAs and experiments not yet read |
 | 4 | Tweedie error for small cells and zeros, keeping Sigma | zero cells implemented (`+tweedie<w>`); VB unstable; waiting on job 6459108 (HMC starts from the MAP); exp04 not run |
 | 5 | A k = 0 squared-Gaussian dual term: count-like cells with Sigma exact | idea; checked numerically on a 4-cell example; nothing implemented |
 
@@ -138,7 +138,7 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 
 ### 3. Why doesn't IPF converge?
 
-- **Status:** `ipf_diagnosis.py` (commit fecf662) has finished; output not yet read. Results in
+- **Status:** `ipf_diagnosis.py` (commit fecf662) has finished; exp03_rollup 4701504 read (below), the rest not yet. Results in
   `$R/ipf_diagnosis/ipf_diagnosis.txt` and `ipf_cells.csv`.
 - **Why:** none of the 12 IPF fits (3 experiments x 4 PUMAs) converged: all
   stopped at 2,000 sweeps. Worst miss |log(m / Y)|: Baseline 1.9-2.8, Null
@@ -158,6 +158,17 @@ what would answer it. Move an entry to **Answered** with its answer when done.
   data), and an exact LP per block group: can nonnegative weights meet every
   fitted cell, and if not, the least relaxation and which cells; IPF's misses
   attributed to each.
+- **Result, exp03_rollup, PUMA 4701504** (80 block groups, 4,827 fitted
+  cells): no cell without a carrier; 1 with every carrier removed by its block
+  group's zeros (470930061024, B08301.public_transport_bus, published 25: IPF
+  gives 0); 15 with only 1-2 carriers left; no same-universe conflict. The
+  exact LP meets 75 of 80 block groups; the other 5 need 21 cells relaxed
+  (least total relative relaxation median 0.66, max 3.96). IPF misses 90 of
+  4,440 cells by more than 5%, **all 90 in those 5 block groups** (18 of them
+  cells the LP relaxes, the other 72 not: IPF spreads the conflict over the
+  block group, the LP concentrates it). Largest misses in 470930061024,
+  470930061021 and 470930035011, on cells with few carriers left after zeros.
+  So here non-convergence is infeasibility on the data, not the algorithm.
 - **Answer from:** which causes account for IPF's misses, and whether any
   block group's tables are inconsistent on the data.
 

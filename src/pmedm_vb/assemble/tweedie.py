@@ -40,8 +40,11 @@ from dataclasses import dataclass, replace
 import numpy as np
 
 SEPARATOR = "+tweedie"
-#: VB's continuation starts at this share of the bound ``1 / w``.
-EXTEND = 0.99
+#: VB's continuation starts at this share of the bound ``1 / w``. At 0.99 the
+#: term's curvature there, ``(1 - EXTEND)^-3``, made the ELBO estimate noisy on
+#: the synthetic problem (Laplace ELBO standard error 15,869 against 101 without
+#: the term); at 0.9 it was 106.
+EXTEND = 0.9
 
 
 def split_tweedie(level: str) -> tuple[str, float | None]:
