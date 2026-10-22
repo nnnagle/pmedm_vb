@@ -1,9 +1,11 @@
 # Figure A: what a draw looks like, from draw_examples.py's draw_examples.csv.
 #
 # Four block groups of one PUMA (columns): a typical one (the median HMC
-# reference D/H), and the least spread one (smallest D/H; for HMC and VB, the
-# median over draws) of the HMC reference, the IPF fit and VB Gaussian. One row
-# per method. Each bar is one draw, a whole synthetic population: the block
+# reference D/H), the least spread one of the HMC reference (smallest median
+# D/H over its draws) and of the IPF fit, and the one where VB Gaussian's least
+# diverse of 4,000 draws is least diverse: there its VB Gaussian row starts with
+# that draw, outlined, then random draws; every other bar is a random draw. One
+# row per method. Each bar is one draw, a whole synthetic population: the block
 # group's households stacked by the household record they copy, largest first.
 # The block group's five records with the largest mean share over all 4,000 HMC
 # reference draws -- the records the posterior favours there -- are coloured,
@@ -40,7 +42,7 @@ EXAMPLES_CASES <- c(
   typical = "Typical block group",
   hmc = "HMC reference's least spread",
   ipf = "IPF's least spread",
-  vb = "VB Gaussian's least spread"
+  vb_worst = "VB Gaussian's worst draw"
 )
 # Categorical slots 1-5 of the reference palette, checked for colour-vision
 # deficiency separation; here they name records, not methods.
@@ -55,6 +57,7 @@ examples_data <- function(tables_dir) {
   if (!file.exists(file)) stop("no draw_examples.csv in ", tables_dir)
   raw <- read.csv(file, colClasses = c(block_group = "character"))
   raw <- raw[raw$method %in% names(EXAMPLES_METHODS) & raw$case %in% names(EXAMPLES_CASES), ]
+  raw$selected <- if (is.null(raw$selected)) FALSE else as.logical(raw$selected)
   # IPF is one fit: repeat its bar as many times as the other methods have draws.
   shown <- max(raw$draw)
   single <- raw$method == "ipf"
@@ -62,7 +65,7 @@ examples_data <- function(tables_dir) {
                do.call(rbind, lapply(seq_len(shown), function(d) transform(raw[single, ], draw = d))))
   # The small records (and the CSV's own remainder, record -1) as one block per bar.
   small <- raw$record < 0 | raw$share < EXAMPLES_SMALL
-  keys <- c("case", "block_group", "households", "method", "draw", "dh")
+  keys <- c("case", "block_group", "households", "method", "draw", "dh", "selected")
   rest <- aggregate(raw$share[small], raw[small, keys], sum)
   names(rest)[ncol(rest)] <- "share"
   raw <- raw[!small, c(keys, "record", "highlight", "share")]
@@ -79,7 +82,7 @@ examples_data <- function(tables_dir) {
                             formatC(round(raw$households), format = "d", big.mark = ","))
   raw$method <- unname(EXAMPLES_METHODS[raw$method])
   raw[, c("case", "case_label", "method", "draw", "record", "group", "share", "bottom", "top",
-          "dh")]
+          "dh", "selected")]
 }
 
 plot_examples <- function(data) {
@@ -89,23 +92,30 @@ plot_examples <- function(data) {
                                                                         names(EXAMPLES_CASES)))]))
   data$group <- factor(data$group, levels = names(EXAMPLES_COLOURS))
   rest <- data$group == "Records under 1% each"
-  bars <- unique(data[, c("case_label", "method", "draw", "dh")])
+  bars <- unique(data[, c("case_label", "method", "draw", "dh", "selected")])
   bars$label <- sub("^0", "", ifelse(bars$dh < 0.1, sprintf("%.3f", bars$dh),
                                      sprintf("%.2f", bars$dh)))
+  picked <- bars[bars$selected, ]
 
   ggplot(data, aes(xmin = draw - 0.42, xmax = draw + 0.42, ymin = bottom, ymax = top,
                    fill = group)) +
     geom_rect(data = data[rest, ], colour = NA) +
     geom_rect(data = data[!rest, ], colour = "white", linewidth = 0.1) +
-    geom_text(data = bars, aes(x = draw, y = 1.02, label = label), vjust = 0, size = 1.5,
-              colour = "grey30", inherit.aes = FALSE) +
+    geom_text(data = bars[!bars$selected, ], aes(x = draw, y = 1.02, label = label), vjust = 0,
+              size = 1.5, colour = "grey30", inherit.aes = FALSE) +
+    # VB Gaussian's least diverse draw, chosen rather than random: outlined.
+    geom_rect(data = picked, aes(xmin = draw - 0.5, xmax = draw + 0.5, ymin = 0, ymax = 1),
+              fill = NA, colour = "black", linewidth = 0.5, inherit.aes = FALSE) +
+    geom_text(data = picked, aes(x = draw, y = 1.02, label = label), vjust = 0, size = 1.5,
+              fontface = "bold", inherit.aes = FALSE) +
     facet_grid(method ~ case_label) +
     scale_x_continuous(breaks = NULL, expand = expansion(add = 0.3)) +
     scale_y_continuous(breaks = c(0, 0.5, 1), labels = c("0", "50%", "100%"),
                        expand = expansion(mult = c(0, 0.14))) +
     scale_fill_manual(values = EXAMPLES_COLOURS, drop = FALSE,
                       name = "Household records, by the HMC\nreference's mean share") +
-    labs(x = "Draws (IPF: its one fit, repeated); above each bar its D/H",
+    labs(x = paste("Draws (IPF: its one fit, repeated); above each bar its D/H; outlined:",
+                   "VB Gaussian's least diverse of 4,000 draws"),
          y = "Share of the block group's households") +
     theme_bw(base_size = 8) +
     theme(panel.grid = element_blank(), strip.background = element_blank(),

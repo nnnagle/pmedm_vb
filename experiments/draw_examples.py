@@ -11,16 +11,19 @@ records among H households drawn by the shares, over H).
 
 The four block groups (``case``), each taken once, in this order:
 
+- ``vb_worst``: where VB Gaussian's least diverse draw has its smallest D/H,
+  over ``--select-draws`` fresh VB Gaussian draws (the scored ones are not
+  kept);
 - ``ipf``: the IPF fit's smallest D/H;
 - ``hmc``: the smallest median D/H over the HMC reference draws (``--ref-draws``,
   the trace thinned as the scoring does: the scored draws);
-- ``vb``: the smallest median D/H over ``--select-draws`` VB Gaussian draws;
 - ``typical``: the block group whose median D/H over the HMC reference draws
   is the median over the eligible block groups.
 
 If one is already taken, the next in line is used. Each case shows the same
 ``--draws`` draws per method (IPF: its one fit), chosen at random among the
-selection draws. Writes one row per (case, method, draw, record) for the
+selection draws, except that in ``vb_worst`` VB Gaussian's first draw is its
+least diverse one (``selected``) and the rest are random. Writes one row per (case, method, draw, record) for the
 records over ``--min-share`` of the block group's households, and one row
 (record -1) for all the others together, with each draw's D/H (``dh``) and
 n_eff, and
@@ -70,8 +73,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ref-draws", type=int, default=4000,
                         help="HMC reference draws, thinned as the scoring does: they choose "
                              "the block groups and the coloured records")
-    parser.add_argument("--select-draws", type=int, default=400,
-                        help="VB Gaussian draws that choose its block group")
+    parser.add_argument("--select-draws", type=int, default=4000,
+                        help="fresh VB Gaussian draws searched for its least diverse one")
     parser.add_argument("--draws", type=int, default=12, help="draws shown per method")
     parser.add_argument("--top", type=int, default=5, help="records highlighted per case")
     parser.add_argument("--min-share", type=float, default=0.002,
@@ -126,9 +129,10 @@ def distinct_per_household(s: np.ndarray, H: np.ndarray) -> np.ndarray:
     return cm.expected_distinct(s, H) / H
 
 
-def pick_cases(dh: dict[str, np.ndarray]) -> dict[str, int]:
-    """The cases' positions among the eligible block groups (see the module docstring)."""
-    taken: list[int] = []
+def pick_cases(dh: dict[str, np.ndarray], worst: int) -> dict[str, int]:
+    """The cases' positions among the eligible block groups (see the module
+    docstring); ``worst``: the VB Gaussian worst draw's block group."""
+    taken: list[int] = [worst]
 
     def first_free(order) -> int:
         position = next(int(k) for k in order if int(k) not in taken)
@@ -136,12 +140,10 @@ def pick_cases(dh: dict[str, np.ndarray]) -> dict[str, int]:
         return position
 
     hmc = np.median(dh["hmc_ref"], axis=0)
-    vb = np.median(dh["vb_gaussian"], axis=0)
-    cases = {"ipf": first_free(np.argsort(dh["ipf"][0], kind="stable"))}
+    cases = {"vb_worst": worst, "ipf": first_free(np.argsort(dh["ipf"][0], kind="stable"))}
     cases["hmc"] = first_free(np.argsort(hmc, kind="stable"))
-    cases["vb"] = first_free(np.argsort(vb, kind="stable"))
     cases["typical"] = first_free(np.argsort(np.abs(hmc - np.median(hmc)), kind="stable"))
-    return {case: cases[case] for case in ("typical", "hmc", "ipf", "vb")}
+    return {case: cases[case] for case in ("typical", "hmc", "ipf", "vb_worst")}
 
 
 def main() -> None:
@@ -167,6 +169,7 @@ def main() -> None:
     # mean shares over all its draws.
     dh, shares = {}, {}
     ref_mean = np.zeros((zones.size, households.size))
+    worst_dh, worst_shares = np.inf, None  # VB Gaussian's least diverse draw
     for method in METHODS:
         margs[method].draws = {"ipf": 1, "ipf_multinomial": args.draws,
                                "hmc_ref": args.ref_draws}.get(method, args.select_draws)
@@ -179,16 +182,23 @@ def main() -> None:
             values.append(distinct_per_household(s, H))
             if method == "hmc_ref":
                 ref_mean += s / n
+            if method == "vb_gaussian" and values[-1].min() < worst_dh:
+                worst_dh, worst_shares = values[-1].min(), s
             if d in shown:
                 kept.append(s)
         dh[method], shares[method] = np.array(values), np.array(kept)
         print(f"{method}: {len(values)} draws, {len(kept)} kept", flush=True)
 
+    worst = int(np.argmin(distinct_per_household(worst_shares, H)))
+    print(f"VB Gaussian's least diverse draw: D/H {worst_dh:.4f}", flush=True)
     rows = []
-    for case, position in pick_cases(dh).items():
+    for case, position in pick_cases(dh, worst).items():
         zone = int(zones[position])
         geoid = str(inputs.zones.iloc[zone].iloc[0])
         by_method = {m: shares[m][:, position, :] for m in METHODS}
+        if case == "vb_worst":  # the worst draw first, then all but one random draw
+            by_method["vb_gaussian"] = np.vstack([worst_shares[[position]],
+                                                  by_method["vb_gaussian"][:-1]])
         favoured = np.argsort(-ref_mean[position])[:args.top]
         highlight = {int(j): rank + 1 for rank, j in enumerate(favoured)}
         print(f"{case}: block group {geoid} (row {zone}), {published[zone]:,.0f} households; "
@@ -199,6 +209,7 @@ def main() -> None:
         for method, s in by_method.items():
             for d, draw in enumerate(s):
                 info = dict(base, method=method, draw=d + 1,
+                            selected=case == "vb_worst" and method == "vb_gaussian" and d == 0,
                             dh=float(distinct_per_household(draw[None], H[[position]])[0]),
                             n_eff=float(n_eff(draw)))
                 big = np.flatnonzero(draw >= args.min_share)
