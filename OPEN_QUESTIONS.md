@@ -6,7 +6,7 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 
 | # | Question | Status (2026-10-22) |
 |---|---|---|
-| 1 | Tails of single HMC draws' \|z\| | waiting: `draw_z.py` rerun with per-cell statistics submitted |
+| 1 | Tails of single HMC draws' \|z\| | results in: job 6457035, to be read |
 | 2 | n_eff against D/H for IPF | not started: the share-distribution check is not written |
 | 3 | Why IPF does not converge | waiting: `ipf_diagnosis.py` submitted |
 
@@ -14,9 +14,9 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 
 ### 1. How heavy are the tails of single HMC draws against the published tables?
 
-- **Status:** waiting on the `draw_z.py` rerun with the per-cell statistics
-  (commit 6ef931e); results in `$R/draw_z_cells.csv` and the "Per cell over
-  the draws" part of its slurm log.
+- **Status:** the per-cell rerun finished (job 6457035, commit 6ef931e):
+  `$R/draw_z_cells.csv`, and the "Per cell over the draws" part of
+  `/lustre/isaac24/proj/UTK0496/pmedm_vb_runs/slurm-6457035.log`; to be read.
 - **Why:** in PUMA 4701503 (Baseline, alpha 0.01), the least diverse HMC
   reference draw (draw 1457 of 4,000) puts 72 women aged 70-75 in block group
   470930038014, where the published count is 0 (modelled SE 8.5): z = +8.5 on a
