@@ -389,11 +389,15 @@ def results_stale(args) -> str | None:
     out = args.root / "results.zip"
     if not out.exists():
         return f"{out} is missing"
+    tables = args.root / "tables_compare"
     try:
-        newest = max(make_results.inputs(args.root / "tables_compare"),
-                     key=lambda path: path.stat().st_mtime)
+        files = make_results.entries(tables)
+        newest = max(make_results.inputs(tables), key=lambda path: path.stat().st_mtime)
     except SystemExit as error:
         return str(error)
+    reasons = make_results.staleness(tables.resolve(), files)
+    if reasons:
+        return f"packs stale files ({reasons[0]})"
     if newest.stat().st_mtime > out.stat().st_mtime:
         return f"{newest} is newer than {out}"
     return None
