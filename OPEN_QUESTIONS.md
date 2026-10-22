@@ -9,7 +9,7 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 | 1 | HMC draws consistent with Sigma on fitted cells? | per cell at alpha 0.01: bulk yes, tails no; waiting on job 6457912 for pooled and d/m |
 | 2 | n_eff against D/H for IPF | not started: the share-distribution check is not written |
 | 3 | Why IPF does not converge | waiting: `ipf_diagnosis.py` submitted |
-| 4 | Tweedie error for small cells and zeros, keeping Sigma | zero cells implemented (`+tweedie<w>`); VB with it unstable, being tested; exp04 not run |
+| 4 | Tweedie error for small cells and zeros, keeping Sigma | zero cells implemented (`+tweedie<w>`); VB unstable; waiting on job 6459108 (HMC starts from the MAP); exp04 not run |
 | 5 | A k = 0 squared-Gaussian dual term: count-like cells with Sigma exact | idea; checked numerically on a 4-cell example; nothing implemented |
 
 ## Open
@@ -145,6 +145,17 @@ what would answer it. Move an entry to **Answered** with its answer when done.
   is unstable (ELBO noise); the continuation from 90% of the bound is being
   tested before exp04 is run. Nonzero cells are still Gaussian: #5 would
   extend the term to them with Sigma's correlations.
+- **Starting HMC without VB (waiting on job 6459108):** HMC's starts are
+  screened (largest cell <= 1% of p, inside the bound) and drawn from the VB
+  fit; VB with the term is unstable and Laplace draws are far too
+  concentrated. `experiments/start_check.py` tests starts MAP + c (Laplace
+  draw - MAP), c from 0 to 1, on PUMA 4701502, alpha 0.01, `+tweedie18`. On
+  the synthetic problem the bound never binds (100% inside up to c = 0.7, 96%
+  at c = 1) but the share screen does: the median largest share is 0.02 at the
+  MAP and 0.82 at c = 1, so nothing passes -- not informative there, as the
+  MAP itself holds 2%. The job answers whether the MAP and small c pass on the
+  real PUMA. Next: a pilot chain from those starts (divergences, step size),
+  re-whitened from the pilot only if needed.
 - **Why:** for large cells a Gaussian sampling error is plausible; for small
   cells, and most obviously zeros, it cannot be (a published count is
   nonnegative, often exactly zero). The model's error is Gaussian with Sigma
