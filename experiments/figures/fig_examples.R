@@ -1,14 +1,16 @@
 # Figure A: what a draw looks like, from draw_examples.py's draw_examples.csv.
 #
 # Four block groups of one PUMA (columns): a typical one (the median HMC
-# reference n_eff), and the least spread one (smallest n_eff; for HMC and VB,
-# the median over draws) of the HMC reference, the IPF fit and VB Gaussian. One row per method. Each bar is one draw, a whole synthetic
-# population: the block group's households stacked by the household record they
-# copy, largest first. The block group's five records with the largest mean
-# share over the shown draws (averaged over the methods) are coloured, the same
-# record the same colour in every bar of the column; every other record is grey,
-# with records under 1% of the households together in the light grey at the
-# top (EXAMPLES_SMALL). The number above each bar is its n_eff = 1 / sum s^2 (as Figure B). IPF
+# reference D/H), and the least spread one (smallest D/H; for HMC and VB, the
+# median over draws) of the HMC reference, the IPF fit and VB Gaussian. One row
+# per method. Each bar is one draw, a whole synthetic population: the block
+# group's households stacked by the household record they copy, largest first.
+# The block group's five records with the largest mean share over the shown
+# draws (averaged over the methods) are coloured, the same record the same
+# colour in every bar of the column; every other record is grey, with records
+# under 1% of the households together in the light grey at the top
+# (EXAMPLES_SMALL). The number above each bar is its D/H, distinct household
+# records per household (as Figure B). IPF
 # is one fit: its one bar is repeated.
 #
 # Reads draw_examples.csv from the paper tables' folder (experiments/
@@ -60,7 +62,7 @@ examples_data <- function(tables_dir) {
                do.call(rbind, lapply(seq_len(shown), function(d) transform(raw[single, ], draw = d))))
   # The small records (and the CSV's own remainder, record -1) as one block per bar.
   small <- raw$record < 0 | raw$share < EXAMPLES_SMALL
-  keys <- c("case", "block_group", "households", "method", "draw", "n_eff")
+  keys <- c("case", "block_group", "households", "method", "draw", "dh")
   rest <- aggregate(raw$share[small], raw[small, keys], sum)
   names(rest)[ncol(rest)] <- "share"
   raw <- raw[!small, c(keys, "record", "highlight", "share")]
@@ -77,7 +79,7 @@ examples_data <- function(tables_dir) {
                             formatC(round(raw$households), format = "d", big.mark = ","))
   raw$method <- unname(EXAMPLES_METHODS[raw$method])
   raw[, c("case", "case_label", "method", "draw", "record", "group", "share", "bottom", "top",
-          "n_eff")]
+          "dh")]
 }
 
 plot_examples <- function(data) {
@@ -87,8 +89,9 @@ plot_examples <- function(data) {
                                                                         names(EXAMPLES_CASES)))]))
   data$group <- factor(data$group, levels = names(EXAMPLES_COLOURS))
   rest <- data$group == "Records under 1% each"
-  bars <- unique(data[, c("case_label", "method", "draw", "n_eff")])
-  bars$label <- ifelse(bars$n_eff < 10, sprintf("%.1f", bars$n_eff), sprintf("%.0f", bars$n_eff))
+  bars <- unique(data[, c("case_label", "method", "draw", "dh")])
+  bars$label <- sub("^0", "", ifelse(bars$dh < 0.1, sprintf("%.3f", bars$dh),
+                                     sprintf("%.2f", bars$dh)))
 
   ggplot(data, aes(xmin = draw - 0.42, xmax = draw + 0.42, ymin = bottom, ymax = top,
                    fill = group)) +
@@ -102,7 +105,7 @@ plot_examples <- function(data) {
                        expand = expansion(mult = c(0, 0.14))) +
     scale_fill_manual(values = EXAMPLES_COLOURS, drop = FALSE,
                       name = "Household records, by mean share\nin the block group") +
-    labs(x = "Draws (IPF: its one fit, repeated); above each bar its n_eff",
+    labs(x = "Draws (IPF: its one fit, repeated); above each bar its D/H",
          y = "Share of the block group's households") +
     theme_bw(base_size = 8) +
     theme(panel.grid = element_blank(), strip.background = element_blank(),

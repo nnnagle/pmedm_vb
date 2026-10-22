@@ -37,6 +37,7 @@ ACC_METHODS <- c(
   map_laplace = "MAP + Laplace",
   vb_gaussian = "VB Gaussian",
   vb_skewed = "VB skewed",
+  vb_gaussian_trunc = "VB Gaussian, truncated",
   hmc_short = "HMC short"
 )
 ACC_EXPERIMENTS <- c(

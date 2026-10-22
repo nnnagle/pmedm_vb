@@ -68,8 +68,10 @@ FITS_SLURM = ["--partition=campus", "--qos=campus", "--time=12:00:00", "--cpus-p
 HMC_SLURM = ["--partition=campus-gpu", "--qos=campus-gpu", "--time=24:00:00"]
 GPU_PARTITION = "campus-gpu"
 
-#: Keys whose difference does not make a different experiment.
-FREE_KEYS = {"description"}
+#: Keys whose difference does not make a different experiment: the description,
+#: and the scoring-only choices (which VB families are also scored truncated, and
+#: the truncation's rule), which leave every fit as it is.
+FREE_KEYS = {"description", "vb_truncated", "vb_trunc_share", "vb_trunc_distinct"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -341,6 +343,13 @@ def prepare(exp: Path, spec: dict, dry_run: bool) -> None:
         if comparable(before) != comparable(spec):
             raise SystemExit(f"{saved} records a different experiment; "
                              "give the changed one a new name")
+        # The free keys follow the JSON: scoring reads them from the record.
+        changed = {k: spec.get(k) for k in FREE_KEYS if before.get(k) != spec.get(k)}
+        if changed:
+            print(f"{saved}: {'would update' if dry_run else 'updating'} "
+                  + ", ".join(f"{k} = {v!r}" for k, v in changed.items()))
+            if not dry_run:
+                saved.write_text(json.dumps({**before, **changed}, indent=2) + "\n")
         return
     record = {**spec, "_started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
               "_commit": git_commit(), "_data_dir": str(data_dir(spec)),

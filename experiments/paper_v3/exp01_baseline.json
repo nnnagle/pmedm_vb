@@ -67,5 +67,7 @@
   "rake_draws": [
     "ipf_multinomial"
   ],
-  "vb_truncated": false
+  "vb_truncated": ["gaussian"],
+  "vb_trunc_share": 0.02,
+  "vb_trunc_distinct": 0.025
 }

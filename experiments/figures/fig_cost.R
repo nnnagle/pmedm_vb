@@ -45,6 +45,7 @@ COST_METHODS <- c(
   map_laplace = "MAP + Laplace",
   vb_gaussian = "VB Gaussian",
   vb_skewed = "VB skewed",
+  vb_gaussian_trunc = "VB Gaussian, truncated",
   hmc_short = "HMC short",
   hmc_ref = "HMC reference"
 )
@@ -53,10 +54,12 @@ COST_EXPERIMENTS <- c(
   exp02_nullspace = "Null space",
   exp03_rollup = "Roll-up"
 )
-# Categorical slots 1-6 of the reference palette, checked for colour-vision
+# Categorical slots 1-7 of the reference palette (7, the truncated VB, added last), checked for colour-vision
 # deficiency separation; shape (the experiment) and the legend are the other cues.
-COST_METHOD_COLOURS <- setNames(c("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"),
-                           unname(COST_METHODS))
+COST_METHOD_COLOURS <- c(`IPF, multinomial` = "#2a78d6", `MAP + Laplace` = "#eb6834",
+                         `VB Gaussian` = "#1baf7a", `VB skewed` = "#eda100",
+                         `HMC short` = "#e87ba4", `HMC reference` = "#008300",
+                         `VB Gaussian, truncated` = "#6250d6")
 COST_EXPERIMENT_SHAPES <- c(Baseline = 16, `Null space` = 17, `Roll-up` = 15)
 COST_WALL <- 0.01  # Table 5's share of N that makes a cell a wall (for the label)
 # The expected interval score of a method that knew every true count: the

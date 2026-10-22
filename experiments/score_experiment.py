@@ -26,7 +26,10 @@ the VB families again truncated (``vb_<family>_trunc``), and
 the raking fits (raking has no alpha: each PUMA's raking is scored in every
 alpha cell, against that cell's reference), and any simulated populations from
 them (``rake_draws``, e.g. ``ipf_multinomial``). An experiment with
-``vb_truncated: false`` scores no truncated VB variants. Every call names the
+``vb_truncated: false`` scores no truncated VB variants, and a list
+(``["gaussian"]``) only those families'; ``vb_trunc_share`` and
+``vb_trunc_distinct`` set their rejection rule (compare_methods.py's
+``--trunc-share`` and ``--trunc-distinct``). Every call names the
 cell's reference; the HMC calls also name the VB fit that whitened them
 (``hmc.whiten``, skewed by default). Then
 one ``run_python.sbatch`` job, after all of them (``afterany``), runs this
@@ -146,7 +149,8 @@ def cell_calls(spec: dict, exp: Path, puma: str, alpha: float, out: Path, draws:
     for method, folder in fits:
         run = exp / puma / folder
         if (run / f"{name}.npz").exists():
-            calls.append(["--method", method, "--run", str(run), *common])
+            calls.append(["--method", method, "--run", str(run), *common,
+                          *(truncation_args(spec) if method.endswith("_trunc") else [])])
         else:
             missing.append(f"{cell}: {method}")
     for method in spec["rake"]:
@@ -166,8 +170,21 @@ def cell_calls(spec: dict, exp: Path, puma: str, alpha: float, out: Path, draws:
 
 
 def truncated_families(spec: dict) -> list[str]:
-    """The VB families also scored truncated: all of them unless ``vb_truncated`` is false."""
-    return list(spec["vb_families"]) if spec.get("vb_truncated", True) else []
+    """The VB families also scored truncated: all of them unless ``vb_truncated`` is
+    false, or those it lists."""
+    chosen = spec.get("vb_truncated", True)
+    if isinstance(chosen, list):
+        return [f for f in spec["vb_families"] if f in chosen]
+    return list(spec["vb_families"]) if chosen else []
+
+
+def truncation_args(spec: dict) -> list[str]:
+    """The truncated VB's rejection rule, where the spec sets it."""
+    out = []
+    for key, flag in (("vb_trunc_share", "--trunc-share"), ("vb_trunc_distinct", "--trunc-distinct")):
+        if spec.get(key) is not None:
+            out += [flag, f"{spec[key]:g}"]
+    return out
 
 
 def sbatch(command: list[str], dry_run: bool) -> str:

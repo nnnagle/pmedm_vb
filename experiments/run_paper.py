@@ -285,6 +285,8 @@ def exp_attempts(exp: Path) -> dict:
 def advance_experiment(spec: dict, jobs: Jobs, args) -> bool:
     """Fits, then scoring, then combining, for one experiment; whether it is combined."""
     exp = args.root / spec["name"]
+    if (exp / "experiment.json").exists():
+        rx.prepare(exp, spec, args.dry_run)  # the record's scoring-only keys follow the JSON
     if not rx.is_complete(spec, exp):
         over = {k: n for k, n in exp_attempts(exp).items() if n >= args.max_attempts}
         live = rx.active_for(exp)

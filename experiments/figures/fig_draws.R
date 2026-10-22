@@ -1,19 +1,21 @@
 # Figure B: usability of the draws, from paper_tables.py's draws_sample.csv.
 #
 # Replaces Table 5. For each draw (a whole synthetic population of one PUMA),
-# each block group's effective number of household records,
-# n_eff = 1 / sum s^2 over the records' shares s of its households (Kish's
-# effective sample size; only block groups over 100 published households). Two
-# rows of panels:
-#   top     the draw's smallest n_eff over its block groups: its worst block
+# each block group's distinct household records per household, D/H: D is the
+# expected number of distinct records among its H published occupied
+# households drawn by the records' shares s, D = sum 1 - (1 - s)^H (only block
+# groups over 100 published households). 1 is every household a different
+# record; small is a few records copied many times. Two rows of panels:
+#   top     the draw's smallest D/H over its block groups: its worst block
 #           group;
-#   bottom  the draw's median n_eff over its block groups: its typical one.
+#   bottom  the draw's median D/H over its block groups: its typical one.
 # Methods are rows (log scale across), one violin per experiment (colour),
 # dodged, with each violin's median marked; one column of panels per alpha.
 # Raking has no alpha and appears in both columns; the IPF fit is one
 # population per PUMA, so it is drawn as its four points. The dashed line is
-# Table 5's floor of 10. The exact posterior itself puts some block groups below
-# it, so falling under it is not by itself a failure of the method.
+# Table 5's floor of 0.025, about half the smallest D/H any HMC draw reached in
+# the paper_v3 runs, and the truncated VB's rule: below it, a draw is unlike
+# anything the posterior was seen to make. (draws_sample.csv also has n_eff.)
 #
 # Reads draws_sample.csv from the paper tables' folder
 # (experiments/paper_tables.py --out, e.g. <root>/tables_compare): up to 1,000
@@ -38,6 +40,7 @@ DRAWS_METHODS <- c(
   map_laplace = "MAP + Laplace",
   vb_gaussian = "VB Gaussian",
   vb_skewed = "VB skewed",
+  vb_gaussian_trunc = "VB Gaussian, truncated",
   hmc_short = "HMC short",
   hmc_ref = "HMC reference"
 )
@@ -51,14 +54,17 @@ DRAWS_EXPERIMENTS <- c(
 DRAWS_EXPERIMENT_COLOURS <- c(Baseline = "#2a78d6", `Null space` = "#eb6834",
                               `Roll-up` = "#1baf7a")
 DRAWS_RAKING <- c("ipf", "ipf_multinomial")
-DRAWS_FLOOR <- 10  # Table 5's n_eff floor
-DRAWS_METRICS <- c(min_bg_n_eff = "Smallest n_eff over block groups",
-                   median_bg_n_eff = "Median n_eff over block groups")
+DRAWS_FLOOR <- 0.025  # Table 5's D/H floor, and the truncated VB's rule
+DRAWS_METRICS <- c(min_bg_distinct_per_hh = "Smallest D/H over block groups",
+                   median_bg_distinct_per_hh = "Median D/H over block groups")
 
 draws_data <- function(tables_dir) {
   file <- file.path(tables_dir, "draws_sample.csv")
   if (!file.exists(file)) stop("no draws_sample.csv in ", tables_dir)
   raw <- read.csv(file)
+  missing <- setdiff(names(DRAWS_METRICS), names(raw))
+  if (length(missing)) stop(file, " has no ", paste(missing, collapse = ", "),
+                            ": rerun paper_tables.py")
   raw <- raw[raw$method %in% names(DRAWS_METHODS) &
                raw$experiment %in% names(DRAWS_EXPERIMENTS), ]
   # Raking is scored in each alpha cell from the same fit: one copy, shown in
@@ -86,16 +92,18 @@ plot_draws <- function(data) {
   data$metric <- factor(data$metric, levels = unname(DRAWS_METRICS))
   dodge <- position_dodge(width = 0.85)
   single <- data$method == "IPF"  # one population per PUMA: points, not a violin
-  floor_line <- data.frame(metric = factor(DRAWS_METRICS[["min_bg_n_eff"]],
+  floor_line <- data.frame(metric = factor(DRAWS_METRICS[["min_bg_distinct_per_hh"]],
                                            levels = unname(DRAWS_METRICS)))
 
   # Bandwidth: Sheather & Jones (1991), which follows clusters such as IPF's
   # one tight mode per PUMA that the default (Silverman's rule, set by the whole
-  # spread) blurs together. Groups mostly at one value, as MAP + Laplace's n_eff
-  # of 1, keep the default: there SJ fails, or collapses to a spike.
+  # spread) blurs together. Groups mostly at one value (to 3 significant
+  # digits), as MAP + Laplace's draws of one record per block group, keep the
+  # default: there SJ fails, or collapses to a spike.
   key <- interaction(data$metric, data$alpha_label, data$method, data$experiment, drop = TRUE)
   sj <- vapply(split(log10(data$value), key), function(v) {
-    max(table(v)) <= length(v) / 2 && !inherits(try(bw.SJ(v), silent = TRUE), "try-error")
+    max(table(signif(v, 3))) <= length(v) / 2 &&
+      !inherits(try(bw.SJ(v), silent = TRUE), "try-error")
   }, logical(1))
   by_sj <- !single & sj[as.character(key)]
   violin <- function(part, bw) {
@@ -116,10 +124,11 @@ plot_draws <- function(data) {
     facet_grid(metric ~ alpha_label, labeller = labeller(alpha_label = label_parsed)) +
     coord_flip() +
     scale_x_discrete(drop = FALSE) +
-    scale_y_log10(breaks = c(1, 2, 5, 10, 20, 50, 100, 200, 500)) +
+    scale_y_log10(breaks = c(0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1),
+                  labels = c("0.001", "0.003", "0.01", "0.03", "0.1", "0.3", "1")) +
     scale_fill_manual(values = DRAWS_EXPERIMENT_COLOURS, name = "Experiment", drop = FALSE) +
     scale_colour_manual(values = DRAWS_EXPERIMENT_COLOURS, guide = "none") +
-    labs(x = NULL, y = "Effective number of household records in a block group (log scale)") +
+    labs(x = NULL, y = "Distinct household records per household in a block group, D/H (log scale)") +
     theme_bw(base_size = 8) +
     theme(panel.grid.major.y = element_blank(), panel.grid.minor = element_blank(),
           panel.grid.major.x = element_line(colour = "grey90", linewidth = 0.3),

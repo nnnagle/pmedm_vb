@@ -4,23 +4,25 @@ For one experiment, PUMA and alpha, and the methods in ``METHODS``, draws the
 weights ``W`` exactly as the scoring does (``compare_methods.method_draws``,
 with the arguments ``score_experiment.cell_calls`` gives it) and, in four
 block groups, keeps each draw's household shares: each household record's
-share of the block group's households, as in compare_methods.py's n_eff (block
-groups with more than ``--hh-min`` published occupied households, B25003's
-owner and renter cells).
+share of the block group's households, as in compare_methods.py's D/H and
+n_eff (block groups with more than ``--hh-min`` published occupied households
+H, B25003's owner and renter cells; D/H is the expected number of distinct
+records among H households drawn by the shares, over H).
 
 The four block groups (``case``), each taken once, in this order:
 
-- ``ipf``: the IPF fit's smallest n_eff;
-- ``hmc``: the smallest median n_eff over ``--select-draws`` HMC reference draws;
-- ``vb``: the smallest median n_eff over ``--select-draws`` VB Gaussian draws;
-- ``typical``: the block group whose median n_eff over the HMC reference draws
+- ``ipf``: the IPF fit's smallest D/H;
+- ``hmc``: the smallest median D/H over ``--select-draws`` HMC reference draws;
+- ``vb``: the smallest median D/H over ``--select-draws`` VB Gaussian draws;
+- ``typical``: the block group whose median D/H over the HMC reference draws
   is the median over the eligible block groups.
 
 If one is already taken, the next in line is used. Each case shows the same
 ``--draws`` draws per method (IPF: its one fit), chosen at random among the
 selection draws. Writes one row per (case, method, draw, record) for the
 records over ``--min-share`` of the block group's households, and one row
-(record -1) for all the others together, with each draw's n_eff, and
+(record -1) for all the others together, with each draw's D/H (``dh``) and
+n_eff, and
 ``highlight``: the rank (1 to ``--top``) of the case's records with the largest
 mean share over the shown draws, averaged over the methods, empty for the rest::
 
@@ -114,7 +116,11 @@ def n_eff(s: np.ndarray) -> np.ndarray:
     return 1.0 / np.square(s).sum(axis=-1)
 
 
-def pick_cases(neff: dict[str, np.ndarray]) -> dict[str, int]:
+def distinct_per_household(s: np.ndarray, H: np.ndarray) -> np.ndarray:
+    return cm.expected_distinct(s, H) / H
+
+
+def pick_cases(dh: dict[str, np.ndarray]) -> dict[str, int]:
     """The cases' positions among the eligible block groups (see the module docstring)."""
     taken: list[int] = []
 
@@ -123,9 +129,9 @@ def pick_cases(neff: dict[str, np.ndarray]) -> dict[str, int]:
         taken.append(position)
         return position
 
-    hmc = np.median(neff["hmc_ref"], axis=0)
-    vb = np.median(neff["vb_gaussian"], axis=0)
-    cases = {"ipf": first_free(np.argsort(neff["ipf"][0], kind="stable"))}
+    hmc = np.median(dh["hmc_ref"], axis=0)
+    vb = np.median(dh["vb_gaussian"], axis=0)
+    cases = {"ipf": first_free(np.argsort(dh["ipf"][0], kind="stable"))}
     cases["hmc"] = first_free(np.argsort(hmc, kind="stable"))
     cases["vb"] = first_free(np.argsort(vb, kind="stable"))
     cases["typical"] = first_free(np.argsort(np.abs(hmc - np.median(hmc)), kind="stable"))
@@ -146,12 +152,13 @@ def main() -> None:
     households = np.flatnonzero(~inputs.units["is_group_quarters"].to_numpy(bool))
     published = inputs.Y_B[:, table_leaves(inputs.bg_constraints, "B25003")].sum(axis=1)
     zones = np.flatnonzero(published > args.hh_min)
+    H = published[zones]
     if zones.size < 4:
         raise SystemExit(f"only {zones.size} block groups over {args.hh_min:g} households")
 
     # Every method's household shares in every eligible block group: all the
-    # selection draws' n_eff, and the shown draws' shares.
-    neff, shares = {}, {}
+    # selection draws' D/H, and the shown draws' shares.
+    dh, shares = {}, {}
     for method in METHODS:
         margs[method].draws = {"ipf": 1, "ipf_multinomial": args.draws}.get(method,
                                                                          args.select_draws)
@@ -161,27 +168,29 @@ def main() -> None:
         values, kept = [], []
         for d, W in enumerate(weights(source, inputs)):
             s = household_shares(W, zones, households)
-            values.append(n_eff(s))
+            values.append(distinct_per_household(s, H))
             if d in shown:
                 kept.append(s)
-        neff[method], shares[method] = np.array(values), np.array(kept)
+        dh[method], shares[method] = np.array(values), np.array(kept)
         print(f"{method}: {len(values)} draws, {len(kept)} kept", flush=True)
 
     rows = []
-    for case, position in pick_cases(neff).items():
+    for case, position in pick_cases(dh).items():
         zone = int(zones[position])
         geoid = str(inputs.zones.iloc[zone].iloc[0])
         by_method = {m: shares[m][:, position, :] for m in METHODS}
         pooled = np.mean([s.mean(axis=0) for s in by_method.values()], axis=0)
         highlight = {int(j): rank + 1 for rank, j in enumerate(np.argsort(-pooled)[:args.top])}
         print(f"{case}: block group {geoid} (row {zone}), {published[zone]:,.0f} households; "
-              f"n_eff IPF {neff['ipf'][0, position]:.2f}, HMC reference median "
-              f"{np.median(neff['hmc_ref'][:, position]):.2f}, VB Gaussian median "
-              f"{np.median(neff['vb_gaussian'][:, position]):.2f}")
+              f"D/H IPF {dh['ipf'][0, position]:.3f}, HMC reference median "
+              f"{np.median(dh['hmc_ref'][:, position]):.3f}, VB Gaussian median "
+              f"{np.median(dh['vb_gaussian'][:, position]):.3f}")
         base = dict(case=case, zone=zone, block_group=geoid, households=float(published[zone]))
         for method, s in by_method.items():
             for d, draw in enumerate(s):
-                info = dict(base, method=method, draw=d + 1, n_eff=float(n_eff(draw)))
+                info = dict(base, method=method, draw=d + 1,
+                            dh=float(distinct_per_household(draw[None], H[[position]])[0]),
+                            n_eff=float(n_eff(draw)))
                 big = np.flatnonzero(draw >= args.min_share)
                 for j in big:
                     rows.append(dict(info, record=int(households[j]), share=float(draw[j]),

@@ -8,7 +8,7 @@ Tables 2 and 3, each as LaTeX (booktabs), CSV (long: one row per experiment,
 alpha, method and statistic, unrounded, with ``n`` the cells, draws or PUMAs
 behind it) and Markdown (all in ``tables.md``); and ``draws_sample.csv``, up
 to 1,000 random draws of each (experiment, method, alpha, PUMA) with their
-block-group n_eff and largest cell, for the figures of the draws::
+block-group D/H and n_eff and largest cell, for the figures of the draws::
 
     sbatch --export=ALL,PMEDM_VB_DATA=$PMEDM_VB_DATA experiments/run_python.sbatch \\
         paper_tables.py --root $PAPER --tag paper1 --out $PAPER/tables
@@ -65,7 +65,7 @@ NO_ALPHA = ("ipf", "ipf_multinomial")
 
 #: Table 5's statistics that are shares of draws: for a method without an alpha,
 #: one draw per PUMA, shown as a count of draws.
-SHARE_KEYS = ("walls", "neff_lt", "hhz_gt")
+SHARE_KEYS = ("walls", "dh_lt", "neff_lt", "hhz_gt")
 
 #: Cell columns read from the detail files.
 CELL_COLUMNS = ["method", "puma", "alpha", "subset", "sampled", "abs_z",
@@ -74,12 +74,14 @@ CELL_COLUMNS = ["method", "puma", "alpha", "subset", "sampled", "abs_z",
 CELL_SUBSETS = ("constrained_block_group", "constrained_tract",
                 "heldout_related_block_group", "heldout_less_related_block_group",
                 "heldout_related_tract", "heldout_less_related_tract")
-DRAW_COLUMNS = ["method", "puma", "alpha", "max_share_of_N", "min_bg_n_eff", "median_bg_n_eff",
+DRAW_COLUMNS = ["method", "puma", "alpha", "max_share_of_N", "min_bg_distinct_per_hh",
+                "median_bg_distinct_per_hh", "min_bg_n_eff", "median_bg_n_eff",
                 "max_abs_hh_z", "count_hh_abs_z_gt_5"]
 #: Draws kept per (method, alpha, PUMA) in draws_sample.csv, for the figures
 #: of the draws' distributions (experiments/figures/fig_draws.R).
 SAMPLE_DRAWS = 1000
-SAMPLE_COLUMNS = ["method", "puma", "alpha", "min_bg_n_eff", "median_bg_n_eff", "max_share_of_N"]
+SAMPLE_COLUMNS = ["method", "puma", "alpha", "min_bg_distinct_per_hh", "median_bg_distinct_per_hh",
+                  "min_bg_n_eff", "median_bg_n_eff", "max_share_of_N"]
 
 
 def sample_draws(draws: pd.DataFrame, seed: int = 0) -> pd.DataFrame:
@@ -99,6 +101,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--experiments", nargs="+", default=[e for e, _ in EXPERIMENTS],
                         help="experiment folders, in column order")
     parser.add_argument("--wall", type=float, default=0.01, help="a wall: a cell over this share of N")
+    parser.add_argument("--dh-floor", type=float, default=0.025,
+                        help="Table 5's D/H floor: about half the smallest any HMC draw of the "
+                             "paper_v3 runs reached (0.054); the truncated VB's rule")
     parser.add_argument("--neff-floor", type=float, default=10)
     parser.add_argument("--hh-z", type=float, default=5)
     parser.add_argument("--pumas", nargs="+", default=None,
@@ -242,6 +247,11 @@ def draw_statistics(draws: pd.DataFrame, args) -> list[dict]:
         base = dict(table="5", alpha=alpha, method=method, n=len(group))
         stats = [("walls", f"Draws with a cell > {args.wall:g} N",
                   float((group.max_share_of_N > args.wall).mean()))]
+        if "min_bg_distinct_per_hh" in group:
+            stats += [("dh_min_p50", "Smallest D/H, median",
+                       float(group.min_bg_distinct_per_hh.median())),
+                      ("dh_lt", f"Draws with D/H < {args.dh_floor:g}",
+                       float((group.min_bg_distinct_per_hh < args.dh_floor).mean()))]
         if "min_bg_n_eff" in group:
             stats += [("neff_min_p50", "Smallest n_eff, median", float(group.min_bg_n_eff.median())),
                       ("neff_lt", f"Draws with n_eff < {args.neff_floor:g}",
@@ -304,7 +314,7 @@ DIGITS = {"fit": "min", "sampling": "min", "total": "min",
           "rel_cover": 2, "rel_absz_p90": 2, "rel_is": 2,
           "less_cover": 2, "less_absz_p90": 2, "less_is": 2,
           "mdiff_p50": 2, "mdiff_p99": 2, "width_p10": 2, "width_p50": 2, "khat": "khat",
-          "walls": 3, "neff_min_p50": 1, "neff_lt": 3, "hhz_gt": 3, "hhz_p50": 2}
+          "walls": 3, "dh_min_p50": 3, "dh_lt": 3, "neff_min_p50": 1, "neff_lt": 3, "hhz_gt": 3, "hhz_p50": 2}
 
 
 def fmt(row: pd.Series | None, key: str) -> str:
@@ -359,8 +369,10 @@ TITLES = {
           "per fit, median [min, max] over PUMAs (methods with a density only)."),
     "5": ("Usability of the draws",
           "Draws of the four PUMAs pooled (4,000 per PUMA; one for raking). A cell is one "
-          "record in one block group. n_eff = 1 / sum s^2 over the household records' shares "
-          "of a block group's households, block groups over 100 published households; "
+          "record in one block group. D/H: the expected number of distinct household records "
+          "among a block group's H published households, drawn by the records' shares s, "
+          "D = sum 1 - (1 - s)^H, over H; n_eff = 1 / sum s^2; both over block groups with "
+          "more than 100 published households; "
           "households |z|: a block group's allocated occupied households against B25003, SE "
           "from its cells' variances with the zero-count floor."),
 }
