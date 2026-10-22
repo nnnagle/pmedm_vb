@@ -9,7 +9,7 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 | 1 | HMC draws consistent with Sigma on fitted cells? | alpha 0.01: bulk matches Sigma's diagonal, tails do not, correlations do not (d/m 18-27) |
 | 2 | n_eff against D/H for IPF | not started: the share-distribution check is not written |
 | 3 | Why IPF does not converge | exp03 4701504: every miss is in a block group the LP cannot meet exactly; other PUMAs and experiments not yet read |
-| 4 | Tweedie error for small cells and zeros, keeping Sigma | zero cells implemented (`+tweedie<w>`); VB unstable; waiting on job 6459108 (HMC starts from the MAP); exp04 not run |
+| 4 | Tweedie error for small cells and zeros, keeping Sigma | zero cells implemented (`+tweedie<w>`); VB fixed (continuation from 90%); starts near the MAP pass on 4701502 (job 6459108); exp04 to use K0 (#5) |
 | 5 | A k = 0 squared-Gaussian dual term: count-like cells with Sigma exact | idea; checked numerically on a 4-cell example; nothing implemented |
 
 ## Open
@@ -194,6 +194,21 @@ what would answer it. Move an entry to **Answered** with its answer when done.
   MAP itself holds 2%. The job answers whether the MAP and small c pass on the
   real PUMA. Next: a pilot chain from those starts (divergences, step size),
   re-whitened from the pilot only if needed.
+- **Result (job 6459108, PUMA 4701502, alpha 0.01, `+tweedie18`, 16,049
+  multipliers):** the MAP converges in 10 Newton iterations (e' S^-1 e / m
+  0.46, largest |z| 9.5) and its largest cell holds 0.34% of p. Starts
+  MAP + c (Laplace draw - MAP) pass both screens for every c <= 0.1; at
+  c = 0.2 only 36% (all lie under the share cap, 64% cross the bound); none at
+  c >= 0.3. Here, unlike the synthetic problem, the bound binds first; the
+  share screen fails from c = 0.5 (median largest share 0.03, 0.50 at 0.7,
+  0.86 at 1). The Laplace Gaussian is several times too wide toward the bound
+  and toward concentration; starts near the MAP are usable.
+- **VB:** with the continuation from 90% of the bound (`EXTEND = 0.9`,
+  commit 7d15dbf) the synthetic Laplace ELBO's standard error is 106 (101
+  without the term; 15,869 at 0.99) and the fit climbs at the same rate; its
+  draws are 99.8% inside the bound, median largest share 0.29 (0.22 without
+  the term). Neither VB fit converged in 300 iterations, with or without the
+  term.
 - **Why:** for large cells a Gaussian sampling error is plausible; for small
   cells, and most obviously zeros, it cannot be (a published count is
   nonnegative, often exactly zero). The model's error is Gaussian with Sigma
