@@ -6,7 +6,7 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 
 | # | Question | Status (2026-10-22) |
 |---|---|---|
-| 1 | HMC draws consistent with Sigma on fitted cells? | waiting: `draw_sigma.py`, alpha 0.01, job 6457912 |
+| 1 | HMC draws consistent with Sigma on fitted cells? | per cell at alpha 0.01: bulk yes, tails no; waiting on job 6457912 for pooled and d/m |
 | 2 | n_eff against D/H for IPF | not started: the share-distribution check is not written |
 | 3 | Why IPF does not converge | waiting: `ipf_diagnosis.py` submitted |
 
@@ -63,6 +63,22 @@ what would answer it. Move an entry to **Answered** with its answer when done.
   are shrunk and d / m is below 1 when the model holds (`map_dual`).
 - **Expected (user):** at alpha 0.01, the bulk matches the diagonal of Sigma;
   the tails do not match a normal.
+- **Per-cell result, alpha 0.01, constraint leaf cells, against the model's
+  diagonal sqrt(v + tau^2)** (tau 6.0-6.6 by PUMA; from `draw_z_cells.csv`,
+  Baseline, Null space alike): **the expectation holds.**
+  - Bulk, roughly consistent: nonzero cells' median draw 0.33 model sds from
+    the published value (90% of cells within 0.75); the typical cell's 90%
+    band of draws reaches 1.96-2.01 sds, i.e. a spread of about 1 sd (0.34 +
+    1.645 sigma = 1.96; a rough back-calculation). Zero cells tighter: centre
+    0, band 0.3-0.4 sds. 10% of nonzero cells' bands reach beyond 3.2.
+  - Tails, not normal: the typical cell's worst of 4,000 draws is 7.1-7.3 sds
+    (nonzero), 5.3-6.1 (zero), against about 3.5-4 for 4,000 normal draws; 1%
+    of cells beyond 25; worst 85-94. Zero cells: band 0.3-0.4 sds, worst draw
+    5-6 -- narrow bulk, rare far excursions.
+  - tau barely moves the bulk (band 2.07 -> 1.96) but shrinks the extremes
+    (worst cell 524 -> 86): the astronomical published-SE z came mostly from
+    tiny-SE cells. Roll-up's leaf-level numbers are approximate (its model rows
+    are merged cells).
 
 ### 2. Why do n_eff and D/H rank IPF against the posterior differently?
 
