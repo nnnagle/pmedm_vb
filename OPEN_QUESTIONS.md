@@ -6,71 +6,48 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 
 | # | Question | Status (2026-10-22) |
 |---|---|---|
-| 1 | Tails of single HMC draws' \|z\| | answered, pending review: heavy tails across nearly all cells |
+| 1 | HMC draws consistent with Sigma on fitted cells? | marginal check: no (heavy tails); Mahalanobis check proposed |
 | 2 | n_eff against D/H for IPF | not started: the share-distribution check is not written |
 | 3 | Why IPF does not converge | waiting: `ipf_diagnosis.py` submitted |
 
 ## Open
 
-### 1. How heavy are the tails of single HMC draws against the published tables?
+### 1. Are the HMC draws consistent with Sigma on the fitted cells?
 
-- **Status:** answered, pending review (job 6457035, commit 6ef931e;
-  `$R/draw_z_cells.csv`, "Per cell over the draws" in
-  `/lustre/isaac24/proj/UTK0496/pmedm_vb_runs/slurm-6457035.log`). Possible
-  follow-ups below.
-- **Why:** in PUMA 4701503 (Baseline, alpha 0.01), the least diverse HMC
-  reference draw (draw 1457 of 4,000) puts 72 women aged 70-75 in block group
-  470930038014, where the published count is 0 (modelled SE 8.5): z = +8.5 on a
-  constraint cell, 99% of it from one record (SERIALNO 2020HU1090019, 55
-  copies). Even the largest of the ~39 million (draw, block group, cell) |z|
-  values would be about 5.9 under normal tails, so this is either a heavy
-  right tail (weights are exponential in the multipliers) or something else.
-- **Running:** `experiments/draw_z.py`, slurm job 6456752, writing
-  `$R/draw_z.csv`; summary in `/lustre/isaac24/proj/UTK0496/pmedm_vb_runs/slurm-6456752.log`.
-- **Answer from:** per experiment, alpha, level (block group, tract), kind
-  (constraint, held out) and published zero vs. nonzero: the share of draws
-  with a cell over |z| 5.9, and the distribution of each draw's largest |z|.
-  Whether zero cells (modelled SE) or counts drive the tail; whether held-out
-  cells behave like constraint cells.
-- **Result (job 6456752, `$R/draw_z.csv`):** essentially every draw has cells
-  over |z| 5.9 in every group (100%; tract zero cells 98-99.7% in Null space
-  and Roll-up); the median draw's largest |z| is about 11-47, many such cells
-  per draw. Alpha only shrinks correlations (each cell's model variance is its
-  published v at every alpha), so this is misfit on the model's own scale.
-  Nonzero cells exceed zero cells in every row (e.g. Baseline, alpha 0.01,
-  block group constraints: median largest |z| 22.8 against 15.1); held-out
-  exceed constraint cells at block group; alpha 1 mostly worse than 0.01.
-- **First reading, overturned by the per-cell result below:** most large |z|
-  look like cells misfit in every draw, not excursions: small published counts carry tiny replicate SEs
-  (variance 2-3 for counts of 1-2, `floored_variances`), and the runs use no
-  floor, so a miss of tens of people is z of 10-20. The 4701503 draw's z = +8.5
-  stands out only because the typical draw fits that cell (median 1.0).
-- **Running:** per cell, over all draws: how often |z| > 5.9, its median z,
-  published value and SE; persistent misfits (median |z| > 5.9) against
-  excursions per group, and the most persistent misfits listed. That separates
-  persistent misfit from excursions and tests the small-SE reading.
-- **Per-cell result (job 6457035):**
-  - Constraint cells at alpha 0.01 have almost no persistent misfits (median
-    |z| > 5.9): Baseline and Null space 0 at block group, 5-6 at tract; yet
-    16,302 of 23,693 nonzero block-group cells exceed 5.9 in some draw. A
-    typical draw has about 33 of a PUMA's ~5,900 such cells over 5.9 (about
-    0.5%), against ~4e-9 per cell under normal tails. **Answer: the tails are
-    heavy across nearly all cells; the 4701503 z = +8.5 is typical, not odd.**
-  - Persistent misfits, where they exist, are tiny counts with tiny SEs
-    (median published 1-6, SE 0.6-6.5, against 35-72 and 24-37 for all
-    cells): the small-SE reading holds for them. Mostly held-out cells
-    (e.g. B25040.utility_gas, block group 470930048003: published 1, SE 1.22,
-    median allocation 49), where they make 15-45% of the over-5.9 cases.
-  - Alpha 1 has more persistent misfits than 0.01, constraint cells included
-    (Baseline block group nonzero 0 -> 65; Roll-up tract nonzero 42 -> 167);
-    the worst are B26001.total (group quarters population) in tracts of
-    4701501: published 1-18, SE 0.6-1.5, median allocation 39-72, z 30-85.
-    Why alpha matters here is not known.
-  - Roll-up's persistent constraint misfits are by construction: it fits
-    merged cells, while z is against each leaf.
-- **Possible follow-ups (not yet opened):** why alpha 1 misfits the tract
-  group-quarters totals (B26001) so badly; what to do with held-out cells with
-  tiny SEs when scoring held-out accuracy.
+- **Status:** marginal check done (jobs 6456752, 6457035; `$R/draw_z.csv`,
+  `$R/draw_z_cells.csv`): not consistent. Proposed next: the multivariate check
+  (below). Held-out cells are out of scope here.
+- **The question:** in the model the error e = N X'p - Y on the fitted cells
+  has the Gaussian penalty e' Sigma^-1 e / 2 (`pmedm_derivation.md`); each
+  cell's variance is its published v at every alpha (alpha only shrinks the
+  correlations). Do the HMC reference draws' errors look like that?
+- **Why it came up:** PUMA 4701503 (Baseline, alpha 0.01), the least diverse
+  draw (1457) puts 72 women aged 70-75 in block group 470930038014, published 0
+  (SE 8.5): z = +8.5 on a constraint cell. The largest of ~39 million |z| would
+  be about 5.9 under normal tails.
+- **Marginal result, constraint cells only (z = error / sqrt(v)):**
+  - Far heavier tails than Sigma allows, at both alphas. Baseline, alpha 0.01,
+    per draw and PUMA: about 33 of ~5,900 nonzero block-group cells over |z|
+    5.9, 17 zero cells, 42 nonzero tract cells; under N(0, Sigma) even the
+    largest would be about 4. The median draw's largest |z| is 11-47 by group.
+  - Excursions, not fixed cells: at alpha 0.01 almost no cell is off in most
+    draws (persistent, median |z| > 5.9: 0 at block group in Baseline and Null
+    space, 5-6 at tract), yet ~16,000 of 23,700 nonzero block-group cells
+    exceed 5.9 in some draw. The posterior spread of the allocated counts is
+    much wider than sqrt(v).
+  - Alpha 1 adds persistent misfits (Baseline block group 65, tract 53;
+    Roll-up 104, 167): tiny counts with tiny SEs (median published 1-6, SE
+    0.6-2.9). Worst: B26001.total (group quarters) in tracts of 4701501,
+    published 1-18, SE 0.6-1.5, median allocation 39-72. Why alpha matters
+    here is not known. Roll-up's persistent ones are by construction (it fits
+    merged cells; z is per leaf).
+  - The 4701503 z = +8.5 is typical of these draws, not odd.
+- **Limit:** the marginal check ignores Sigma's correlations, strong at alpha
+  0.01.
+- **Proposed next:** per draw, the Mahalanobis distance e' Sigma^-1 e on the
+  fitted cells with the model's own Sigma at each alpha, against chi-square
+  with m (the fitted cells) degrees of freedom: about m +- sqrt(2m) if
+  consistent.
 
 ### 2. Why do n_eff and D/H rank IPF against the posterior differently?
 
