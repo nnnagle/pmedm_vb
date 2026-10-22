@@ -340,7 +340,8 @@ def fmt(row: pd.Series | None, key: str) -> str:
 
 TITLES = {
     "1": ("Cost", "Minutes per PUMA (mean over the four PUMAs). Fit: raking, MAP, or MAP + VB; "
-                  "for HMC, the skewed VB fit that whitens it. Sampling: Laplace and drawing, "
+                  "for HMC, the VB fit that whitens it (Gaussian or skewed, as the experiment "
+                  "sets). Sampling: Laplace and drawing, "
                   "VB drawing (with rejection when truncated), or HMC. Fits ran on 48-core CPU "
                   "nodes, HMC on one GPU; county totals are in the CSV."),
     "2": ("Fit to the published block-group constraints",
