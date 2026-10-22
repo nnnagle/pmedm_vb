@@ -4,7 +4,7 @@ Reads, for each experiment, the scoring ``<root>/<experiment>/scores/<tag>``:
 ``detail/*/<method>_cells.parquet`` (every scored cell),
 ``detail/*/<method>_draws.parquet`` (every draw) and ``all_scores.csv``
 (timings and PSIS k-hat), and writes five tables, plus the tract versions of
-Tables 2 and 3, each as LaTeX (booktabs), CSV (long: one row per experiment,
+Tables 2, 3 and 4, each as LaTeX (booktabs), CSV (long: one row per experiment,
 alpha, method and statistic, unrounded, with ``n`` the cells, draws or PUMAs
 behind it) and Markdown (all in ``tables.md``); and ``draws_sample.csv``, up
 to 1,000 random draws of each (experiment, method, alpha, PUMA) with their
@@ -237,11 +237,15 @@ def cell_statistics(cells: pd.DataFrame) -> list[dict]:
                 True)
             add(table, f"{kind}_is", f"{name}: interval score / SE, mean", subset,
                 "interval_score", mean, True)
-    subset = "constrained_block_group"
-    add("4", "mdiff_p50", "Median diff. p50", subset, "median_diff_ref_sd", quantile(0.50), False)
-    add("4", "mdiff_p99", "Median diff. p99", subset, "median_diff_ref_sd", quantile(0.99), False)
-    add("4", "width_p10", "Width ratio p10", subset, "width_ratio_ref", quantile(0.10), False)
-    add("4", "width_p50", "Width ratio p50", subset, "width_ratio_ref", quantile(0.50), False)
+    for table, subset in (("4", "constrained_block_group"), ("4t", "constrained_tract")):
+        add(table, "mdiff_p50", "Median diff. p50", subset, "median_diff_ref_sd",
+            quantile(0.50), False)
+        add(table, "mdiff_p99", "Median diff. p99", subset, "median_diff_ref_sd",
+            quantile(0.99), False)
+        add(table, "width_p10", "Width ratio p10", subset, "width_ratio_ref", quantile(0.10),
+            False)
+        add(table, "width_p50", "Width ratio p50", subset, "width_ratio_ref", quantile(0.50),
+            False)
     return rows
 
 
@@ -371,6 +375,8 @@ TITLES = {
           "reference median| in reference sds; width ratio: 90% interval width over the "
           "reference's. k-hat: PSIS k-hat of the method's density against the posterior, one "
           "per fit, median [min, max] over PUMAs (methods with a density only)."),
+    "4t": ("Tract agreement with the reference HMC",
+           "As Table 4, for tract constraint leaf cells; k-hat, one per fit, is in Table 4."),
     "5": ("Usability of the draws",
           "Draws of the four PUMAs pooled (4,000 per PUMA; one for raking). A cell is one "
           "record in one block group. D/H: the expected number of distinct household records "
@@ -386,6 +392,7 @@ TITLES = {
 RAKING_NOTES = {
     "default": " IPF has no alpha: one fit per PUMA, shown once.",
     "4": " IPF has no alpha; it is compared with each alpha's reference.",
+    "4t": " IPF has no alpha; it is compared with each alpha's reference.",
     "5": " IPF has no alpha: one fit per PUMA, shown once; its shares of draws are counts "
          "of its four draws, one per PUMA.",
 }
@@ -398,7 +405,7 @@ def wide(stats: pd.DataFrame, table: str, experiments: list[tuple[str, str]]) ->
     labels = {k: part[part.key == k].label.iloc[0] for k in keys}
     index = {(r.experiment, r.alpha, r.method, r.key): r for _, r in part.iterrows()}
     panels = []
-    per_alpha = table == "4"
+    per_alpha = table in ("4", "4t")
     if not per_alpha:
         rows = []
         for method, method_label in METHODS:
