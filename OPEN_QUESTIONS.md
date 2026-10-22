@@ -10,7 +10,7 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 | 2 | n_eff against D/H for IPF | not started: the share-distribution check is not written |
 | 3 | Why IPF does not converge | exp03 4701504: every miss is in a block group the LP cannot meet exactly; other PUMAs and experiments not yet read |
 | 4 | Tweedie error for small cells and zeros, keeping Sigma | zero cells implemented (`+tweedie<w>`); VB fixed (continuation from 90%); starts near the MAP pass on 4701502 (job 6459108); exp04 to use K0 (#5) |
-| 5 | A k = 0 squared-Gaussian dual term: count-like cells with Sigma exact | implemented (`+k0w<w>`); MAP does not converge at alpha 0.01: the barrier at the joint boundary is too thin; options pending |
+| 5 | A k = 0 squared-Gaussian dual term: count-like cells with Sigma exact | k = 0's MAP stalls at alpha 0.01; k > 0 added (`+k0w<w>k<k>`), converges on the synthetic problem; waiting on job 6459604 (real PUMA 4701502) |
 
 ## Open
 
@@ -322,6 +322,23 @@ what would answer it. Move an entry to **Answered** with its answer when done.
   density there. Options: a small k > 0 (the log det term is a true barrier;
   covariance Sigma + 2 k S o S, no atom), K0 at a larger alpha, or a hard wall
   (reflective HMC, Neal 2011; a constrained MAP).
+- **Trying k > 0 (user's choice: a small k and k = 1; a covariance of Sigma
+  plus a diagonal is acceptable).** `+k0w<w>k<k>` adds the barrier
+  -(k/2) log det(I - 2ST) (commit 4af4b9b): covariance Sigma + 2 k S o S, mean
+  a^2 + k diag(S), no atom at zero. Synthetic problem (w = 1.47), all checks
+  pass and the MAP converges: k = 0.01 in 53 iterations, 0.1 in 16, 1 in 9;
+  variance inflation at most 0.1%, 0.6%, 5.7%; correlation change at most
+  0.000, 0.001, 0.011; no sign flips. The synthetic weights understate it: a
+  row's variance grows by (k/8) CV^2, a zero row's by k w^2 / (2 v) (2.25 k at
+  w = 18, v = 72) and its mean becomes at least sqrt(k v) (8.5 people at
+  k = 1, 0.85 at 0.01).
+- **Waiting on job 6459604:** `experiments/k0_check.py` (commit 5a9fdfa) on
+  PUMA 4701502, alpha 0.01, `puma-rpruned+prior3`, w = 18, k = 0.01, 0.1, 1:
+  variance inflation and mean shift (zero / nonzero rows), correlation change
+  over 2 million random row pairs, and whether each k's MAP converges
+  (iterations, seconds). Output in `slurm-6459604.log`. If it runs out of time,
+  rerun with `--no-map`. Next: `start_check.py` on the chosen k, then the pilot
+  HMC run.
 - **Answer from:** an implementation checked as #4's was, then a fit against
   Baseline and the #4 fit on the draws' tails and small-cell fit.
 
