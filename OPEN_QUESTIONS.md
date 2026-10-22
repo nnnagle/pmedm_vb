@@ -10,7 +10,7 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 | 2 | n_eff against D/H for IPF | not started: the share-distribution check is not written |
 | 3 | Why IPF does not converge | exp03 4701504: every miss is in a block group the LP cannot meet exactly; other PUMAs and experiments not yet read |
 | 4 | Tweedie error for small cells and zeros, keeping Sigma | zero cells implemented (`+tweedie<w>`); VB fixed (continuation from 90%); starts near the MAP pass on 4701502 (job 6459108); exp04 to use K0 (#5) |
-| 5 | A k = 0 squared-Gaussian dual term: count-like cells with Sigma exact | idea; checked numerically on a 4-cell example; nothing implemented |
+| 5 | A k = 0 squared-Gaussian dual term: count-like cells with Sigma exact | implemented (`+k0w<w>`); MAP does not converge at alpha 0.01: the barrier at the joint boundary is too thin; options pending |
 
 ## Open
 
@@ -303,6 +303,25 @@ what would answer it. Move an entry to **Answered** with its answer when done.
   log barrier). Possibly in place of the prior's Gaussian tau^2 diagonal.
 - **Depends on:** #4's VB stability, since the same boundary problem returns
   in a joint form.
+- **Implemented** (`assemble/k0.py`, level suffix `+k0w<w>`, every model row,
+  zero rows a^2 = v / (2 w), tau^2 a separate Gaussian prior; no VB). Checked
+  on the synthetic problem (1,672 rows, alpha 0.01): equal to the dense
+  formula; gradient and Hessian (relative error 6e-10) match finite
+  differences; torch equals numpy; on zero rows without spread it equals the
+  Tweedie zero term exactly; value and gradient 0.05 s per 16 draws.
+- **Problem: the MAP does not converge.** The Newton decrement stalls at 0.031
+  and the step halves each iteration; the full dual Hessian is right there
+  (H d = -g to 1e-7 by finite differences). Along the Newton direction the
+  iterate meets the joint boundary (R singular) and the K0 term stays finite
+  up to it (-0.67822 to -0.67885 as R's smallest eigenvalue falls from 3e-4 to
+  6e-9), blowing up only within ~1e-9 of it: its pole scales with the overlap
+  of a with R's null direction, which is nearly zero at alpha 0.01 with
+  thousands of rows (unlike one row or the 4-cell example). So the dual's
+  minimum sits on the boundary -- in primal terms, where the convex envelope is
+  a straight chord -- and the posterior would meet a wall with positive
+  density there. Options: a small k > 0 (the log det term is a true barrier;
+  covariance Sigma + 2 k S o S, no atom), K0 at a larger alpha, or a hard wall
+  (reflective HMC, Neal 2011; a constrained MAP).
 - **Answer from:** an implementation checked as #4's was, then a fit against
   Baseline and the #4 fit on the draws' tails and small-cell fit.
 

@@ -147,12 +147,20 @@ class Hierarchy:
         adds the Gaussian prior on the multipliers, held as ``.prior_sd`` and
         as ``.prior_var``, the diagonal :meth:`sigma` adds. A ``+tweedie<w>``
         suffix (:mod:`pmedm_vb.assemble.tweedie`) gives the rows published as
-        zero a Tweedie error, held as ``.tweedie`` (``None`` without one)."""
+        zero a Tweedie error, held as ``.tweedie`` (``None`` without one); a
+        ``+k0w<w>`` suffix (:mod:`pmedm_vb.assemble.k0`) gives every row the
+        count-shaped ``K0`` error with Sigma's correlations, held in the same
+        slot (it needs ``alpha`` and ``taper``)."""
+        from pmedm_vb.assemble.k0 import K0Term, split_k0
         from pmedm_vb.assemble.prior import prior_variance, split_prior
         from pmedm_vb.assemble.sharecap import split_cap
         from pmedm_vb.assemble.tweedie import TweedieZeros, split_tweedie
 
+        level, k0_w = split_k0(level)
         level, tweedie_w = split_tweedie(level)
+        if k0_w is not None and tweedie_w is not None:
+            raise ValueError("+k0w<w> already gives the zero rows their Tweedie error; "
+                             "drop +tweedie<w>")
         level, prior_sd = split_prior(level)
         level, cap = split_cap(level)
         h = cls._build(inputs, level, alpha=alpha, taper=taper, variance_floor=variance_floor)
@@ -161,6 +169,8 @@ class Hierarchy:
         h.prior_var = prior_variance(prior_sd, inputs.n, inputs.N)
         h.tweedie = (None if tweedie_w is None
                      else TweedieZeros.build(inputs, h, tweedie_w, variance_floor))
+        if k0_w is not None:
+            h.tweedie = K0Term.build(inputs, h, k0_w, alpha, taper, variance_floor)
         return h
 
     @classmethod
