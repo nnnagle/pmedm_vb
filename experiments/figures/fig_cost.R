@@ -19,9 +19,10 @@
 # Colour is the method, shape the experiment, and an arrow runs from each
 # method's Baseline point to its Null space and to its Roll-up point, to show
 # what each remedy buys. IPF is shown by its multinomial draws only: the IPF fit
-# itself has the same cost and the same estimates. MAP + Laplace's scores are
-# far above the others and are left off the score rows, which would otherwise
-# squeeze every other method into a strip; each score panel notes its range.
+# itself has the same cost and the same estimates. MAP + Laplace is left out:
+# its scores are many times the others' and its draws are never plausible
+# (Tables 2-5 have it), and on these axes it would squeeze every other method
+# into a strip.
 #
 # Reads table1_*.csv, table2_*.csv, table2t_*.csv, table3_*.csv, table3t_*.csv
 # and table5_*.csv from the paper tables' folder (experiments/paper_tables.py
@@ -42,7 +43,6 @@ suppressPackageStartupMessages({
 # Display labels, in legend order.
 COST_METHODS <- c(
   ipf_multinomial = "IPF, multinomial",
-  map_laplace = "MAP + Laplace",
   vb_gaussian = "VB Gaussian",
   vb_skewed = "VB skewed",
   vb_gaussian_trunc = "VB Gaussian, truncated",
@@ -54,9 +54,10 @@ COST_EXPERIMENTS <- c(
   exp02_nullspace = "Null space",
   exp03_rollup = "Roll-up"
 )
-# Categorical slots 1-7 of the reference palette (7, the truncated VB, added last), checked for colour-vision
-# deficiency separation; shape (the experiment) and the legend are the other cues.
-COST_METHOD_COLOURS <- c(`IPF, multinomial` = "#2a78d6", `MAP + Laplace` = "#eb6834",
+# Categorical slots of the reference palette (2, orange, was MAP + Laplace's),
+# checked for colour-vision deficiency separation; shape (the experiment) and the
+# legend are the other cues.
+COST_METHOD_COLOURS <- c(`IPF, multinomial` = "#2a78d6",
                          `VB Gaussian` = "#1baf7a", `VB skewed` = "#eda100",
                          `HMC short` = "#e87ba4", `HMC reference` = "#008300",
                          `VB Gaussian, truncated` = "#6250d6")
@@ -108,13 +109,7 @@ plot_cost <- function(data) {
   data$method <- factor(data$method, levels = unname(COST_METHODS))
   data$experiment <- factor(data$experiment, levels = unname(COST_EXPERIMENTS))
   data$row <- factor(data$row, levels = COST_ROWS$row)
-  # MAP + Laplace off the score rows; each score panel says where it is.
-  laplace <- data$method == "MAP + Laplace" & data$row != "Plausible draws"
-  off_scale <- aggregate(value ~ row + alpha_label, data = data[laplace, ], FUN = range)
-  off_scale$label <- sprintf("MAP + Laplace off scale (%.1f to %.1f)",
-                             off_scale$value[, 1], off_scale$value[, 2])
-  off_scale$value <- NULL
-  shown <- data[!laplace, ]
+  shown <- data
   # One arrow per remedy, from the method's Baseline point.
   base <- shown[shown$experiment == "Baseline", ]
   remedies <- merge(shown[shown$experiment != "Baseline", ], base,
@@ -124,12 +119,11 @@ plot_cost <- function(data) {
   # The plausible share is a proportion: show all of 0 to 1.
   bounds <- data.frame(row = factor("Plausible draws", levels = COST_ROWS$row),
                        minutes = min(data$minutes), value = c(0, 1))
-  row_labels <- c(`Fitted block group` = "Interval score / SE:\nfitted block group",
-                  `Fitted tract` = "Interval score / SE:\nfitted tract",
-                  `Held-out block group` = "Interval score / SE:\nheld-out block group",
-                  `Held-out tract` = "Interval score / SE:\nheld-out tract",
-                  `Plausible draws` = paste0("Plausible draws: share\nwith no cell > ",
-                                             100 * COST_WALL, "% of N"))
+  # Short row labels, so that they fit a panel's height; the y-axis title says
+  # what each row measures.
+  row_labels <- c(`Fitted block group` = "Fitted\nblock group", `Fitted tract` = "Fitted\ntract",
+                  `Held-out block group` = "Held-out\nblock group",
+                  `Held-out tract` = "Held-out\ntract", `Plausible draws` = "Plausible\ndraws")
 
   ggplot(shown, aes(x = minutes, y = value, colour = method)) +
     geom_hline(data = held_out, aes(yintercept = COST_ORACLE_SCORE), linetype = "dashed",
@@ -140,21 +134,19 @@ plot_cost <- function(data) {
                  linewidth = 0.4, alpha = 0.6, show.legend = FALSE,
                  arrow = arrow(length = unit(1.4, "mm"), type = "closed")) +
     geom_point(aes(shape = experiment), size = 1.8) +
-    geom_text(data = off_scale, aes(label = label), x = -Inf, y = Inf, hjust = -0.05,
-              vjust = 1.6, size = 2.2, colour = COST_METHOD_COLOURS[["MAP + Laplace"]],
-              inherit.aes = FALSE) +
     facet_grid(row ~ alpha_label, scales = "free_y", switch = "y",
                labeller = labeller(alpha_label = label_parsed, row = row_labels)) +
     scale_x_log10(breaks = c(1, 10, 100, 1000), labels = c("1", "10", "100", "1,000")) +
-    # Room above the points for the off-scale note; on the share row (the only
-    # one reaching below 0.5), no ticks outside 0 to 1.
-    scale_y_continuous(expand = expansion(mult = c(0.06, 0.22)), breaks = function(limits) {
+    # On the share row (the only one reaching below 0.5), no ticks outside 0 to 1.
+    scale_y_continuous(expand = expansion(mult = 0.06), breaks = function(limits) {
       breaks <- pretty(limits)
       if (limits[1] < 0.5) breaks[breaks > -1e-9 & breaks < 1 + 1e-9] else breaks
     }) +
     scale_colour_manual(values = COST_METHOD_COLOURS, name = "Method", drop = FALSE) +
     scale_shape_manual(values = COST_EXPERIMENT_SHAPES, name = "Experiment", drop = FALSE) +
-    labs(x = "Total minutes per PUMA (log scale)", y = NULL) +
+    labs(x = "Total minutes per PUMA (log scale)",
+         y = paste0("Interval score / SE, lower is better (rows 1-4)\n",
+                    "Share of draws with no cell > ", 100 * COST_WALL, "% of N (row 5)")) +
     theme_bw(base_size = 8) +
     theme(panel.grid.minor = element_blank(),
           panel.grid.major = element_line(colour = "grey90", linewidth = 0.3),
