@@ -156,9 +156,9 @@ class Hierarchy:
         from pmedm_vb.assemble.sharecap import split_cap
         from pmedm_vb.assemble.tweedie import TweedieZeros, split_tweedie
 
-        level, k0_w = split_k0(level)
+        level, k0_spec = split_k0(level)
         level, tweedie_w = split_tweedie(level)
-        if k0_w is not None and tweedie_w is not None:
+        if k0_spec is not None and tweedie_w is not None:
             raise ValueError("+k0w<w> already gives the zero rows their Tweedie error; "
                              "drop +tweedie<w>")
         level, prior_sd = split_prior(level)
@@ -169,8 +169,9 @@ class Hierarchy:
         h.prior_var = prior_variance(prior_sd, inputs.n, inputs.N)
         h.tweedie = (None if tweedie_w is None
                      else TweedieZeros.build(inputs, h, tweedie_w, variance_floor))
-        if k0_w is not None:
-            h.tweedie = K0Term.build(inputs, h, k0_w, alpha, taper, variance_floor)
+        if k0_spec is not None:
+            h.tweedie = K0Term.build(inputs, h, k0_spec[0], alpha, taper, variance_floor,
+                                     k=k0_spec[1])
         return h
 
     @classmethod

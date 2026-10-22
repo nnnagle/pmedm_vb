@@ -59,28 +59,30 @@ from pmedm_vb.assemble.sigma import Sigma
 SEPARATOR = "+k0w"
 
 
-def split_k0(level: str) -> tuple[str, float | None]:
-    """``"puma+prior3+k0w18"`` -> ``("puma+prior3", 18.0)``; none -> ``(level, None)``."""
+def split_k0(level: str) -> tuple[str, tuple[float, float] | None]:
+    """``"puma+prior3+k0w18k0.1"`` -> ``("puma+prior3", (18.0, 0.1))``; ``k`` is 0
+    when left out (``+k0w18``); none -> ``(level, None)``."""
     if SEPARATOR not in level:
         return level, None
     head, _, rest = level.partition(SEPARATOR)
     spec, plus, tail = rest.partition("+")
+    w_spec, _, k_spec = spec.partition("k")
     try:
-        w = float(spec)
+        w, k = float(w_spec), float(k_spec or 0)
     except ValueError:
-        raise ValueError(f"a K0 term is +k0w<w>, e.g. +k0w18; got {level!r}") from None
-    if not w > 0:
-        raise ValueError(f"the K0 zero-row weight must be positive, got {level!r}")
-    return head + (plus + tail if plus else ""), w
+        raise ValueError(f"a K0 term is +k0w<w>[k<k>], e.g. +k0w18k0.1; got {level!r}") from None
+    if not w > 0 or not k >= 0:
+        raise ValueError(f"the K0 term needs w > 0 and k >= 0, got {level!r}")
+    return head + (plus + tail if plus else ""), (w, k)
 
 
-def k0_level(level: str, w: float | None) -> str:
-    """The level string with the K0 term appended, for ``--k0-weight``."""
+def k0_level(level: str, w: float | None, k: float = 0.0) -> str:
+    """The level string with the K0 term appended, for ``--k0-weight`` and ``--k0-df``."""
     if w is None:
         return level
-    if not w > 0:
-        raise ValueError(f"--k0-weight must be positive, got {w}")
-    return f"{level}{SEPARATOR}{w:g}"
+    if not w > 0 or not k >= 0:
+        raise ValueError(f"--k0-weight must be positive and --k0-df non-negative, got {w}, {k}")
+    return f"{level}{SEPARATOR}{w:g}" + (f"k{k:g}" if k else "")
 
 
 @dataclass
@@ -103,9 +105,11 @@ class K0Term:
     w: float
     n: int
     N: float
+    k: float = 0.0
 
     @classmethod
-    def build(cls, inputs, hierarchy, w: float, alpha, taper, variance_floor=None) -> "K0Term":
+    def build(cls, inputs, hierarchy, w: float, alpha, taper, variance_floor=None,
+              k: float = 0.0) -> "K0Term":
         if alpha is None:
             raise ValueError("a K0 term needs alpha when the hierarchy is built: S is "
                              "built from Sigma at that alpha")
@@ -116,7 +120,7 @@ class K0Term:
         b = sigma0.b
         return cls(a=a, d_s=sigma0.d / (4 * mu), b_s=None if b is None else b / (2 * a[:, None]),
                    members=sigma0.members, sigma0=sigma0, y=y / inputs.N, w=float(w),
-                   n=int(inputs.n), N=float(inputs.N))
+                   n=int(inputs.n), N=float(inputs.N), k=float(k))
 
     @property
     def c(self) -> float:
@@ -125,8 +129,8 @@ class K0Term:
     # -- numpy, for the MAP ----------------------------------------------
 
     def _solve(self, zeta: np.ndarray):
-        """``(t, f, g, factors)`` at ``zeta``, or ``None`` outside the domain;
-        ``factors`` the Cholesky factor of each group's ``R``."""
+        """``(t, f, g, uppers)`` at ``zeta``, or ``None`` outside the domain;
+        ``uppers`` each group's upper Cholesky factor ``U`` of ``R = U'U``."""
         t = self.n * zeta / self.N
         f = 1 - 2 * self.d_s * t
         if np.any(f <= 0):
@@ -141,9 +145,28 @@ class K0Term:
                     factor = cho_factor(r)
                 except np.linalg.LinAlgError:
                     return None
-                factors.append(factor)
+                chol, lower = factor
+                factors.append(np.triu(chol.T if lower else chol))
                 g[rows] += 2 * bf @ cho_solve(factor, bf.T @ (t[rows] * self.a[rows]))
         return t, f, g, factors
+
+    def _m_factor(self, f: np.ndarray, uppers: list) -> np.ndarray | None:
+        """``V`` with ``(S^-1 - 2T)^-1 = diag(d_S / f) + V V'``: ``F^-1 B_S U^-1``
+        per group (zero off the group's rows)."""
+        if self.b_s is None:
+            return None
+        v = np.zeros_like(self.b_s)
+        for rows, upper in zip(self.members, uppers):
+            v[rows] = np.linalg.solve(upper.T, (self.b_s[rows] / f[rows, None]).T).T
+        return v
+
+    def _barrier(self, f: np.ndarray, uppers: list) -> float:
+        """``-(k/2) log det(I - 2ST) = -(k/2) (sum log f + sum log det R)``."""
+        if not self.k:
+            return 0.0
+        logdet = float(np.log(f).sum()) + sum(2 * float(np.log(np.diag(u)).sum())
+                                                for u in uppers)
+        return -0.5 * self.k * logdet
 
     def feasible(self, zeta: np.ndarray) -> bool:
         return self._solve(zeta) is not None
@@ -153,9 +176,9 @@ class K0Term:
         solved = self._solve(zeta)
         if solved is None:
             return np.inf
-        t, _, g, _ = solved
+        t, f, g, uppers = solved
         gaussian = self.y @ zeta + 0.5 * self.c * (zeta @ self.sigma0.matvec(zeta))
-        return float(np.sum(g * t * self.a) / self.n - gaussian)
+        return float((np.sum(g * t * self.a) + self._barrier(f, uppers)) / self.n - gaussian)
 
     def gradient(self, zeta: np.ndarray) -> np.ndarray:
         """Its gradient in ``zeta``: ``g o g / N - y - c Sigma0 zeta``; NaN outside
@@ -163,24 +186,35 @@ class K0Term:
         solved = self._solve(zeta)
         if solved is None:
             return np.full(zeta.size, np.nan)
-        g = solved[2]
-        return g * g / self.N - self.y - self.c * self.sigma0.matvec(zeta)
+        _, f, g, uppers = solved
+        mean = g * g
+        if self.k:  # k diag((S^-1 - 2T)^-1)
+            v = self._m_factor(f, uppers)
+            mean = mean + self.k * (self.d_s / f + (0 if v is None else np.square(v).sum(1)))
+        return mean / self.N - self.y - self.c * self.sigma0.matvec(zeta)
 
     def sigma_at(self, sigma, zeta: np.ndarray):
         """``sigma`` with ``Sigma0`` replaced by ``K0''(t)``, keeping its prior:
         the dual's Hessian at ``zeta`` is then the Gaussian one's built from it."""
-        t, f, g, factors = self._solve(zeta)
-        diag = 4 * g * g * self.d_s / f
-        if self.b_s is None:
+        _, f, g, uppers = self._solve(zeta)
+        # K0'' = 4 G M G and the barrier's 2 k M o M, M = diag(e) + V V'
+        e = self.d_s / f
+        v = self._m_factor(f, uppers)
+        diag = 4 * g * g * e
+        if v is None:
+            diag = diag + 2 * self.k * e * e
             return _Factored(v=diag + sigma.prior_var, l=None, alpha=sigma.alpha,
                              groups=sigma.groups, prior_var=sigma.prior_var, diag=diag,
                              factor=None)
-        factor = np.zeros_like(self.b_s)
-        for rows, (chol, lower) in zip(self.members, factors):
-            upper = chol if not lower else chol.T  # R = U'U
-            # V = 2 G F^-1 B_S U^-1, so that V V' = 4 G F^-1 B_S R^-1 B_S' F^-1 G
-            scaled = 2 * (g[rows] / f[rows])[:, None] * self.b_s[rows]
-            factor[rows] = np.linalg.solve(np.triu(upper).T, scaled.T).T
+        columns = [2 * g[:, None] * v]
+        if self.k:
+            # M o M = diag(e^2 + 2 e rowsum(V^2)) + sum_ab (v_a o v_b)(v_a o v_b)'
+            diag = diag + 2 * self.k * (e * e + 2 * e * np.square(v).sum(1))
+            r = v.shape[1]
+            first, second = np.triu_indices(r)
+            weight = np.where(first == second, 1.0, np.sqrt(2.0))
+            columns.append(np.sqrt(2 * self.k) * weight * v[:, first] * v[:, second])
+        factor = np.hstack(columns)
         return _Factored(v=diag + np.square(factor).sum(axis=1) + sigma.prior_var, l=None,
                          alpha=sigma.alpha, groups=sigma.groups, prior_var=sigma.prior_var,
                          diag=diag, factor=factor)
@@ -199,7 +233,7 @@ class K0Term:
             members=[torch.as_tensor(rows, device=device) for rows in self.members],
             d0=tensor(self.sigma0.d),
             b0=None if self.sigma0.b is None else tensor(self.sigma0.b),
-            y=tensor(self.y), n=self.n, N=self.N)
+            y=tensor(self.y), n=self.n, N=self.N, k=self.k)
 
 
 @dataclass(frozen=True)
@@ -236,9 +270,11 @@ class TorchK0Term:
     y: object
     n: int
     N: float
+    k: float = 0.0
 
     def _k0(self, zeta):
-        """Per draw, ``K0(t)`` and whether ``zeta`` is inside the domain."""
+        """Per draw, ``K0(t)`` (with the ``k`` barrier) and whether ``zeta`` is
+        inside the domain."""
         import torch
 
         t = self.n * zeta / self.N
@@ -246,6 +282,7 @@ class TorchK0Term:
         ok = (f > 0).all(1)
         f = torch.where(f > 0, f, torch.ones_like(f))
         g = self.a / f
+        logdet = torch.log(f).sum(1)
         if self.b_s is not None:
             eye = torch.eye(self.b_s.shape[1], dtype=zeta.dtype, device=zeta.device)
             parts = []
@@ -255,13 +292,14 @@ class TorchK0Term:
                 chol, info = torch.linalg.cholesky_ex(r)
                 ok = ok & (info == 0)
                 chol = torch.where((info == 0)[:, None, None], chol, eye)
+                logdet = logdet + 2 * torch.log(torch.diagonal(chol, dim1=1, dim2=2)).sum(1)
                 rhs = ((tr * self.a[rows] / fr) @ b)[..., None]
                 x = torch.cholesky_solve(rhs, chol)[..., 0]
                 parts.append((rows, 2 * (x @ b.T) / fr))
             g = g.clone()
             for rows, part in parts:
                 g[:, rows] = g[:, rows] + part
-        return (g * t * self.a).sum(1), ok
+        return (g * t * self.a).sum(1) - 0.5 * self.k * logdet, ok
 
     def feasible(self, zeta):
         import torch
