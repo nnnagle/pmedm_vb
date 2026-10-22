@@ -6,12 +6,12 @@
 # per method. Each bar is one draw, a whole synthetic population: the block
 # group's households stacked by the household record they copy, largest first.
 # The block group's five records with the largest mean share over the shown
-# draws (averaged over the methods) are coloured, the same record the same
-# colour in every bar of the column; every other record is grey, with records
-# under 1% of the households together in the light grey at the top
-# (EXAMPLES_SMALL). The number above each bar is its D/H, distinct household
-# records per household (as Figure B). IPF
-# is one fit: its one bar is repeated.
+# draws (averaged over the methods but the IPF fit, which IPF multinomial
+# stands for) are coloured, the same record the same colour in every bar of the
+# column; every other record is grey, with records under 1% of the households
+# together in the light grey at the top (EXAMPLES_SMALL). The number above
+# each bar is its D/H, distinct household records per household (as Figure B).
+# IPF is one fit: its one bar is repeated.
 #
 # Reads draw_examples.csv from the paper tables' folder (experiments/
 # draw_examples.py --out, e.g. <root>/tables_compare). Writes to <out>:

@@ -24,7 +24,9 @@ records over ``--min-share`` of the block group's households, and one row
 (record -1) for all the others together, with each draw's D/H (``dh``) and
 n_eff, and
 ``highlight``: the rank (1 to ``--top``) of the case's records with the largest
-mean share over the shown draws, averaged over the methods, empty for the rest::
+mean share over the shown draws, averaged over the methods but the IPF fit
+(IPF multinomial stands for it; counting both would count the IPF solution
+twice), empty for the rest::
 
     PMEDM_VB_DATA=/lustre/isaac24/scratch/$USER/pmedm_vb_paper_data \\
     $CONDA_PREFIX/bin/python experiments/draw_examples.py \\
@@ -180,7 +182,7 @@ def main() -> None:
         zone = int(zones[position])
         geoid = str(inputs.zones.iloc[zone].iloc[0])
         by_method = {m: shares[m][:, position, :] for m in METHODS}
-        pooled = np.mean([s.mean(axis=0) for s in by_method.values()], axis=0)
+        pooled = np.mean([s.mean(axis=0) for m, s in by_method.items() if m != "ipf"], axis=0)
         highlight = {int(j): rank + 1 for rank, j in enumerate(np.argsort(-pooled)[:args.top])}
         print(f"{case}: block group {geoid} (row {zone}), {published[zone]:,.0f} households; "
               f"D/H IPF {dh['ipf'][0, position]:.3f}, HMC reference median "
