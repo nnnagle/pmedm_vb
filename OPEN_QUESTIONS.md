@@ -242,6 +242,12 @@ what would answer it. Move an entry to **Answered** with its answer when done.
   adds 2 k S o S to the covariance, largest for small cells, so Sigma and Y
   cannot both be matched; Sigma would enter as a loss when fitting (a, S, k)
   (e.g. Stein's loss, the Gaussian KL from N(0, Sigma)).
+- **Decision (2026-10-22): k = 0, keeping the atom at zero.** Deferred: a
+  covariance of Sigma plus a diagonal without the atom, by adding an
+  independent diagonal gamma piece, -(k/2) sum_i log(1 - 2 s_i t_i): covariance
+  Sigma + diag(2 k s_i^2), mean kept at Y with a_i^2 = Y_i - k s_i (and S built
+  from those a), no atom, but an infinite primal cost at zero allocation (a
+  log barrier). Possibly in place of the prior's Gaussian tau^2 diagonal.
 - **Depends on:** #4's VB stability, since the same boundary problem returns
   in a joint form.
 - **Answer from:** an implementation checked as #4's was, then a fit against
