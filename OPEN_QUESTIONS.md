@@ -6,7 +6,7 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 
 | # | Question | Status (2026-10-22) |
 |---|---|---|
-| 1 | HMC draws consistent with Sigma on fitted cells? | marginal check: no (heavy tails); Mahalanobis check proposed |
+| 1 | HMC draws consistent with Sigma on fitted cells? | `draw_sigma.py` written: the model's Sigma (with tau^2), bulk, tails, Mahalanobis; to run |
 | 2 | n_eff against D/H for IPF | not started: the share-distribution check is not written |
 | 3 | Why IPF does not converge | waiting: `ipf_diagnosis.py` submitted |
 
@@ -44,10 +44,22 @@ what would answer it. Move an entry to **Answered** with its answer when done.
   - The 4701503 z = +8.5 is typical of these draws, not odd.
 - **Limit:** the marginal check ignores Sigma's correlations, strong at alpha
   0.01.
-- **Proposed next:** per draw, the Mahalanobis distance e' Sigma^-1 e on the
-  fitted cells with the model's own Sigma at each alpha, against chi-square
-  with m (the fitted cells) degrees of freedom: about m +- sqrt(2m) if
-  consistent.
+- **Correction:** `draw_z.py` divides by the published SE, but with the
+  multiplier prior (`+prior3`) the model's Sigma is the published one plus
+  tau^2 I, tau = N / (n s), about 6.3 people (`prior.py`). Where v is small
+  that overstates z badly (B26001.total: SE 0.63 against a model sd of about
+  6.3, z about 59 -> 6; the 4701503 cell: +8.5 -> about +6.8). The results
+  above are against the published variances, not the model's.
+- **Next: `experiments/draw_sigma.py`** (to run), on the model's own rows
+  (PUMA rows, roll-up cells) and its own Sigma at each alpha, as `solve_map`'s
+  `mahalanobis`: (1) per row, z = e / sqrt(diag Sigma), pooled by level and
+  zero/nonzero: the bulk (median |z|, share within 1 and 1.96) and the tails
+  (share over 3, 4, 5, 5.9; 99.9% and 99.999% points) beside a normal's, with
+  the published-variance version beside it; (2) per draw d / m = e' Sigma^-1 e
+  / m, correlations included. Not a chi-square test: for the MAP the residuals
+  are shrunk and d / m is below 1 when the model holds (`map_dual`).
+- **Expected (user):** at alpha 0.01, the bulk matches the diagonal of Sigma;
+  the tails do not match a normal.
 
 ### 2. Why do n_eff and D/H rank IPF against the posterior differently?
 
