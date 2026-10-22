@@ -6,9 +6,9 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 
 | # | Question | Status (2026-10-22) |
 |---|---|---|
-| 1 | HMC draws consistent with Sigma on fitted cells? | per cell at alpha 0.01: bulk yes, tails no; waiting on job 6457912 for pooled and d/m |
+| 1 | HMC draws consistent with Sigma on fitted cells? | alpha 0.01: bulk matches Sigma's diagonal, tails do not, correlations do not (d/m 18-27) |
 | 2 | n_eff against D/H for IPF | not started: the share-distribution check is not written |
-| 3 | Why IPF does not converge | waiting: `ipf_diagnosis.py` submitted |
+| 3 | Why IPF does not converge | `ipf_diagnosis.py` finished; output not yet read |
 | 4 | Tweedie error for small cells and zeros, keeping Sigma | zero cells implemented (`+tweedie<w>`); VB unstable; waiting on job 6459108 (HMC starts from the MAP); exp04 not run |
 | 5 | A k = 0 squared-Gaussian dual term: count-like cells with Sigma exact | idea; checked numerically on a 4-cell example; nothing implemented |
 
@@ -52,7 +52,7 @@ what would answer it. Move an entry to **Answered** with its answer when done.
   that overstates z badly (B26001.total: SE 0.63 against a model sd of about
   6.3, z about 59 -> 6; the 4701503 cell: +8.5 -> about +6.8). The results
   above are against the published variances, not the model's.
-- **Running: `experiments/draw_sigma.py`**, alpha 0.01, job 6457912
+- **Done: `experiments/draw_sigma.py`**, alpha 0.01, job 6457912 (completed, 42 min)
   (`$R/draw_sigma.csv`, `$R/draw_sigma_hist.csv`; summaries from "Correlations
   included" on in `/lustre/isaac24/proj/UTK0496/pmedm_vb_runs/slurm-6457912.log`),
   on the model's own rows
@@ -81,6 +81,33 @@ what would answer it. Move an entry to **Answered** with its answer when done.
     (worst cell 524 -> 86): the astronomical published-SE z came mostly from
     tiny-SE cells. Roll-up's leaf-level numbers are approximate (its model rows
     are merged cells).
+- **Pooled result (job 6457912), alpha 0.01, the model's rows, z against
+  sqrt(v + tau^2), all draws and PUMAs:**
+  - Bulk matches the diagonal: nonzero rows median |z| 0.67-0.71 (normal
+    0.674), within 1: 0.67-0.74 (0.683), within 1.96: 0.92-0.945 (0.95), at
+    every level and in every experiment. Zero rows tighter in Baseline and
+    Null space (block group median 0.16-0.17, PUMA ~0).
+  - Tails do not: nonzero rows over 3: 0.9-2.6% (normal 0.27%); over 4:
+    0.3-1.2% (0.006%); over 5.9: 0.13-0.33% (3.6e-9); 99.999% point 15-33
+    (4.4). Zero block-group rows over 5.9: about 1% (Baseline, Null space).
+  - Roll-up's zero rows (merged zero cells) are the worst: median |z| 0.72-0.82
+    and 3-4% over 5.9; its nonzero rows have the lightest tails. Not yet
+    explained (a merged cell carries several cells' allocations against one
+    zero variance -- a guess).
+  - Against the published v alone the tails are heavier still (99.999% point
+    up to 61): tau^2 absorbs part of the excess.
+  - **Correlations do not match:** d / m = e' Sigma^-1 e / m per draw, median
+    25.6 (Baseline), 18.2 (Null space), 27.2 (Roll-up); 5-95%: 16-31. If the
+    draws' errors had Sigma's correlation pattern this would be of order 1
+    (below 1 for the MAP; for posterior draws, by analogy with a linear
+    Gaussian model, at most about 2 -- an analogy, not a derivation for this
+    model). At alpha 0.01 Sigma allows only D = alpha v + tau^2 outside the
+    rank-80 replicate directions, so errors with the right marginal size but
+    outside those directions are penalised heavily. To calibrate the scale:
+    tr(Sigma^-1 diag(v + tau^2)) / m, the d / m of independent errors of the
+    right size -- not yet computed.
+  - Reading: per row the posterior is as wide as Sigma says, with much heavier
+    tails; jointly its errors are not shaped like Sigma.
 
 ### 2. Why do n_eff and D/H rank IPF against the posterior differently?
 
@@ -111,7 +138,7 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 
 ### 3. Why doesn't IPF converge?
 
-- **Status:** waiting on `ipf_diagnosis.py` (commit fecf662); results in
+- **Status:** `ipf_diagnosis.py` (commit fecf662) has finished; output not yet read. Results in
   `$R/ipf_diagnosis/ipf_diagnosis.txt` and `ipf_cells.csv`.
 - **Why:** none of the 12 IPF fits (3 experiments x 4 PUMAs) converged: all
   stopped at 2,000 sweeps. Worst miss |log(m / Y)|: Baseline 1.9-2.8, Null
