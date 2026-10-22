@@ -23,6 +23,25 @@ answer it. Move an entry to **Answered** with its answer when done.
   Whether zero cells (modelled SE) or counts drive the tail; whether held-out
   cells behave like constraint cells.
 
+### 2. Why do n_eff and D/H rank IPF against the posterior differently?
+
+- **Why:** at alpha 0.01, IPF's smallest block-group n_eff (about 12) is above
+  the HMC reference's median (about 9), but its smallest D/H (about 0.06) is
+  below HMC's median (about 0.11) (Figure B, n_eff and D/H versions). Likewise
+  VB's typical draw has a low n_eff but a D/H like HMC's.
+- **Reading so far (from the definitions, not checked):** n_eff = 1 / sum s^2 is
+  set by the largest shares; D/H counts records with a share around 1/H or
+  more, each about 1 however large. So IPF would avoid very large single
+  shares but leave few records with a meaningful share; VB's typical draw
+  would have one dominant record but many others in use.
+- **Needed:** in a block group or two (e.g. the IPF fit's smallest D/H in each
+  PUMA), the distribution of shares under IPF and under a few HMC draws: the
+  largest shares, how many records are over 1/H, 0.1/H and 0.01/H, and how much
+  of the households the records under 1/H hold together.
+- **Answer from:** whether the two measures pick out different features
+  (concentration against breadth) and which one each figure and table should
+  report.
+
 ## Answered
 
 (none yet)
