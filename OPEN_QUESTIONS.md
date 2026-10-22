@@ -6,7 +6,7 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 
 | # | Question | Status (2026-10-22) |
 |---|---|---|
-| 1 | Tails of single HMC draws' \|z\| | results in: job 6457035, to be read |
+| 1 | Tails of single HMC draws' \|z\| | answered, pending review: heavy tails across nearly all cells |
 | 2 | n_eff against D/H for IPF | not started: the share-distribution check is not written |
 | 3 | Why IPF does not converge | waiting: `ipf_diagnosis.py` submitted |
 
@@ -14,9 +14,10 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 
 ### 1. How heavy are the tails of single HMC draws against the published tables?
 
-- **Status:** the per-cell rerun finished (job 6457035, commit 6ef931e):
-  `$R/draw_z_cells.csv`, and the "Per cell over the draws" part of
-  `/lustre/isaac24/proj/UTK0496/pmedm_vb_runs/slurm-6457035.log`; to be read.
+- **Status:** answered, pending review (job 6457035, commit 6ef931e;
+  `$R/draw_z_cells.csv`, "Per cell over the draws" in
+  `/lustre/isaac24/proj/UTK0496/pmedm_vb_runs/slurm-6457035.log`). Possible
+  follow-ups below.
 - **Why:** in PUMA 4701503 (Baseline, alpha 0.01), the least diverse HMC
   reference draw (draw 1457 of 4,000) puts 72 women aged 70-75 in block group
   470930038014, where the published count is 0 (modelled SE 8.5): z = +8.5 on a
@@ -39,8 +40,8 @@ what would answer it. Move an entry to **Answered** with its answer when done.
   Nonzero cells exceed zero cells in every row (e.g. Baseline, alpha 0.01,
   block group constraints: median largest |z| 22.8 against 15.1); held-out
   exceed constraint cells at block group; alpha 1 mostly worse than 0.01.
-- **Reading (not verified):** most large |z| look like cells misfit in every
-  draw, not excursions: small published counts carry tiny replicate SEs
+- **First reading, overturned by the per-cell result below:** most large |z|
+  look like cells misfit in every draw, not excursions: small published counts carry tiny replicate SEs
   (variance 2-3 for counts of 1-2, `floored_variances`), and the runs use no
   floor, so a miss of tens of people is z of 10-20. The 4701503 draw's z = +8.5
   stands out only because the typical draw fits that cell (median 1.0).
@@ -48,6 +49,28 @@ what would answer it. Move an entry to **Answered** with its answer when done.
   published value and SE; persistent misfits (median |z| > 5.9) against
   excursions per group, and the most persistent misfits listed. That separates
   persistent misfit from excursions and tests the small-SE reading.
+- **Per-cell result (job 6457035):**
+  - Constraint cells at alpha 0.01 have almost no persistent misfits (median
+    |z| > 5.9): Baseline and Null space 0 at block group, 5-6 at tract; yet
+    16,302 of 23,693 nonzero block-group cells exceed 5.9 in some draw. A
+    typical draw has about 33 of a PUMA's ~5,900 such cells over 5.9 (about
+    0.5%), against ~4e-9 per cell under normal tails. **Answer: the tails are
+    heavy across nearly all cells; the 4701503 z = +8.5 is typical, not odd.**
+  - Persistent misfits, where they exist, are tiny counts with tiny SEs
+    (median published 1-6, SE 0.6-6.5, against 35-72 and 24-37 for all
+    cells): the small-SE reading holds for them. Mostly held-out cells
+    (e.g. B25040.utility_gas, block group 470930048003: published 1, SE 1.22,
+    median allocation 49), where they make 15-45% of the over-5.9 cases.
+  - Alpha 1 has more persistent misfits than 0.01, constraint cells included
+    (Baseline block group nonzero 0 -> 65; Roll-up tract nonzero 42 -> 167);
+    the worst are B26001.total (group quarters population) in tracts of
+    4701501: published 1-18, SE 0.6-1.5, median allocation 39-72, z 30-85.
+    Why alpha matters here is not known.
+  - Roll-up's persistent constraint misfits are by construction: it fits
+    merged cells, while z is against each leaf.
+- **Possible follow-ups (not yet opened):** why alpha 1 misfits the tract
+  group-quarters totals (B26001) so badly; what to do with held-out cells with
+  tiny SEs when scoring held-out accuracy.
 
 ### 2. Why do n_eff and D/H rank IPF against the posterior differently?
 
