@@ -34,6 +34,12 @@ answer it. Move an entry to **Answered** with its answer when done.
   more, each about 1 however large. So IPF would avoid very large single
   shares but leave few records with a meaningful share; VB's typical draw
   would have one dominant record but many others in use.
+- **Figure A (PUMA 4701504, alpha 0.01):** IPF's D/H is not uniformly low: in
+  a typical block group it is above HMC's (0.35 against about 0.18-0.31), in
+  its least spread one below (0.066 against 0.12-0.17), as Figure B's medians
+  (IPF above) and minimums (IPF below) suggest. So IPF's diversity varies more
+  across block groups than the posterior's; part of the disagreement may be
+  that, rather than n_eff against D/H.
 - **Needed:** in a block group or two (e.g. the IPF fit's smallest D/H in each
   PUMA), the distribution of shares under IPF and under a few HMC draws: the
   largest shares, how many records are over 1/H, 0.1/H and 0.01/H, and how much
