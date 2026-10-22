@@ -9,7 +9,7 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 | 1 | HMC draws consistent with Sigma on fitted cells? | per cell at alpha 0.01: bulk yes, tails no; waiting on job 6457912 for pooled and d/m |
 | 2 | n_eff against D/H for IPF | not started: the share-distribution check is not written |
 | 3 | Why IPF does not converge | waiting: `ipf_diagnosis.py` submitted |
-| 4 | Tweedie error for small cells and zeros, keeping Sigma | idea; nothing written |
+| 4 | Tweedie error for small cells and zeros, keeping Sigma | design: p = 1 fits the dual, 1 < p < 2 does not (corrected); decisions pending |
 
 ## Open
 
@@ -149,13 +149,23 @@ what would answer it. Move an entry to **Answered** with its answer when done.
   moments still Sigma there, correlations untouched. Motivation, not fact: a
   published count is roughly a sum over a random number of sampled people of
   their positive weights (ACS weights are also raked to controls).
-- **Effect on the model (derived from `pmedm_derivation.md`, not checked
-  against a reference):** the Gaussian term's conjugate gives the dual's
-  (1/2) lambda' Sigma lambda; with the split, the low-rank part stays
-  quadratic and each cell's Tweedie penalty (its deviance, convex in mu) adds
-  its own convex conjugate, so the dual stays convex. Precedent: `rake.py`'s
-  unbalanced Sinkhorn already uses a Poisson-type KL penalty (no zeros, no
-  correlations).
+- **Effect on the model -- corrected:** the Tweedie penalty is NOT convex in
+  the mean mu for 1 < p < 2: psi(mu) = [mu^(2-p)/(2-p) - Y mu^(1-p)/(1-p)] / phi,
+  psi'' = mu^(-p-1) [p Y - (p-1) mu] / phi, convex only below p Y / (p-1)
+  (3 Y at p = 1.5) and concave everywhere at Y = 0 (Tweedie is concave in its
+  canonical parameter, not its mean). PMEDM's posterior over the multipliers
+  rests on the convex dual (`pmedm_derivation.md`), so a 1 < p < 2 Tweedie is a
+  new model derivation, not a new dual term; an earlier version of this entry
+  said otherwise.
+- **What fits the framework: p = 1, an overdispersed Poisson** (the Tweedie
+  family's convex end): psi(mu) = (mu - Y log mu) / phi, variance phi mu,
+  psi'' = Y / (phi mu^2) >= 0, at Y = 0 linear (mu / phi). Its conjugate is in
+  closed form but finite on one side only (a one-sided bound on each
+  multiplier): HMC must respect it (e.g. a transformed multiplier), MAP and VB
+  need checking near it. The low-rank Gaussian part with Sigma's correlations
+  stays. Precedent: `rake.py`'s unbalanced Sinkhorn uses this generalised-KL
+  penalty (no zeros, no correlations). Calibration phi_i = D_i / Y_i for
+  nonzero cells.
 - **Caution:** its penalty for over-allocation grows more slowly than the
   Gaussian's (like sqrt(mu) at Y = 0 for p = 1.5), so it would allow more
   over-allocation into small and zero cells, not less. Illustration, 72
@@ -163,9 +173,11 @@ what would answer it. Move an entry to **Answered** with its answer when done.
   the variance at mu = 1 set to 72, about 0.24 nats. A better error model, not
   a way to trim extreme draws (that would act on concentration instead: a
   tighter multiplier prior, the share cap `--share-cap`).
-- **Choices to make:** p (fixed, e.g. 1.5, or estimated across cell sizes);
-  how to calibrate phi for zero cells, where D_i is the modelled zero
-  variance but the Tweedie variance depends on mu.
+- **Choices to make:** p = 1 (fits the dual) or 1 < p < 2 (a new
+  derivation); how to calibrate phi for zero cells (at mu = 1 against the
+  modelled zero variance, phi = 72, 72 people in a zero cost 1 nat; or the
+  area's typical phi of small nonzero cells); which PUMA (fastest HMC
+  reference: `hmc_seconds` in `all_scores.csv`).
 - **Answer from:** a fit with the Tweedie diagonal, compared with today's on
   held-out accuracy, small-cell and zero-cell fit, and the draws' tails.
 
