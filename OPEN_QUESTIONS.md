@@ -9,7 +9,8 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 | 1 | HMC draws consistent with Sigma on fitted cells? | per cell at alpha 0.01: bulk yes, tails no; waiting on job 6457912 for pooled and d/m |
 | 2 | n_eff against D/H for IPF | not started: the share-distribution check is not written |
 | 3 | Why IPF does not converge | waiting: `ipf_diagnosis.py` submitted |
-| 4 | Tweedie error for small cells and zeros, keeping Sigma | design: p = 1 fits the dual, 1 < p < 2 does not (corrected); decisions pending |
+| 4 | Tweedie error for small cells and zeros, keeping Sigma | zero cells implemented (`+tweedie<w>`); VB with it unstable, being tested; exp04 not run |
+| 5 | A k = 0 squared-Gaussian dual term: count-like cells with Sigma exact | idea; checked numerically on a 4-cell example; nothing implemented |
 
 ## Open
 
@@ -135,7 +136,15 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 
 ### 4. A Tweedie error model for small cells and zeros, keeping Sigma?
 
-- **Status:** idea; nothing written or run.
+- **Status:** the published zeros' term is implemented as the dual's CGF
+  (`assemble/tweedie.py`, level suffix `+tweedie<w>`, derivation in
+  `pmedm_derivation.md`; spec `experiments/tweedie/exp04_tweedie.json`, PUMA
+  4701502, alpha 0.01, w = 18). Its exact primal is the square-root-scale
+  penalty (sqrt(m) - sqrt(mu0))^2 / w, which is convex; the convexity problem
+  below is the Tweedie *likelihood's*, not this term's. Open: VB with the term
+  is unstable (ELBO noise); the continuation from 90% of the bound is being
+  tested before exp04 is run. Nonzero cells are still Gaussian: #5 would
+  extend the term to them with Sigma's correlations.
 - **Why:** for large cells a Gaussian sampling error is plausible; for small
   cells, and most obviously zeros, it cannot be (a published count is
   nonnegative, often exactly zero). The model's error is Gaussian with Sigma
@@ -180,6 +189,52 @@ what would answer it. Move an entry to **Answered** with its answer when done.
   reference: `hmc_seconds` in `all_scores.csv`).
 - **Answer from:** a fit with the Tweedie diagonal, compared with today's on
   held-out accuracy, small-cell and zero-cell fit, and the draws' tails.
+
+### 5. A k = 0 squared-Gaussian dual term: count-like cells with Sigma exact?
+
+- **Status:** idea. Algebra checked numerically on a 4-cell example with
+  negative correlations (scratch, not in the repo); nothing implemented.
+- **Why:** #4 makes published zeros count-like but leaves every nonzero cell
+  Gaussian, and small nonzero counts have heavy right tails too. Giving each
+  cell its own count-like shape *and* Sigma's correlations was the aim. A
+  linear mix of independent per-cell Tweedies (a Cholesky factor of Sigma's
+  correlation; cf. Cuenin, Jorgensen and Kokonendji 2016, Computational
+  Statistics, "full multivariate Tweedie") matches Sigma but not the shapes:
+  at alpha 0.01 a cell's own component is about 1% of its variance.
+- **The term:** with a = sqrt(Y), A = diag(a), S = A^-1 Sigma A^-1 / 4 and
+  T = diag(t), replace the Gaussian CGF Y't + t' Sigma t / 2 in the dual by
+
+      K0(t) = a' T (I - 2 S T)^-1 a,    on  S^-1 - 2 T positive definite.
+
+  It is the k = 0 member of m = sum_r u_r o u_r, u_r ~ N(a_r, S), whose CGF is
+  -(k/2) log det(I - 2 S T) + tr[T (I - 2 S T)^-1 Omega]: mean a^2 + k diag S,
+  covariance 4 Omega o S + 2 k S o S (k = 1 the noncentral squared Gaussian;
+  Omega = 0 the Krishnamoorthy-Parthasarathy 1951 multivariate gamma).
+- **Checked (4 cells, correlations to -0.6):** K0'(0) = Y and K0''(0) = Sigma
+  exactly, at any alpha; each cell's marginal is the #4 term, Tweedie p = 1.5
+  with w_i = v_i / (2 Y_i); K0 is convex (log det concave, matrix inverse
+  operator convex; smallest Hessian eigenvalue over 2,000 points in the domain
+  0.24); K0 -> Y't + t' Sigma t / 2 for large counts. K0(t) = sup_u
+  [t'(u o u) - (u - a)' S^-1 (u - a) / 2], so its primal penalty is the convex
+  envelope of the multivariate square-root-scale Gaussian (each root of
+  either sign); it departs from that penalty only where a large
+  over-allocation meets a negative correlation.
+- **Unknown:** whether exp(K0) is a genuine joint MGF when S has negative
+  entries (true in one dimension, compound Poisson of exponentials). Not
+  needed when the dual is taken as a model in its own right, as in #4.
+- **Costs:** the domain is joint (an 80 x 80 positive-definiteness check via
+  Woodbury, not a bound per row), so HMC rejects past it and VB needs a
+  continuation, as in #4. S keeps Sigma's diagonal-plus-rank-80 structure, so
+  K0 and its derivatives cost O(n r^2). Zero cells use a = sqrt(mu0) as in #4.
+  The prior's tau^2 stays a Gaussian prior on the multipliers.
+- **Variant k > 0:** removes each cell's atom at zero (gamma-like shapes) but
+  adds 2 k S o S to the covariance, largest for small cells, so Sigma and Y
+  cannot both be matched; Sigma would enter as a loss when fitting (a, S, k)
+  (e.g. Stein's loss, the Gaussian KL from N(0, Sigma)).
+- **Depends on:** #4's VB stability, since the same boundary problem returns
+  in a joint form.
+- **Answer from:** an implementation checked as #4's was, then a fit against
+  Baseline and the #4 fit on the draws' tails and small-cell fit.
 
 ## Answered
 
