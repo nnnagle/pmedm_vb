@@ -22,6 +22,22 @@ answer it. Move an entry to **Answered** with its answer when done.
   with a cell over |z| 5.9, and the distribution of each draw's largest |z|.
   Whether zero cells (modelled SE) or counts drive the tail; whether held-out
   cells behave like constraint cells.
+- **Result (job 6456752, `$R/draw_z.csv`):** essentially every draw has cells
+  over |z| 5.9 in every group (100%; tract zero cells 98-99.7% in Null space
+  and Roll-up); the median draw's largest |z| is about 11-47, many such cells
+  per draw. Alpha only shrinks correlations (each cell's model variance is its
+  published v at every alpha), so this is misfit on the model's own scale.
+  Nonzero cells exceed zero cells in every row (e.g. Baseline, alpha 0.01,
+  block group constraints: median largest |z| 22.8 against 15.1); held-out
+  exceed constraint cells at block group; alpha 1 mostly worse than 0.01.
+- **Reading (not verified):** most large |z| look like cells misfit in every
+  draw, not excursions: small published counts carry tiny replicate SEs
+  (variance 2-3 for counts of 1-2, `floored_variances`), and the runs use no
+  floor, so a miss of tens of people is z of 10-20. The 4701503 draw's z = +8.5
+  stands out only because the typical draw fits that cell (median 1.0).
+- **Next (proposed):** per cell, over all draws: how often |z| > 5.9, its
+  median z, published value and SE; the most persistent misfits listed. That
+  separates persistent misfit from excursions and tests the small-SE reading.
 
 ### 2. Why do n_eff and D/H rank IPF against the posterior differently?
 
