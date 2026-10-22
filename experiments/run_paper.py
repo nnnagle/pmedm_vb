@@ -16,7 +16,14 @@ and nothing for it is queued or running:
 5. **combine** -- per experiment, once every call has scores;
 6. **tables** -- ``paper_tables.py``: the baseline on its whole grid into
    ``<root>/tables``, and the three experiments on the PUMAs and alphas they
-   share into ``<root>/tables_compare``.
+   share into ``<root>/tables_compare``; redone when the scores are newer or
+   ``paper_tables.py`` has changed (its stamp, ``provenance.py``);
+7. **examples** -- ``draw_examples.py``, Figure A's data, into
+   ``<root>/tables_compare/draw_examples.csv`` (``--examples-experiment``,
+   ``--examples-puma``, ``--examples-alpha``); redone when its code changes;
+8. **results** -- ``<root>/results.zip`` for the Quarto project
+   (``figures/make_results.py``), built in the driver itself once the tables
+   and examples are current, and rebuilt when any file it packs is newer.
 
 An experiment JSON's ``subset`` (``{"pumas": [...], "alphas": [...]}``) narrows
 what is run, scored and tabled to part of its grid; exp02 and exp03 run on one
@@ -65,8 +72,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import provenance as pv  # noqa: E402
 import run_experiment as rx  # noqa: E402
 import score_experiment as sx  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "figures"))
+
+import make_results  # noqa: E402
 
 EXPERIMENT_FILES = ["exp01_baseline.json", "exp02_nullspace.json", "exp03_rollup.json"]
 
@@ -75,6 +87,8 @@ DATA_SLURM = ["--partition=campus", "--qos=campus", "--time=04:00:00", "--cpus-p
 TREES_SLURM = ["--partition=short", "--qos=short", "--time=01:00:00", "--cpus-per-task=4",
                "--mem=32G"]
 TABLES_SLURM = ["--partition=short", "--qos=short", "--time=01:00:00", "--mem=64G"]
+EXAMPLES_SLURM = ["--partition=short", "--qos=short", "--time=01:00:00", "--cpus-per-task=4",
+                  "--mem=32G"]
 NOTIFY = ["--partition=short", "--qos=short", "--time=00:01:00", "--mem=100M",
           "--account=acf-utk0011", "--mail-type=END", "--mail-user=nnagle@utk.edu"]
 
@@ -103,6 +117,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-gpu-jobs", type=int, default=6)
     parser.add_argument("--max-attempts", type=int, default=4,
                         help="submissions of one stage's job before asking for attention")
+    parser.add_argument("--examples-experiment", default="exp01_baseline",
+                        help="Figure A's experiment (draw_examples.py)")
+    parser.add_argument("--examples-puma", default="4701504", help="Figure A's PUMA")
+    parser.add_argument("--examples-alpha", type=float, default=0.01, help="Figure A's alpha")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     args.root = args.root.resolve()
@@ -344,13 +362,41 @@ def table_sets(specs) -> list[dict]:
 
 
 def tables_current(specs, args, out_name: str = "tables") -> bool:
+    """Written by today's paper_tables.py, for this tag and these experiments,
+    after the last combine."""
     out = args.root / out_name / "tables.md"
-    if not out.exists():
+    if pv.stale(out, pv.TABLES_SCRIPTS, tag=args.tag, experiments=[s["name"] for s in specs]):
         return False
     summaries = [args.root / s["name"] / "scores" / args.tag / "all_scores.csv" for s in specs]
     if not all(path.exists() for path in summaries):
         return False
-    return out.stat().st_mtime > max(path.stat().st_mtime for path in summaries)
+    return pv.stamp_path(out).stat().st_mtime > max(path.stat().st_mtime for path in summaries)
+
+
+def examples_output(args) -> Path:
+    return args.root / "tables_compare" / "draw_examples.csv"
+
+
+def examples_stale(args) -> str | None:
+    """Why Figure A's data is not current, or None."""
+    return pv.stale(examples_output(args), pv.EXAMPLES_SCRIPTS,
+                    experiment=args.examples_experiment, puma=args.examples_puma,
+                    alpha=args.examples_alpha)
+
+
+def results_stale(args) -> str | None:
+    """Why results.zip is not current with what it packs, or None."""
+    out = args.root / "results.zip"
+    if not out.exists():
+        return f"{out} is missing"
+    try:
+        newest = max(make_results.inputs(args.root / "tables_compare"),
+                     key=lambda path: path.stat().st_mtime)
+    except SystemExit as error:
+        return str(error)
+    if newest.stat().st_mtime > out.stat().st_mtime:
+        return f"{newest} is newer than {out}"
+    return None
 
 
 def advance(args) -> int:
@@ -375,11 +421,38 @@ def advance(args) -> int:
                              "--experiments", *[s["name"] for s in table["specs"]],
                              *table["filter"], "--out", str(args.root / table["out"])],
                             TABLES_SLURM)
-        if done:
-            print("done: every stage is complete; tables in",
-                  ", ".join(str(args.root / t["out"]) for t in table_sets(specs)))
-            return DONE
-        return WAITING
+        # Figure A's data, from the fits alone.
+        why = examples_stale(args)
+        if why:
+            done = False
+            spec = next((s for s in specs if s["name"] == args.examples_experiment), None)
+            if spec is None:
+                raise Attention(f"--examples-experiment {args.examples_experiment} is not "
+                                f"among {[s['name'] for s in specs]}")
+            if jobs.is_live("examples"):
+                print("examples: job live")
+            else:
+                print(f"examples: {why}")
+                guard(jobs, "examples", args)
+                jobs.sbatch("examples", spec, "run_python.sbatch",
+                            ["draw_examples.py", "--root", str(args.root),
+                             "--experiment", args.examples_experiment,
+                             "--puma", args.examples_puma, "--alpha", f"{args.examples_alpha:g}",
+                             "--out", str(examples_output(args))], EXAMPLES_SLURM)
+        if not done:
+            return WAITING
+        why = results_stale(args)
+        if why:
+            print(f"results: {why}; building")
+            if not args.dry_run:
+                try:
+                    make_results.build(args.root / "tables_compare", args.root / "results.zip")
+                except SystemExit as error:
+                    raise Attention(f"results.zip: {error}") from None
+        print("done: every stage is complete; tables in",
+              ", ".join(str(args.root / t["out"]) for t in table_sets(specs)),
+              f"and {args.root / 'results.zip'}")
+        return DONE
     except Attention as error:
         print(f"NEEDS ATTENTION: {error}")
         return ATTENTION
@@ -413,7 +486,10 @@ def driver_args(args) -> list[str]:
     out = ["--specs", str(args.specs.resolve()),
            "--root", str(args.root), "--tag", args.tag, "--draws", str(args.draws),
            "--every", str(args.every), "--max-gpu-jobs", str(args.max_gpu_jobs),
-           "--max-attempts", str(args.max_attempts)]
+           "--max-attempts", str(args.max_attempts),
+           "--examples-experiment", args.examples_experiment,
+           "--examples-puma", args.examples_puma,
+           "--examples-alpha", f"{args.examples_alpha:g}"]
     if args.data_dir is not None:
         out += ["--data-dir", str(args.data_dir.resolve())]
     return out
@@ -494,6 +570,11 @@ def status(args) -> None:
         current = tables_current(table["specs"], args, table["out"])
         print(f"  {table['out']:<15} {'current' if current else 'not current'}"
               + (" (job live)" if jobs.is_live(table["key"]) else ""))
+    why = examples_stale(args)
+    print(f"  {'examples':<15} {'current' if not why else why}"
+          + (" (job live)" if jobs.is_live("examples") else ""))
+    why = results_stale(args)
+    print(f"  {'results.zip':<15} {'current' if not why else why}")
     driver = jobs.latest.get("driver")
     if driver:
         print(f"  driver    job {driver['job_id']} {'queued or running' if jobs.is_live('driver') else 'not live'}")

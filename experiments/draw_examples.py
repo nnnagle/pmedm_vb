@@ -45,6 +45,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import compare_methods as cm  # noqa: E402
+from provenance import EXAMPLES_SCRIPTS, write_stamp  # noqa: E402
 from score_experiment import cell_calls  # noqa: E402
 
 from pmedm_vb.assemble.allcells import table_leaves  # noqa: E402
@@ -201,6 +202,9 @@ def main() -> None:
     frame["highlight"] = frame["highlight"].astype("Int64")
     args.out.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(args.out, index=False)
+    write_stamp(args.out, EXAMPLES_SCRIPTS, experiment=args.experiment, puma=args.puma,
+                alpha=args.alpha, draws=args.draws, select_draws=args.select_draws,
+                seed=args.seed)
     print(f"wrote {len(frame):,} rows to {args.out}")
 
 

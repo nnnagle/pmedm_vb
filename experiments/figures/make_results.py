@@ -5,7 +5,10 @@ script in the repository or a data file in the paper tables' folder. Every file
 lands flat in ``results/`` inside the zip, beside a ``MANIFEST.txt`` that
 records where each came from, its size and modification time, and the
 repository commit. A manifest line that matches no file stops the script, so a
-missing table is noticed here rather than when the paper renders::
+missing table is noticed here rather than when the paper renders; so does a
+table or data file written by older code than the repository's (its stamp,
+experiments/provenance.py): rerun the driver (run_paper.py), which brings them
+up to date and builds ``<root>/results.zip`` itself. By hand::
 
     $CONDA_PREFIX/bin/python experiments/figures/make_results.py \\
         --tables $RUNS/paper_v3/tables_compare --out $RUNS/paper_v3/results.zip
@@ -19,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+import sys
 import time
 import zipfile
 from pathlib import Path
@@ -26,6 +30,14 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 MANIFEST = HERE / "results_manifest.txt"
+
+sys.path.insert(0, str(HERE.parent))
+
+from provenance import EXAMPLES_SCRIPTS, TABLES_SCRIPTS, stale  # noqa: E402
+
+#: Each stamped output in the tables' folder and the scripts that write it; a
+#: tables-folder file without its own stamp is paper_tables.py's (tables.md's).
+STAMPED = {"draw_examples.csv": EXAMPLES_SCRIPTS}
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,16 +72,42 @@ def entries(tables: Path) -> list[tuple[Path, str, str]]:
     return out
 
 
-def main() -> None:
-    args = parse_args()
-    files = entries(args.tables.resolve())
+def staleness(tables: Path, files) -> list[str]:
+    """Why any of ``files`` from the tables' folder was written by older code."""
+    reasons = set()
+    for path, source, _ in files:
+        if source != "tables":
+            continue
+        if path.name in STAMPED:
+            why = stale(path, STAMPED[path.name])
+        else:
+            why = stale(tables / "tables.md", TABLES_SCRIPTS)
+        if why:
+            reasons.add(why)
+    return sorted(reasons)
+
+
+def inputs(tables: Path) -> list[Path]:
+    """Every file results.zip is built from, the manifest included."""
+    return [MANIFEST, *(path for path, _, _ in entries(tables))]
+
+
+def build(tables: Path, out: Path) -> list[str]:
+    """Write ``out`` from ``tables``; the MANIFEST.txt lines."""
+    tables = tables.resolve()
+    files = entries(tables)
+    reasons = staleness(tables, files)
+    if reasons:
+        raise SystemExit("not building results.zip; rerun run_paper.py first:\n  "
+                         + "\n  ".join(reasons))
     commit = subprocess.run(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"],
                             capture_output=True, text=True).stdout.strip() or "unknown"
     lines = [f"results.zip, made {time.strftime('%Y-%m-%d %H:%M')} from commit {commit}",
-             f"tables: {args.tables.resolve()}", "",
+             f"tables: {tables}", "",
              f"{'file':<62} {'bytes':>10}  {'modified':<16}  used by"]
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(args.out, "w", zipfile.ZIP_DEFLATED) as archive:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    partial = out.with_name(out.name + ".partial")
+    with zipfile.ZipFile(partial, "w", zipfile.ZIP_DEFLATED) as archive:
         for path, source, used in files:
             archive.write(path, f"results/{path.name}")
             stat = path.stat()
@@ -77,7 +115,13 @@ def main() -> None:
                          f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(stat.st_mtime))}  "
                          f"{used} ({source})")
         archive.writestr("results/MANIFEST.txt", "\n".join(lines) + "\n")
-    print("\n".join(lines))
+    partial.replace(out)
+    return lines
+
+
+def main() -> None:
+    args = parse_args()
+    print("\n".join(build(args.tables, args.out)))
     print(f"\nwrote {args.out} ({len(files)} files)")
 
 

@@ -36,13 +36,17 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-from pmedm_vb.assemble.allcells import SUBTOTAL_MARK
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from pmedm_vb.assemble.allcells import SUBTOTAL_MARK  # noqa: E402
+from provenance import TABLES_SCRIPTS, write_stamp  # noqa: E402
 
 #: (folder, label)
 EXPERIMENTS = [("exp01_baseline", "Baseline"), ("exp02_nullspace", "Null space"),
@@ -547,6 +551,8 @@ def main() -> None:
         md.append(markdown(stats, table, experiments))
     (args.out / "tables.md").write_text("\n".join(md))
     pd.concat(samples, ignore_index=True).to_csv(args.out / "draws_sample.csv", index=False)
+    # Last, so that a run cut short leaves the folder unstamped (run_paper.py).
+    write_stamp(args.out / "tables.md", TABLES_SCRIPTS, tag=args.tag, experiments=args.experiments)
     print(f"wrote {args.out}")
 
 
