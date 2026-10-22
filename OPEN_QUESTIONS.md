@@ -64,6 +64,29 @@ answer it. Move an entry to **Answered** with its answer when done.
   (concentration against breadth) and which one each figure and table should
   report.
 
+### 3. Why doesn't IPF converge?
+
+- **Why:** none of the 12 IPF fits (3 experiments x 4 PUMAs) converged: all
+  stopped at 2,000 sweeps. Worst miss |log(m / Y)|: Baseline 1.9-2.8, Null
+  space 2.1-2.9, Roll-up 0.53-1.58. Infeasible rows (a published nonzero cell
+  with no carrier, or with every carrier removed by the block group's zeros):
+  Baseline 5-17, Null space 5-17, Roll-up 0-2 per PUMA; exp03_rollup 4701502
+  has none and still does not converge.
+- **Not slow convergence:** the worst residual is flat from sweep 100-500 on
+  in every fit (saved trace), so the margins cannot all be met.
+- **Reading:** Census's tables can be mutually consistent and still not be
+  attainable by reweighting the PUMA's records: missing carriers, carriers
+  removed by published zeros, or records whose bundles of categories cannot add
+  up to every margin at once.
+- **Running next:** `experiments/ipf_diagnosis.py` (rewritten for paper_v3):
+  per experiment and PUMA, on IPF's fitted cells, no-carrier and removed-by-zero
+  cells, same-universe table totals that differ (the tables' consistency on the
+  data), and an exact LP per block group: can nonnegative weights meet every
+  fitted cell, and if not, the least relaxation and which cells; IPF's misses
+  attributed to each.
+- **Answer from:** which causes account for IPF's misses, and whether any
+  block group's tables are inconsistent on the data.
+
 ## Answered
 
 (none yet)
