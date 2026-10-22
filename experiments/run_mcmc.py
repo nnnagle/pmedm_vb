@@ -234,6 +234,10 @@ def parse_args() -> argparse.Namespace:
                         help="the Gaussian prior on the multipliers, zeta ~ N(0, s^2) "
                              "(pmedm_vb.assemble.prior), e.g. 3; the hierarchy level gains "
                              "+prior<sd>")
+    parser.add_argument("--tweedie-weight", type=float, default=None,
+                        help="a Tweedie error for the rows published as zero, with amounts of "
+                             "this mean, the average weight w (pmedm_vb.assemble.tweedie), e.g. 18; "
+                             "the hierarchy level gains +tweedie<w>")
     args = parser.parse_args()
     given = [name for name in ("scale_from", "block_from", "diag_from")
              if getattr(args, name, None) is not None]
@@ -248,10 +252,13 @@ def parse_args() -> argparse.Namespace:
     from pmedm_vb.assemble.hierarchy import level_name
     from pmedm_vb.assemble.prior import prior_level
     from pmedm_vb.assemble.sharecap import cap_level
+    from pmedm_vb.assemble.tweedie import tweedie_level
 
     if getattr(args, "hierarchy", None) is not None:
-        args.hierarchy = prior_level(cap_level(level_name(args.hierarchy, args.collapse, args.rollup),
-                                               args.share_cap, args.cap_strength), args.prior_sd)
+        args.hierarchy = tweedie_level(
+            prior_level(cap_level(level_name(args.hierarchy, args.collapse, args.rollup),
+                                  args.share_cap, args.cap_strength), args.prior_sd),
+            args.tweedie_weight)
     return args
 
 

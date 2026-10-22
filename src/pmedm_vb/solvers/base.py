@@ -149,6 +149,7 @@ def dual_state(
     op = op or ConstraintOperator(inputs)
     c = penalty_scale(inputs)
     cap = getattr(hierarchy, "cap", None)
+    tweedie = getattr(hierarchy, "tweedie", None)
     if hierarchy is None or hierarchy.is_trivial:
         logits, total = _log_weights(inputs, lam, op)
         p = np.exp(logits - total)
@@ -160,6 +161,8 @@ def dual_state(
         if cap is not None:
             phi, cap_grad = _cap_terms(inputs, cap, logits, total, u, op)
             objective, gradient = objective + phi, gradient + cap_grad
+        if tweedie is not None:  # zero rows' Tweedie error in place of the Gaussian
+            objective, gradient = objective + tweedie.value(lam), gradient + tweedie.gradient(lam)
         return DualState(lam=lam, p=p, u=u, objective=objective, gradient=gradient, lam_data=lam)
     h = hierarchy
     lam_data = h.lambda_data(lam)
@@ -172,6 +175,9 @@ def dual_state(
     objective = float(h.y_ext @ zeta + total + 0.5 * c * (zeta @ sigma_zeta)
                       + 0.5 * (lam @ ridge))
     gradient = h.zeta_T(h.y_ext + c * sigma_zeta) - h.lambda_data_T(u) + ridge
+    if tweedie is not None:  # zero rows' Tweedie error in place of the Gaussian
+        objective = objective + tweedie.value(zeta)
+        gradient = gradient + h.zeta_T(tweedie.gradient(zeta))
     if cap is not None:
         phi, cap_grad = _cap_terms(inputs, cap, logits, total, u, op)
         objective, gradient = objective + phi, gradient + h.lambda_data_T(cap_grad)

@@ -145,16 +145,22 @@ class Hierarchy:
         adds the share cap to any level; it is held as ``.cap`` (``None``
         without one). A ``+prior<sd>`` suffix (:mod:`pmedm_vb.assemble.prior`)
         adds the Gaussian prior on the multipliers, held as ``.prior_sd`` and
-        as ``.prior_var``, the diagonal :meth:`sigma` adds."""
+        as ``.prior_var``, the diagonal :meth:`sigma` adds. A ``+tweedie<w>``
+        suffix (:mod:`pmedm_vb.assemble.tweedie`) gives the rows published as
+        zero a Tweedie error, held as ``.tweedie`` (``None`` without one)."""
         from pmedm_vb.assemble.prior import prior_variance, split_prior
         from pmedm_vb.assemble.sharecap import split_cap
+        from pmedm_vb.assemble.tweedie import TweedieZeros, split_tweedie
 
+        level, tweedie_w = split_tweedie(level)
         level, prior_sd = split_prior(level)
         level, cap = split_cap(level)
         h = cls._build(inputs, level, alpha=alpha, taper=taper, variance_floor=variance_floor)
         h.cap = cap
         h.prior_sd = prior_sd
         h.prior_var = prior_variance(prior_sd, inputs.n, inputs.N)
+        h.tweedie = (None if tweedie_w is None
+                     else TweedieZeros.build(inputs, h, tweedie_w, variance_floor))
         return h
 
     @classmethod
@@ -235,6 +241,7 @@ class Hierarchy:
     is_collapsed = False
     prior_sd = None
     prior_var = 0.0
+    tweedie = None
 
     @property
     def targets_ext(self) -> np.ndarray:

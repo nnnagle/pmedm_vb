@@ -122,7 +122,8 @@ def starting_points(
 ) -> np.ndarray:
     """``(chains, m)`` whitened starting points: standard normal draws (times
     ``inflate``, to start overdispersed), keeping only those whose largest cell
-    holds at most ``max_share`` of ``p``.
+    holds at most ``max_share`` of ``p`` and where the target is finite (a
+    Tweedie zero term's bound: a chain started past it could never move).
 
     A draw from the whitening Gaussian can land on a wall -- as VB draws do --
     and a chain started there diverges on every trajectory at a step size that
@@ -136,7 +137,7 @@ def starting_points(
         x = inflate * rng.standard_normal((chains, mean.size))
         lam = mean_t + torch.as_tensor(x, dtype=DTYPE, device=device) @ A_t.T
         share, _ = largest_share(target, lam)
-        keep.extend(x[(share <= max_share).cpu().numpy()])
+        keep.extend(x[((share <= max_share) & target.feasible(lam)).cpu().numpy()])
         if len(keep) >= chains:
             return np.asarray(keep[:chains])
     raise RuntimeError(
@@ -176,7 +177,7 @@ def overdispersed_starts(
         x = f * rng.standard_normal((batch, mean.size))
         lam = mean_t + torch.as_tensor(x, dtype=DTYPE, device=device) @ A_t.T
         share, _ = largest_share(target, lam)
-        ok = (share <= max_share).cpu().numpy()
+        ok = ((share <= max_share) & target.feasible(lam)).cpu().numpy()
         if ok.sum() >= starts:
             return x[ok][:starts], f, float(ok.mean())
         f = max(1.0, f * shrink)

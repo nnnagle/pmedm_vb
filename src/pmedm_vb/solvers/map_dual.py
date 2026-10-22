@@ -424,7 +424,13 @@ class CollapsedHessian(DualHessian):
 
 
 def dual_hessian(inputs: PMEDMInputs, state: DualState, sigma: Sigma, hierarchy=None) -> DualHessian:
-    """The dual Hessian for whichever hierarchy ``hierarchy`` is."""
+    """The dual Hessian for whichever hierarchy ``hierarchy`` is. With a Tweedie
+    zero term its rows' variance is ``K''`` at this point, not ``v0``
+    (:meth:`~pmedm_vb.assemble.tweedie.TweedieZeros.sigma_at`)."""
+    tweedie = getattr(hierarchy, "tweedie", None)
+    if tweedie is not None:
+        zeta = state.lam if hierarchy.is_trivial else hierarchy.zeta(state.lam)
+        sigma = tweedie.sigma_at(sigma, zeta)
     if getattr(hierarchy, "is_collapsed", False):
         return CollapsedHessian(inputs, state, sigma, hierarchy)
     return DualHessian(inputs, state, sigma, hierarchy)

@@ -109,8 +109,10 @@ def load_experiment(path: Path) -> dict:
                 "hmc"):
         if key not in spec:
             raise SystemExit(f"{path}: missing '{key}'")
-    if "skewed" not in spec["vb_families"] and spec["hmc"]:
-        raise SystemExit(f"{path}: HMC is whitened by the skewed VB fit; add 'skewed' to vb_families")
+    whiten = (spec["hmc"] or {}).get("whiten", "skewed")
+    if spec["hmc"] and whiten not in spec["vb_families"]:
+        raise SystemExit(f"{path}: HMC is whitened by the {whiten} VB fit (hmc.whiten); "
+                         f"add '{whiten}' to vb_families")
     spec["_grid"] = {"pumas": list(spec["pumas"]), "alphas": list(spec["alphas"])}
     subset = spec.get("subset") or {}
     for key in ("pumas", "alphas"):
@@ -170,11 +172,14 @@ def level(spec: dict) -> str:
     from pmedm_vb.assemble.hierarchy import level_name
     from pmedm_vb.assemble.prior import prior_level
     from pmedm_vb.assemble.sharecap import cap_level
+    from pmedm_vb.assemble.tweedie import tweedie_level
 
     model = spec["model"]
-    return prior_level(cap_level(level_name(model["hierarchy"], None, model.get("rollup")),
-                                 model.get("share_cap"), model.get("cap_strength")),
-                       model.get("multiplier_prior_sd"))
+    return tweedie_level(
+        prior_level(cap_level(level_name(model["hierarchy"], None, model.get("rollup")),
+                              model.get("share_cap"), model.get("cap_strength")),
+                    model.get("multiplier_prior_sd")),
+        model.get("tweedie_weight"))
 
 
 def fit_name(spec: dict, puma: str, alpha: float) -> str:
@@ -195,6 +200,8 @@ def model_args(spec: dict) -> list[str]:
                  "--cap-strength", f"{model['cap_strength']:g}"]
     if model.get("multiplier_prior_sd") is not None:
         args += ["--prior-sd", f"{model['multiplier_prior_sd']:g}"]
+    if model.get("tweedie_weight") is not None:
+        args += ["--tweedie-weight", f"{model['tweedie_weight']:g}"]
     return args
 
 

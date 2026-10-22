@@ -530,6 +530,7 @@ class CollapsedHierarchy:
 
     is_trivial = False
     is_collapsed = True
+    tweedie = None  # the +tweedie<w> term (pmedm_vb.assemble.tweedie), set by Hierarchy.build
 
     @property
     def targets_ext(self) -> np.ndarray:

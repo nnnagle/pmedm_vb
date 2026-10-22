@@ -443,6 +443,11 @@ class _DualTarget:
         self.A_T = tensor(inputs.A_T.toarray())
         self.h = None if hierarchy is None or hierarchy.is_trivial else hierarchy.torch_maps(device)
         self.cap = getattr(hierarchy, "cap", None)
+        tweedie = getattr(hierarchy, "tweedie", None)
+        self.tweedie = None if tweedie is None else tweedie.torch_term(device, DTYPE)
+        # VB sets this: the Tweedie term continued past the bound, so that a
+        # Gaussian's draws never meet an infinite target (it only whitens HMC).
+        self.tweedie_extend = False
         self.n = inputs.n
         self.support = torch.as_tensor(inputs.q > 0, device=device)
         # log q with 0 off the support: the share cap masks those unit-zones, and
@@ -490,14 +495,24 @@ class _DualTarget:
         logits = self.log_q[None] - eta
         log_z = torch.logsumexp(logits.reshape(lam.shape[0], -1), dim=1)
         if self.h is None:
+            zeta = lam
             value = lam @ self.y + log_z + 0.5 * self.c * (lam * self.sigma_matvec(lam)).sum(1)
         else:
             zeta = self.h.zeta(lam)
             value = (zeta @ self.y + log_z + 0.5 * self.c * (zeta * self.sigma_matvec(zeta)).sum(1)
                      + self.h.ridge(lam))
+        if self.tweedie is not None:
+            value = value + self.tweedie(zeta, extend=self.tweedie_extend)
         if self.cap is not None:
             value = value + self.cap_penalty(eta, log_z) / self.n
         return value
+
+    def feasible(self, lam: torch.Tensor) -> torch.Tensor:
+        """Per row of ``lam``, whether the target is finite there: always, but
+        for a Tweedie zero term's one-sided bound."""
+        if self.tweedie is None:
+            return torch.ones(lam.shape[0], dtype=torch.bool, device=lam.device)
+        return self.tweedie.feasible(lam if self.h is None else self.h.zeta(lam))
 
     def cap_penalty(self, eta: torch.Tensor, log_z: torch.Tensor) -> torch.Tensor:
         """``phi`` of the share cap per draw (:mod:`pmedm_vb.assemble.sharecap`);
@@ -751,6 +766,7 @@ def solve_vb(
     started = time.perf_counter()
     h = Hierarchy.build(inputs, hierarchy, alpha=alpha, taper=taper, variance_floor=variance_floor)
     target = _DualTarget(inputs, h.sigma(inputs, alpha, taper, variance_floor), device, h)
+    target.tweedie_extend = True  # finite everywhere for the Gaussian's draws (tweedie.py)
     model = _Variational(StructuredGaussian.laplace(inputs, init), device)
     n = inputs.n
 

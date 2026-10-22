@@ -286,3 +286,63 @@ $$
 \mathrm{vec}(p')\,\mathrm{vec}(p')'
 \begin{bmatrix} (X_T' \otimes A_T) \\ (X_B' \otimes A_B) \end{bmatrix}'
 $$
+
+## A Tweedie Error for Published Zeros
+
+The dual's two data terms are a cumulant generating function. With $c = n/N^2$,
+
+$$
+\frac{Y'\lambda}{N} + \frac{c}{2}\,\lambda'\Sigma\lambda
+= \frac{1}{n}\,\mathcal{K}\!\left(\frac{n}{N}\lambda\right),
+\qquad
+\mathcal{K}(t) = Y't + \tfrac{1}{2}\,t'\Sigma t,
+$$
+
+the cumulant generating function of $\mathcal{N}(Y, \Sigma)$, and the dual gradient sets each fitted
+margin $N X'p$ to the mean of that distribution tilted by $t = n\lambda/N$, $\mathcal{K}'(t)$.
+Taking the dual as an exponential-family model in its own right, any cumulant generating
+function can stand in a row's place; the primal reading (a penalty on the margins) is then
+its convex conjugate, $\mathcal{K}^*(m) = \sup_t\,(mt - \mathcal{K}(t))$.
+
+`pmedm_vb.assemble.tweedie` does this for the rows **published as zero** (with no replicate
+spread, so their whole diagonal is the modelled $v_0 = wk$ of Census's zero-count model: $w$
+the state's average weight, $k$ a step function of population). Such a row's Gaussian term
+$\tfrac{c}{2} v_0 \zeta_i^2$ (its $Y$ is 0) becomes $\tfrac{1}{n}K(n\zeta_i/N)$ for the cumulant
+generating function of a Tweedie with power $p = 3/2$: a compound Poisson sum of exponential
+amounts, as a survey count is a random number of sampled people times their weights. With the
+amounts' mean $w$ and the variance $v_0$:
+
+$$
+K(t) = \frac{\mu_0\,t}{1 - wt}, \qquad t < \frac{1}{w}, \qquad \mu_0 = \frac{v_0}{2w} = \frac{k}{2},
+$$
+
+so that $K'(0) = \mu_0$ (the row's centre), $K''(0) = 2\mu_0 w = v_0$ (its variance, as before),
+the chance of an exact zero is $e^{-\mu_0/w}$, and
+
+$$
+K'(t) = \frac{\mu_0}{(1-wt)^2}, \qquad K''(t) = \frac{2\mu_0 w}{(1-wt)^3}, \qquad
+K^*(m) = \frac{(\sqrt{m} - \sqrt{\mu_0})^2}{w}:
+$$
+
+the penalty on the allocated count $m$ is Gaussian on the square-root scale. (For a Tweedie
+with mean $\mu$, dispersion $\phi$ and power $p$, the amounts have mean $\phi(p-1)\mu^{p-1}$ and
+the variance is $\phi\mu^p$; setting the first to $w$ and the second to $v_0$ gives
+$\mu_0 = (p-1)\,v_0/w$, $\phi = w/((p-1)\mu_0^{p-1})$; at $p = 3/2$ the amounts are exponential
+and $K$ is the expression above.)
+
+In the dual, per Tweedie row $i$ with $t_i = n\zeta_i/N$:
+
+- the objective gains $\tfrac{1}{n}K(t_i) - \tfrac{c}{2}v_0\zeta_i^2$ (the Gaussian term it replaces),
+  and is $+\infty$ for $t_i \ge 1/w$, i.e. $\zeta_i \ge N/(nw)$;
+- the gradient in $\zeta$ gains $K'(t_i)/N - c\,v_0\zeta_i$;
+- the Hessian's $c\,\Sigma$ has $v_0$ replaced by $K''(t_i)$ on that row: the Hessian is the
+  Gaussian one built from that $\Sigma$, since the row has no low-rank part.
+
+The rest of $\Sigma$ -- the nonzero rows, the replicate correlations, and a multiplier prior's
+$\tau^2$ (a Gaussian prior on $\zeta$) -- is unchanged. Each term is convex, so the dual is.
+A nonzero row could take the same construction with its mean at $Y$, but at
+$\alpha = 0.01$ its diagonal part is $\alpha v$, so it would change almost nothing; only zeros
+are changed. The MAP's line search backs off from infinite values; HMC rejects any trajectory
+that reaches the bound (a non-finite energy counts as divergent). A Gaussian VB fit cannot
+meet an infinite target, so for VB alone (it whitens HMC) $K$ is continued past
+$t = 0.99/w$ by its second-order Taylor expansion there.
