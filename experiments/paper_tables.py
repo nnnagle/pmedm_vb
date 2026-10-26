@@ -105,9 +105,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--experiments", nargs="+", default=[e for e, _ in EXPERIMENTS],
                         help="experiment folders, in column order")
     parser.add_argument("--wall", type=float, default=0.01, help="a wall: a cell over this share of N")
-    parser.add_argument("--dh-floor", type=float, default=0.025,
-                        help="Table 5's D/H floor: about half the smallest any HMC draw of the "
-                             "paper_v3 runs reached (0.054); the truncated VB's rule")
+    parser.add_argument("--dh-floor", type=float, default=0.04,
+                        help="Table 5's D/H floor: below the smallest any HMC draw of the "
+                             "paper_v3 runs reached (0.054), so the posterior never fails it")
     parser.add_argument("--neff-floor", type=float, default=10)
     parser.add_argument("--hh-z", type=float, default=5)
     parser.add_argument("--pumas", nargs="+", default=None,

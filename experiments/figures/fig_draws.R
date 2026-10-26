@@ -13,9 +13,9 @@
 # dodged, with each violin's median marked; one column of panels per alpha.
 # Raking has no alpha and appears in both columns; the IPF fit is one
 # population per PUMA, so it is drawn as its four points. The dashed line is
-# Table 5's floor of 0.025, about half the smallest D/H any HMC draw reached in
-# the paper_v3 runs, and the truncated VB's rule: below it, a draw is unlike
-# anything the posterior was seen to make. (draws_sample.csv also has n_eff.)
+# Table 5's floor of 0.04, below the smallest D/H any HMC draw reached in the
+# paper_v3 runs (0.054): below it, a draw is unlike anything the posterior was
+# seen to make. (draws_sample.csv also has n_eff.)
 #
 # Reads draws_sample.csv from the paper tables' folder
 # (experiments/paper_tables.py --out, e.g. <root>/tables_compare): up to 1,000
@@ -54,7 +54,7 @@ DRAWS_EXPERIMENTS <- c(
 DRAWS_EXPERIMENT_COLOURS <- c(Baseline = "#2a78d6", `Null space` = "#eb6834",
                               `Roll-up` = "#1baf7a")
 DRAWS_RAKING <- c("ipf", "ipf_multinomial")
-DRAWS_FLOOR <- 0.025  # Table 5's D/H floor, and the truncated VB's rule
+DRAWS_FLOOR <- 0.04  # Table 5's D/H floor (paper_tables.py --dh-floor)
 DRAWS_METRICS <- c(min_bg_distinct_per_hh = "Smallest D/H over block groups",
                    median_bg_distinct_per_hh = "Median D/H over block groups")
 

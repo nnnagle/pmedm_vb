@@ -110,8 +110,9 @@ D/H, distinct household records per household
     than 100 published households. For each draw we take the smallest over its
     block groups (its worst block group) and the median (its typical one).
     Table 5 reports the median over draws of the smallest D/H, and the share of
-    draws whose smallest D/H is below 0.025, about half the smallest any HMC
-    reference draw reached (0.054).
+    draws whose smallest D/H is below 0.04, which is below the smallest any HMC
+    reference draw reached (0.054). A draw is *usable* when every block group's
+    D/H is at least 0.04; Figure C shows the share of usable draws.
 
 Effective number of records
 :   $n_{\mathrm{eff}} = 1/\sum_r s_r^2$, the effective sample size of

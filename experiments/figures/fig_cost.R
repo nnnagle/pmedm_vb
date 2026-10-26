@@ -13,11 +13,12 @@
 #     block group and tract cell (Tables 3 and 3t, "All"; cells the fit never
 #     saw). On the held-out rows the dashed line (about 4.1) is the expected
 #     score of a method that knew every true count;
-#   the share of plausible draws: draws whose smallest D/H over their block
-#     groups is at least Table 5's floor, 0.025 (one minus Table 5's "Draws with
-#     D/H < 0.025"; D/H as in Figure B). The floor is about half the smallest D/H
-#     any HMC reference draw reached, and the truncated VB's rule: below it a
-#     draw is unlike anything the posterior was seen to make.
+#   the share of usable draws: draws in which every block group (over 100
+#     published households) has D/H of at least Table 5's floor, 0.04 (one minus
+#     Table 5's "Draws with D/H < 0.04"; D/H as in Figure B). The floor is below
+#     the smallest D/H any HMC reference draw reached (0.054): a draw under it is
+#     unlike anything the posterior was seen to make. The row's axis starts at
+#     COST_SHARE_MIN, so that the differences near 1 show.
 # Colour is the method, shape the experiment, and a line joins each method's
 # Baseline point to its Null space and to its Roll-up point, to show what each
 # remedy buys. IPF is shown by its multinomial draws only: the IPF fit
@@ -66,7 +67,10 @@ COST_METHOD_COLOURS <- c(`IPF, multinomial` = "#2a78d6",
 COST_EXPERIMENT_SHAPES <- c(Baseline = 16, `Null space` = 17, `Roll-up` = 15)
 # Table 5's D/H floor (paper_tables.py --dh-floor), for the label; cost_data
 # checks it against the CSV's.
-COST_DH_FLOOR <- 0.025
+COST_DH_FLOOR <- 0.04
+# The bottom of the usable-draws row's axis (a share below it still shows: the
+# axis then reaches down to it).
+COST_SHARE_MIN <- 0.9
 # The expected interval score of a method that knew every true count: the
 # published value is then off by a standard normal number of SEs.
 COST_ORACLE_SCORE <- 2 * 1.645 +
@@ -126,9 +130,9 @@ plot_cost <- function(data) {
                     by = c("row", "alpha_label", "method"), suffixes = c("", "_base"))
   held_out <- data.frame(row = factor(c("Held-out block group", "Held-out tract"),
                                       levels = COST_ROWS$row))
-  # The plausible share is a proportion: show all of 0 to 1.
+  # The usable share is a proportion: show COST_SHARE_MIN to 1.
   bounds <- data.frame(row = factor("Plausible draws", levels = COST_ROWS$row),
-                       minutes = min(data$minutes), value = c(0, 1))
+                       minutes = min(data$minutes), value = c(COST_SHARE_MIN, 1))
   # Short row labels, so that they fit a panel's height; the y-axis title says
   # what each row measures.
   row_labels <- c(`Fitted block group` = "Fitted\nblock group", `Fitted tract` = "Fitted\ntract",
@@ -146,16 +150,18 @@ plot_cost <- function(data) {
     facet_grid(row ~ alpha_label, scales = "free_y", switch = "y",
                labeller = labeller(alpha_label = label_parsed, row = row_labels)) +
     scale_x_log10(breaks = c(1, 10, 100, 1000), labels = c("1", "10", "100", "1,000")) +
-    # On the share row (the only one reaching below 0.5), no ticks outside 0 to 1.
+    # On the share row (the only one ending near 1; the scores are over 3), no
+    # ticks above 1.
     scale_y_continuous(expand = expansion(mult = 0.06), breaks = function(limits) {
       breaks <- pretty(limits)
-      if (limits[1] < 0.5) breaks[breaks > -1e-9 & breaks < 1 + 1e-9] else breaks
+      if (limits[2] < 2) breaks[breaks > -1e-9 & breaks < 1 + 1e-9] else breaks
     }) +
     scale_colour_manual(values = COST_METHOD_COLOURS, name = "Method", drop = FALSE) +
     scale_shape_manual(values = COST_EXPERIMENT_SHAPES, name = "Experiment", drop = FALSE) +
     labs(x = "Total minutes per PUMA (log scale)",
          y = paste0("Interval score / SE, lower is better (rows 1-4)\n",
-                    "Share of draws with D/H \u2265 ", COST_DH_FLOOR, " (row 5)")) +
+                    "Share of draws with every block group's D/H \u2265 ", COST_DH_FLOOR,
+                    " (row 5)")) +
     theme_bw(base_size = 8) +
     theme(panel.grid.minor = element_blank(),
           panel.grid.major = element_line(colour = "grey90", linewidth = 0.3),
