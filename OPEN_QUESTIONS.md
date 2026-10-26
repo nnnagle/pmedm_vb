@@ -352,7 +352,7 @@ what would answer it. Move an entry to **Answered** with its answer when done.
   | 1 | 3.8% / 308% | 225% | 4.1 / 74 | 9 | 0.22 | 57 iterations, 359 s |
 
   **k = 0.01 is close to Sigma plus a small diagonal and its MAP converges:
-  chosen for exp04 (`+k0w18k0.01`).** Next: `start_check.py` with it.
+  recommended for exp04 (`+k0w18k0.01`), pending the user.** Next: `start_check.py` with it.
 - **Answer from:** an implementation checked as #4's was, then a fit against
   Baseline and the #4 fit on the draws' tails and small-cell fit.
 
