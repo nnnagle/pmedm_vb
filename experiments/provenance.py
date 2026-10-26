@@ -19,6 +19,7 @@ EXPERIMENTS = Path(__file__).resolve().parent
 #: The scripts that decide each output's content, relative to experiments/.
 TABLES_SCRIPTS = ("paper_tables.py",)
 EXAMPLES_SCRIPTS = ("draw_examples.py", "compare_methods.py")
+INVENTORY_SCRIPTS = ("table_inventory.py", "design_cells.py")
 
 
 def digest(scripts) -> str:

@@ -37,7 +37,10 @@ parentheses, how many of them the allocation identifies.
 
 Writes ``<out>/table_inventory.md``, ``.tex`` (booktabs) and ``.csv``, the
 cell counts by table as ``<out>/table_cells.*`` and by PUMA as
-``<out>/puma_cells.*``, and the parameters as ``<out>/parameters.*``.
+``<out>/puma_cells.*``, and the parameters as ``<out>/parameters.*``, and last
+the stamp of them all (``table_inventory.md.stamp.json``, ``provenance.py``).
+The paper's driver (``run_paper.py``) runs it into ``<root>/tables_compare``,
+from which ``results.zip`` packs them.
 ``--name`` picks the assembled inputs: ``knoxall`` for the all-cell set::
 
     $CONDA_PREFIX/bin/python experiments/table_inventory.py --name knoxall \\
@@ -65,6 +68,7 @@ from pmedm_vb.assemble.rollup import RollupSpec
 from pmedm_vb.config import StudyArea, processed_dir
 from pmedm_vb.data.variance import table_list
 from pmedm_vb.progress import logger
+from provenance import INVENTORY_SCRIPTS, write_stamp
 
 LEVELS = ("block group", "tract")
 TOKENS = {"lt": "<", "le": "<=", "gt": ">", "ge": ">="}
@@ -387,6 +391,10 @@ def main() -> None:
         (args.out / "parameters.md").write_text(simple_markdown(params))
         (args.out / "parameters.tex").write_text(simple_latex(params))
         print(simple_markdown(params))
+    # Last, so that a run cut short leaves the folder unstamped (run_paper.py).
+    write_stamp(args.out / "table_inventory.md", INVENTORY_SCRIPTS, name=args.name,
+                pumas=sorted(args.puma), rollup=args.rollup,
+                experiments=None if args.experiments is None else args.experiments.name)
     missing = frame.loc[frame.title == "", "table"].tolist()
     print(markdown(frame))
     print(simple_markdown(cells))

@@ -21,9 +21,15 @@ and nothing for it is queued or running:
 7. **examples** -- ``draw_examples.py``, Figure A's data, into
    ``<root>/tables_compare/draw_examples.csv`` (``--examples-experiment``,
    ``--examples-puma``, ``--examples-alpha``); redone when its code changes;
-8. **results** -- ``<root>/results.zip`` for the Quarto project
-   (``figures/make_results.py``), built in the driver itself once the tables
-   and examples are current, and rebuilt when any file it packs is newer.
+8. **inventory** -- ``table_inventory.py``, the census tables used, their cells
+   and zeros by table and by PUMA, and each experiment's parameters per PUMA,
+   into ``<root>/tables_compare`` (``table_inventory.*``, ``table_cells.*``,
+   ``puma_cells.*``, ``parameters.*``; Markdown, LaTeX and CSV); redone when its
+   code or settings change;
+9. **results** -- ``<root>/results.zip`` for the Quarto project
+   (``figures/make_results.py``), built in the driver itself once the tables,
+   examples and inventory are current, and rebuilt when any file it packs is
+   newer.
 
 An experiment JSON's ``subset`` (``{"pumas": [...], "alphas": [...]}``) narrows
 what is run, scored and tabled to part of its grid; exp02 and exp03 run on one
@@ -89,6 +95,8 @@ TREES_SLURM = ["--partition=short", "--qos=short", "--time=01:00:00", "--cpus-pe
 TABLES_SLURM = ["--partition=short", "--qos=short", "--time=01:00:00", "--mem=64G"]
 EXAMPLES_SLURM = ["--partition=short", "--qos=short", "--time=01:00:00", "--cpus-per-task=4",
                   "--mem=32G"]
+INVENTORY_SLURM = ["--partition=short", "--qos=short", "--time=01:00:00", "--cpus-per-task=4",
+                   "--mem=32G"]
 NOTIFY = ["--partition=short", "--qos=short", "--time=00:01:00", "--mem=100M",
           "--account=acf-utk0011", "--mail-type=END", "--mail-user=nnagle@utk.edu"]
 
@@ -384,6 +392,25 @@ def examples_stale(args) -> str | None:
                     alpha=args.examples_alpha)
 
 
+def inventory_output(args) -> Path:
+    return args.root / "tables_compare" / "table_inventory.md"
+
+
+def inventory_settings(specs, args) -> dict:
+    """table_inventory.py's settings: the area, every PUMA, the specs folder and
+    the roll-up of the last experiment that has one (exp03's)."""
+    rollups = [s["model"]["rollup"] for s in specs if s["model"].get("rollup")
+               not in (None, "pruned", "prunedleaves")]
+    return dict(name=specs[0]["area"]["name"], pumas=pumas(specs),
+                rollup=rollups[-1] if rollups else "25h10n", experiments=args.specs.name)
+
+
+def inventory_stale(specs, args) -> str | None:
+    """Why the census-table inventory is not current, or None."""
+    return pv.stale(inventory_output(args), pv.INVENTORY_SCRIPTS,
+                    **inventory_settings(specs, args))
+
+
 def results_stale(args) -> str | None:
     """Why results.zip is not current with what it packs, or None."""
     out = args.root / "results.zip"
@@ -443,6 +470,25 @@ def advance(args) -> int:
                              "--experiment", args.examples_experiment,
                              "--puma", args.examples_puma, "--alpha", f"{args.examples_alpha:g}",
                              "--out", str(examples_output(args))], EXAMPLES_SLURM)
+        # The census tables, their cells and the parameters, from the data alone.
+        why = inventory_stale(specs, args)
+        if why:
+            done = False
+            if jobs.is_live("inventory"):
+                print("inventory: job live")
+            else:
+                print(f"inventory: {why}")
+                guard(jobs, "inventory", args)
+                settings = inventory_settings(specs, args)
+                area = specs[0]["area"]
+                jobs.sbatch("inventory", specs[0], "run_python.sbatch",
+                            ["table_inventory.py", "--name", settings["name"],
+                             "--state", area.get("state", "47"),
+                             "--county", *area.get("counties", ["093"]),
+                             "--year", str(area["year"]), "--span", str(area["span"]),
+                             "--puma", *settings["pumas"], "--rollup", settings["rollup"],
+                             "--experiments", str(args.specs.resolve()),
+                             "--out", str(inventory_output(args).parent)], INVENTORY_SLURM)
         if not done:
             return WAITING
         why = results_stale(args)
@@ -577,6 +623,9 @@ def status(args) -> None:
     why = examples_stale(args)
     print(f"  {'examples':<15} {'current' if not why else why}"
           + (" (job live)" if jobs.is_live("examples") else ""))
+    why = inventory_stale(specs, args)
+    print(f"  {'inventory':<15} {'current' if not why else why}"
+          + (" (job live)" if jobs.is_live("inventory") else ""))
     why = results_stale(args)
     print(f"  {'results.zip':<15} {'current' if not why else why}")
     driver = jobs.latest.get("driver")

@@ -33,11 +33,15 @@ MANIFEST = HERE / "results_manifest.txt"
 
 sys.path.insert(0, str(HERE.parent))
 
-from provenance import EXAMPLES_SCRIPTS, TABLES_SCRIPTS, stale  # noqa: E402
+from provenance import EXAMPLES_SCRIPTS, INVENTORY_SCRIPTS, TABLES_SCRIPTS, stale  # noqa: E402
 
-#: Each stamped output in the tables' folder and the scripts that write it; a
-#: tables-folder file without its own stamp is paper_tables.py's (tables.md's).
-STAMPED = {"draw_examples.csv": EXAMPLES_SCRIPTS}
+#: The tables-folder files written by other scripts than paper_tables.py: name ->
+#: (the output whose stamp covers it, the scripts). Any other tables-folder file
+#: is paper_tables.py's, covered by tables.md's stamp.
+STAMPED = {"draw_examples.csv": ("draw_examples.csv", EXAMPLES_SCRIPTS),
+           **{f"{stem}.{ext}": ("table_inventory.md", INVENTORY_SCRIPTS)
+              for stem in ("table_inventory", "table_cells", "puma_cells", "parameters")
+              for ext in ("md", "tex", "csv")}}
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,7 +83,8 @@ def staleness(tables: Path, files) -> list[str]:
         if source != "tables":
             continue
         if path.name in STAMPED:
-            why = stale(path, STAMPED[path.name])
+            stamped, scripts = STAMPED[path.name]
+            why = stale(tables / stamped, scripts)
         else:
             why = stale(tables / "tables.md", TABLES_SCRIPTS)
         if why:

@@ -15,8 +15,20 @@ repo    experiments/figures/fig_agreement.R     Figure E
 repo    experiments/figures/fig_cost.R          Figure C
 repo    experiments/figures/fig_draws.R         Figure B
 repo    experiments/figures/fig_examples.R      Figure A
-tables  table*.csv                              the paper tables, CSV (Figures C, D, E read them)
-tables  table*.tex                              the paper tables, LaTeX
+tables  table[0-9]*.csv                         the paper tables, CSV (Figures C, D, E read them)
+tables  table[0-9]*.tex                         the paper tables, LaTeX
 tables  tables.md                               the paper tables, Markdown
 tables  draws_sample.csv                        Figure B
 tables  draw_examples.csv                       Figure A (experiments/draw_examples.py)
+tables  table_inventory.md                      the census tables used (experiments/table_inventory.py)
+tables  table_inventory.tex                     the census tables used, LaTeX
+tables  table_inventory.csv                     the census tables used, CSV
+tables  table_cells.md                          cells and zeros by table and level
+tables  table_cells.tex                         cells and zeros by table and level, LaTeX
+tables  table_cells.csv                         cells and zeros by table and level, CSV
+tables  puma_cells.md                           cells and zeros by PUMA and level
+tables  puma_cells.tex                          cells and zeros by PUMA and level, LaTeX
+tables  puma_cells.csv                          cells and zeros by PUMA and level, CSV
+tables  parameters.md                           coordinates (identified) per PUMA and experiment
+tables  parameters.tex                          coordinates (identified) per PUMA and experiment, LaTeX
+tables  parameters.csv                          coordinates (identified) per PUMA and experiment, CSV
