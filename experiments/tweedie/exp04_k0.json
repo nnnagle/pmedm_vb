@@ -1,6 +1,6 @@
 {
-  "name": "exp04_tweedie",
-  "description": "Baseline (exp01) with a Tweedie error for the rows published as zero (pmedm_vb.assemble.tweedie, p = 1.5, amounts of mean w = 18, Tennessee's average weight), PUMA 4701502 at alpha 0.01: MAP, VB Gaussian (whitening) and the HMC reference only, for comparison with exp01's 4701502.",
+  "name": "exp04_k0",
+  "description": "Baseline (exp01) with the count-shaped K0 error on every row (pmedm_vb.assemble.k0): Tweedie p = 1.5 marginals with Sigma's correlations, zero rows' amounts of mean w = 18 (Tennessee's average weight), and the log det barrier with k = 0.01 (covariance Sigma plus a small diagonal; OPEN_QUESTIONS.md #5). PUMA 4701502 at alpha 0.01: the MAP and the HMC reference only, whitened by the MAP's Laplace approximation (VB cannot fit this term), for comparison with exp01's 4701502.",
   "area": {
     "name": "knoxall",
     "state": "47",
@@ -26,16 +26,15 @@
     "share_cap": null,
     "cap_strength": null,
     "multiplier_prior_sd": 3,
-    "tweedie_weight": 18
+    "k0_weight": 18,
+    "k0_df": 0.01
   },
   "rake": [],
-  "vb_families": [
-    "gaussian"
-  ],
+  "vb_families": [],
   "hmc": {
     "trajectory": 3.0,
     "chains": 32,
-    "whiten": "gaussian",
+    "whiten": "laplace",
     "short": {
       "chains": 256,
       "superchains": 16,
@@ -55,7 +54,8 @@
       "thin": 40,
       "checkpoint": 500,
       "adapt_diag": true,
-      "seed": 1000
+      "seed": 1000,
+      "init_floor": 0.01
     },
     "kinds": [
       "ref"

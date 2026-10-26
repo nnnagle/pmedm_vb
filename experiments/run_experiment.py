@@ -110,7 +110,7 @@ def load_experiment(path: Path) -> dict:
         if key not in spec:
             raise SystemExit(f"{path}: missing '{key}'")
     whiten = (spec["hmc"] or {}).get("whiten", "skewed")
-    if spec["hmc"] and whiten not in spec["vb_families"]:
+    if spec["hmc"] and whiten != "laplace" and whiten not in spec["vb_families"]:
         raise SystemExit(f"{path}: HMC is whitened by the {whiten} VB fit (hmc.whiten); "
                          f"add '{whiten}' to vb_families")
     spec["_grid"] = {"pumas": list(spec["pumas"]), "alphas": list(spec["alphas"])}
@@ -172,14 +172,15 @@ def level(spec: dict) -> str:
     from pmedm_vb.assemble.hierarchy import level_name
     from pmedm_vb.assemble.prior import prior_level
     from pmedm_vb.assemble.sharecap import cap_level
+    from pmedm_vb.assemble.k0 import k0_level
     from pmedm_vb.assemble.tweedie import tweedie_level
 
     model = spec["model"]
-    return tweedie_level(
+    return k0_level(tweedie_level(
         prior_level(cap_level(level_name(model["hierarchy"], None, model.get("rollup")),
                               model.get("share_cap"), model.get("cap_strength")),
                     model.get("multiplier_prior_sd")),
-        model.get("tweedie_weight"))
+        model.get("tweedie_weight")), model.get("k0_weight"), model.get("k0_df", 0.0))
 
 
 def fit_name(spec: dict, puma: str, alpha: float) -> str:
@@ -202,6 +203,8 @@ def model_args(spec: dict) -> list[str]:
         args += ["--prior-sd", f"{model['multiplier_prior_sd']:g}"]
     if model.get("tweedie_weight") is not None:
         args += ["--tweedie-weight", f"{model['tweedie_weight']:g}"]
+    if model.get("k0_weight") is not None:
+        args += ["--k0-weight", f"{model['k0_weight']:g}", "--k0-df", f"{model.get('k0_df', 0):g}"]
     return args
 
 
@@ -410,13 +413,17 @@ def stage_fits(sub: Submitter, spec: dict, exp: Path, puma: str, active: dict) -
 HMC_OPTIONS = {"samples": "--samples", "thin": "--thin", "checkpoint": "--checkpoint",
                "superchains": "--superchains", "draws": "--draws", "ess_target": "--ess-target",
                "max_extend": "--max-extend", "nested_alpha": "--nested-alpha",
-               "init_inflate": "--init-inflate", "warmup_init": "--warmup-init",
+               "init_inflate": "--init-inflate", "init_floor": "--init-floor",
+               "warmup_init": "--warmup-init",
                "warmup_base": "--warmup-base", "warmup_term": "--warmup-term"}
 
 
 def whitening_folder(spec: dict) -> str:
-    """The VB fit that whitens HMC: ``vb_<hmc.whiten>``, skewed unless the spec says."""
-    return f"vb_{spec['hmc'].get('whiten', 'skewed')}"
+    """The fit that whitens HMC: ``vb_<hmc.whiten>``, skewed unless the spec says;
+    ``map`` for ``hmc.whiten: "laplace"``, the MAP's Laplace approximation (for a
+    model VB cannot fit, such as the K0 term)."""
+    whiten = spec["hmc"].get("whiten", "skewed")
+    return "map" if whiten == "laplace" else f"vb_{whiten}"
 
 
 def hmc_spec_lines(spec: dict, exp: Path, puma: str) -> list[str]:
@@ -432,7 +439,8 @@ def hmc_spec_lines(spec: dict, exp: Path, puma: str) -> list[str]:
                 + full["alphas"].index(alpha))
         args = ["--puma", puma, "--alpha", f"{alpha:g}", *model_args(spec),
                 "--area", area_slug(spec["area"]),
-                "--vb-run", str(exp / puma / whitening_folder(spec)),
+                "--map-run" if whitening_folder(spec) == "map" else "--vb-run",
+                str(exp / puma / whitening_folder(spec)),
                 "--trajectory", f"{hmc['trajectory']:g}",
                 "--chains", str(settings.get("chains", hmc["chains"])),
                 "--warmup", str(settings["warmup"]), "--seed", str(seed)]

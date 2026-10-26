@@ -183,17 +183,25 @@ def parse_args() -> argparse.Namespace:
                         help="a Tweedie error for the rows published as zero, with amounts of "
                              "this mean, the average weight w (pmedm_vb.assemble.tweedie), e.g. 18; "
                              "the hierarchy level gains +tweedie<w>")
+    parser.add_argument("--k0-weight", type=float, default=None,
+                        help="the count-shaped K0 error on every row with Sigma's correlations "
+                             "(pmedm_vb.assemble.k0), zero rows' amounts of this mean, e.g. 18; "
+                             "the hierarchy level gains +k0w<w>[k<df>]")
+    parser.add_argument("--k0-df", type=float, default=0.0,
+                        help="with --k0-weight, the degrees of freedom k of its log det barrier, "
+                             "e.g. 0.01")
     args = parser.parse_args()
     from pmedm_vb.assemble.hierarchy import level_name
     from pmedm_vb.assemble.prior import prior_level
     from pmedm_vb.assemble.sharecap import cap_level
+    from pmedm_vb.assemble.k0 import k0_level
     from pmedm_vb.assemble.tweedie import tweedie_level
 
     if getattr(args, "hierarchy", None) is not None:
-        args.hierarchy = tweedie_level(
+        args.hierarchy = k0_level(tweedie_level(
             prior_level(cap_level(level_name(args.hierarchy, args.collapse, args.rollup),
                                   args.share_cap, args.cap_strength), args.prior_sd),
-            args.tweedie_weight)
+            args.tweedie_weight), args.k0_weight, args.k0_df)
     return args
 
 

@@ -157,32 +157,36 @@ def overdispersed_starts(
     inflate: float = 1.5,
     shrink: float = 0.95,
     batch: int | None = None,
+    floor: float = 1.0,
 ) -> tuple[np.ndarray, float, float]:
     """``starts`` whitened starting points as overdispersed as the walls allow.
 
     Draws ``batch`` (default ``4 starts``) standard normals times ``f``, from
-    ``f = inflate`` down by ``shrink`` each time (never below 1), and keeps the
-    first ``f`` at which at least ``starts`` of them hold at most ``max_share``
+    ``f = inflate`` down by ``shrink`` each time (never below ``floor``), and keeps
+    the first ``f`` at which at least ``starts`` of them hold at most ``max_share``
     of ``p`` on one cell -- the screen of :func:`starting_points`. Inflating every
     coordinate inflates every tilt, so in thousands of dimensions a large ``f``
     puts some cell over the screen in every draw; this finds the largest ``f`` that
-    does not. At ``f = 1`` it falls back to :func:`starting_points`. Returns the
-    starts, the ``f`` used and the share of that batch that passed.
+    does not. At ``f = floor`` it falls back to :func:`starting_points`. A
+    ``floor`` below 1 starts closer to the whitening's mean than its own draws:
+    for a whitening far wider than the posterior (a Laplace approximation),
+    whose draws fail the screen. Returns the starts, the ``f`` used and the share
+    of that batch that passed.
     """
     batch = batch or 4 * starts
     mean_t = torch.as_tensor(mean, dtype=DTYPE, device=device)
     A_t = torch.as_tensor(A, dtype=DTYPE, device=device)
-    f = max(1.0, inflate)
-    while f > 1.0:
+    f = max(floor, inflate)
+    while f > floor:
         x = f * rng.standard_normal((batch, mean.size))
         lam = mean_t + torch.as_tensor(x, dtype=DTYPE, device=device) @ A_t.T
         share, _ = largest_share(target, lam)
         ok = ((share <= max_share) & target.feasible(lam)).cpu().numpy()
         if ok.sum() >= starts:
             return x[ok][:starts], f, float(ok.mean())
-        f = max(1.0, f * shrink)
-    x = starting_points(target, mean, A, starts, rng, max_share, device)
-    return x, 1.0, float("nan")
+        f = max(floor, f * shrink)
+    x = starting_points(target, mean, A, starts, rng, max_share, device, inflate=floor)
+    return x, floor, float("nan")
 
 
 def whitening_matrix(q: StructuredGaussian) -> np.ndarray:

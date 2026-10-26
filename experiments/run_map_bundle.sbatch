@@ -64,8 +64,9 @@ esac
 mkdir -p "$OUT"
 cd "$REPO"
 CORES=${SLURM_CPUS_PER_TASK}
-read -r -a FAMS <<< "${FAMILIES:-gaussian skewed sumdiff}"
-PER=$((CORES / ${#FAMS[@]}))
+# FAMILIES unset: the default families; set but empty: the MAP alone.
+read -r -a FAMS <<< "${FAMILIES-gaussian skewed sumdiff}"
+PER=$((CORES / (${#FAMS[@]} > 0 ? ${#FAMS[@]} : 1)))
 echo "node $(hostname), $CORES cores ($PER per VB family: ${FAMS[*]}), commit $(git rev-parse --short HEAD), $(date)"
 echo "name $NAME, puma $PUMA, options: $*"
 

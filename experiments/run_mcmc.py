@@ -150,8 +150,11 @@ def parse_args() -> argparse.Namespace:
         "--variance-floor", default="none",
         help="'none', 'zero' or a number, as in run_map.py; must match the VB run",
     )
-    parser.add_argument("--vb-run", type=Path, required=True,
+    parser.add_argument("--vb-run", type=Path, default=None,
                         help="VB results directory whose fit whitens the sampler")
+    parser.add_argument("--map-run", type=Path, default=None,
+                        help="in place of --vb-run: a MAP results directory (run_map.py solve) "
+                             "whose Laplace approximation whitens the sampler")
     parser.add_argument("--out", type=Path, required=True, help="MCMC results directory")
     parser.add_argument("--chains", type=int, default=32)
     parser.add_argument("--warmup", type=int, default=1000)
@@ -186,6 +189,10 @@ def parse_args() -> argparse.Namespace:
                         help="whitened sd above which --block-from treats a coordinate as wide")
     parser.add_argument("--init-max-share", type=float, default=0.01,
                         help="largest share of p on one cell a starting point may have")
+    parser.add_argument("--init-floor", type=float, default=1.0,
+                        help="below 1: shrink the starting draws toward the whitening's mean, "
+                             "down to this factor, until enough pass the screen (for a "
+                             "whitening wider than the posterior, e.g. --map-run's)")
     parser.add_argument("--init-inflate", type=float, default=1.0,
                         help="starting points are VB Gaussian draws times this (overdispersed > 1); "
                              "with --superchains, the most it is shrunk from while starts fail the screen")
@@ -238,7 +245,16 @@ def parse_args() -> argparse.Namespace:
                         help="a Tweedie error for the rows published as zero, with amounts of "
                              "this mean, the average weight w (pmedm_vb.assemble.tweedie), e.g. 18; "
                              "the hierarchy level gains +tweedie<w>")
+    parser.add_argument("--k0-weight", type=float, default=None,
+                        help="the count-shaped K0 error on every row with Sigma's correlations "
+                             "(pmedm_vb.assemble.k0), zero rows' amounts of this mean, e.g. 18; "
+                             "the hierarchy level gains +k0w<w>[k<df>]")
+    parser.add_argument("--k0-df", type=float, default=0.0,
+                        help="with --k0-weight, the degrees of freedom k of its log det barrier, "
+                             "e.g. 0.01")
     args = parser.parse_args()
+    if (getattr(args, "vb_run", None) is None) == (getattr(args, "map_run", None) is None):
+        parser.error("give one of --vb-run and --map-run")
     given = [name for name in ("scale_from", "block_from", "diag_from")
              if getattr(args, name, None) is not None]
     if getattr(args, "superchains", 0):
@@ -252,13 +268,14 @@ def parse_args() -> argparse.Namespace:
     from pmedm_vb.assemble.hierarchy import level_name
     from pmedm_vb.assemble.prior import prior_level
     from pmedm_vb.assemble.sharecap import cap_level
+    from pmedm_vb.assemble.k0 import k0_level
     from pmedm_vb.assemble.tweedie import tweedie_level
 
     if getattr(args, "hierarchy", None) is not None:
-        args.hierarchy = tweedie_level(
+        args.hierarchy = k0_level(tweedie_level(
             prior_level(cap_level(level_name(args.hierarchy, args.collapse, args.rollup),
                                   args.share_cap, args.cap_strength), args.prior_sd),
-            args.tweedie_weight)
+            args.tweedie_weight), args.k0_weight, args.k0_df)
     return args
 
 
@@ -284,6 +301,8 @@ def load_problem(args: argparse.Namespace):
     hierarchy = Hierarchy.build(inputs, args.hierarchy, alpha=args.alpha, taper=taper,
                                 variance_floor=floor)
     sigma = hierarchy.sigma(inputs, args.alpha, taper, floor)
+    if args.map_run is not None:
+        return (inputs, sigma, *laplace_whitening(inputs, args, taper, floor), hierarchy)
     vb_path = args.vb_run / f"{fit_name(args)}.npz"
     q, _, _ = load_vb(vb_path)
     with np.load(vb_path) as saved:
@@ -292,6 +311,30 @@ def load_problem(args: argparse.Namespace):
     if saved_level != args.hierarchy:
         raise SystemExit(f"{vb_path} was fitted with hierarchy={saved_level}, not {args.hierarchy}")
     return inputs, sigma, q, map_lam, hierarchy
+
+
+def laplace_whitening(inputs, args: argparse.Namespace, taper, floor):
+    """The Laplace approximation at a saved MAP (``--map-run``), in the VB family's
+    form, and the MAP's multipliers."""
+    from pmedm_vb.solvers.map_dual import MAPResult
+    from pmedm_vb.solvers.vb import StructuredGaussian
+
+    map_path = args.map_run / f"{fit_name(args)}.npz"
+    with np.load(map_path) as saved:
+        saved_level = str(saved["hierarchy"]) if "hierarchy" in saved.files else "none"
+        if saved_level != args.hierarchy:
+            raise SystemExit(f"{map_path} was fitted with hierarchy={saved_level}, "
+                             f"not {args.hierarchy}")
+        if not bool(saved["converged"]):
+            raise SystemExit(f"{map_path}: the MAP did not converge")
+        result = MAPResult(lam=saved["lam"], W=saved["W"], objective=float(saved["objective"]),
+                           n_iter=int(saved["n_iter"]), converged=True, alpha=args.alpha,
+                           taper=taper, newton_decrement=float(saved["newton_decrement"]),
+                           log_evidence=float("nan"), variance_floor=floor,
+                           hierarchy=args.hierarchy,
+                           xi=saved["xi"] if "xi" in saved.files else None)
+    logger.info("whitening: the Laplace approximation at %s", map_path)
+    return StructuredGaussian.laplace(inputs, result), result.lam
 
 
 # -- sample ------------------------------------------------------------------
@@ -382,8 +425,17 @@ def sample(args: argparse.Namespace) -> None:
     target = _DualTarget(inputs, sigma, device, hierarchy)
     A = whitening_matrix(q)
     rng = np.random.default_rng(args.seed)
-    x0 = starting_points(target, q.mean, A, args.chains, rng, args.init_max_share, device,
-                         inflate=args.init_inflate)
+    if args.init_floor < 1:
+        from pmedm_vb.solvers.mcmc import overdispersed_starts
+
+        x0, factor, passed = overdispersed_starts(
+            target, q.mean, A, args.chains, rng, args.init_max_share, device,
+            inflate=args.init_inflate, shrink=0.8, floor=args.init_floor)
+        logger.info("starts: whitening draws x%.3g (%.0f%% of that batch passed the %.1f%% "
+                    "screen)", factor, 100 * passed, 100 * args.init_max_share)
+    else:
+        x0 = starting_points(target, q.mean, A, args.chains, rng, args.init_max_share, device,
+                             inflate=args.init_inflate)
     scale = whitening_scale(args.scale_from, q.size)
     if scale is not None:
         A = A * scale            # columns: lambda = mean + A diag(s) x
@@ -569,7 +621,9 @@ def sample_nested(args: argparse.Namespace) -> None:
     A = whitening_matrix(q)
     rng = np.random.default_rng(args.seed)
     starts, inflation, passed = overdispersed_starts(target, q.mean, A, k, rng, args.init_max_share,
-                                                     device, inflate=args.init_inflate)
+                                                     device, inflate=args.init_inflate,
+                                                     shrink=0.95 if args.init_floor >= 1 else 0.8,
+                                                     floor=min(1.0, args.init_floor))
     logger.info("starts: VB Gaussian draws x%.3g (asked x%g; %.0f%% of that batch passed the "
                 "%.1f%% screen)", inflation, args.init_inflate, 100 * passed, 100 * args.init_max_share)
     x0 = np.repeat(starts, m_per, axis=0)             # chain c is in superchain c // M
@@ -748,7 +802,8 @@ def report(args: argparse.Namespace) -> None:
     def chains_first(key: str) -> np.ndarray:
         return trace[key][post].T  # (chains, draws)
 
-    lines = [f"HMC {name}, variance floor {args.variance_floor}, whitened by {args.vb_run}"
+    whitening = args.vb_run or f"the Laplace approximation at {args.map_run}"
+    lines = [f"HMC {name}, variance floor {args.variance_floor}, whitened by {whitening}"
              + (f", scaled by {metric_name(args)}" if metric_name(args) else ""),
              f"{inputs.n_zones} zones x {inputs.n_units:,} units, N = {inputs.N:,.0f}; "
              f"{trace['log_pi'].shape[1]} chains, {warmup} warmup + {done - warmup} sampling "
