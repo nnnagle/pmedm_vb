@@ -3,15 +3,20 @@
 Two methods, both starting from the design prior ``W0 = N q`` and both giving a
 single ``W`` -- no posterior, so no ``alpha`` and no ``Sigma``.
 
-**Hard raking to block group margins** (:func:`rake_ipf`). Classic iterative
+**Hard raking to the published margins** (:func:`rake_ipf`). Classic iterative
 proportional fitting (Deming & Stephan 1940) generalised to count loadings: one
-cycle visits every block group constraint ``k`` and moves ``W`` to the
-closest matrix in KL divergence that meets that one margin exactly (Csiszar
-1975, *Annals of Probability* 3). A unit with loading ``x_ik`` is scaled by
-``exp(-theta x_ik)``, with ``theta`` the root of a one-dimensional monotone
-equation; for 0/1 loadings that is the familiar ratio update. Tract margins are
-not fitted (they are the sums of the block group estimates, so they would add
-no target). Published margins may still not be jointly attainable -- two
+cycle visits every constraint ``k`` and moves ``W`` to the closest matrix in KL
+divergence that meets that one margin exactly (Csiszar 1975, *Annals of
+Probability* 3). A unit with loading ``x_ik`` is scaled by ``exp(-theta x_ik)``,
+with ``theta`` the root of a one-dimensional monotone equation; for 0/1 loadings
+that is the familiar ratio update. The constraints are every block group
+margin and the tract margins of the tables published only at tract level
+(B17024, B23001 and B26001 in this study: ``tract_only_categories``), so that
+IPF uses every constraint table the model does; a tract update scales the
+carriers in every block group of the tract, and a tract published as zero
+removes them from all of them. The tract margins of a table also published at
+block group are left out: they are the sums of its block group estimates, so
+they would add no target. Published margins may still not be jointly attainable -- two
 tables with one universe may publish different block group totals, and a
 published zero removes every unit carrying that category from the block group
 -- so an exact solution may not exist: the cycle stops at ``tol`` or
@@ -99,10 +104,19 @@ class RakeResult:
     theta: np.ndarray = field(default_factory=lambda: np.zeros(0))
 
 
-def _rows(inputs: PMEDMInputs, level: str) -> list[tuple]:
-    """Per constraint column at one level, one update: the stacked rows (one
-    per area), the carriers and their loadings, the zones it touches (``None``:
-    all) and each zone's area among those rows."""
+def tract_only_categories(inputs: PMEDMInputs) -> set[int]:
+    """The tract constraint columns of tables with no block group constraint
+    (a column's table is its name's prefix, ``"B17024.age_0_6:"`` -> ``B17024``)."""
+    block_group_tables = {name.split(".")[0] for name in inputs.bg_constraints}
+    return {k for k, name in enumerate(inputs.tract_constraints)
+            if name.split(".")[0] not in block_group_tables}
+
+
+def _rows(inputs: PMEDMInputs, level: str, categories: set[int] | None = None) -> list[tuple]:
+    """Per constraint column at one level (those in ``categories``, if given),
+    one update: the stacked rows (one per area), the carriers and their
+    loadings, the zones it touches (``None``: all) and each zone's area among
+    those rows."""
     if level == "tract":
         X, areas, offset = sp.csc_matrix(inputs.X_T), inputs.zone_tracts(), 0
         n_areas = inputs.Y_T.shape[0]
@@ -111,18 +125,22 @@ def _rows(inputs: PMEDMInputs, level: str) -> list[tuple]:
         n_areas = inputs.Y_B.shape[0]
     out = []
     for k in range(X.shape[1]):
+        if categories is not None and k not in categories:
+            continue
         start, stop = X.indptr[k], X.indptr[k + 1]
         out.append((offset + k * n_areas + np.arange(n_areas), X.indices[start:stop],
                     X.data[start:stop], None, areas))
     return out
 
 
-def _cell_rows(inputs: PMEDMInputs, h, level: str) -> list[tuple]:
+def _cell_rows(inputs: PMEDMInputs, h, level: str, categories: set[int] | None = None
+               ) -> list[tuple]:
     """As :func:`_rows`, over the roll-up's cells (``h`` a
     :class:`~pmedm_vb.assemble.collapse.CollapsedHierarchy`): a cell's loading
     is the sum of its categories', and its rows are cell indices. Cells merging
     the same categories (in different areas) form one update, so the step stays
-    vectorised over areas."""
+    vectorised over areas. With ``categories``, only the cells made of those
+    columns."""
     n_tracts, c_t = inputs.Y_T.shape
     n_zones, c_b = inputs.Y_B.shape
     split = inputs.Y_T.size
@@ -139,6 +157,8 @@ def _cell_rows(inputs: PMEDMInputs, h, level: str) -> list[tuple]:
     cell_area: dict[int, int] = {}
     for c, k, a in zip(cell, category, area):
         if c < 0:      # an all-cell table's subtotal under a roll-up of its leaves
+            continue
+        if categories is not None and int(k) not in categories:
             continue
         members.setdefault(int(c), []).append(int(k))
         cell_area[int(c)] = int(a)
@@ -267,23 +287,30 @@ def rake_ipf(
     inputs: PMEDMInputs, *, tol: float = 1e-3, max_sweeps: int = 2000, log_every: int = 50,
     rollup=None,
 ) -> RakeResult:
-    """Hard raking of ``N q`` to the block group margins.
+    """Hard raking of ``N q`` to the block group margins and the tract-only
+    tables' tract margins (see the module docstring); each sweep visits the
+    tract margins first.
 
     ``tol`` is on ``|log(m / Y)|``, the relative error of each fitted margin;
     ``1e-3`` is 0.1%. The residual reported at a sweep's end is each row's
     error just before its own update, so it measures how far the other margins
     pulled it away.
     """
+    tract = tract_only_categories(inputs)
     if rollup is not None:
         h = _rolled(inputs, rollup)
-        return _fit(inputs, _cell_rows(inputs, h, "block group"), h.Y_c.astype(float).copy(),
-                    None, tol=tol, max_sweeps=max_sweeps, fix_total=False, method="ipf",
-                    log_every=log_every)
+        columns = (_cell_rows(inputs, h, "tract", tract) + _cell_rows(inputs, h, "block group"))
+        return _fit(inputs, columns, h.Y_c.astype(float).copy(), None, tol=tol,
+                    max_sweeps=max_sweeps, fix_total=False, method="ipf", log_every=log_every)
     targets = inputs.targets().astype(float).copy()
-    targets[: inputs.Y_T.size] = np.nan  # tract rows are not fitted
-    return _fit(inputs, _rows(inputs, "block group"), np.nan_to_num(targets, nan=1.0), None,
-                tol=tol, max_sweeps=max_sweeps, fix_total=False, method="ipf",
-                log_every=log_every)
+    n_tracts = inputs.Y_T.shape[0]
+    fitted = np.zeros(inputs.Y_T.size, bool)
+    for k in tract:
+        fitted[k * n_tracts:(k + 1) * n_tracts] = True
+    targets[: inputs.Y_T.size][~fitted] = np.nan  # the other tract rows are not fitted
+    columns = _rows(inputs, "tract", tract) + _rows(inputs, "block group")
+    return _fit(inputs, columns, np.nan_to_num(targets, nan=1.0), None, tol=tol,
+                max_sweeps=max_sweeps, fix_total=False, method="ipf", log_every=log_every)
 
 
 def sinkhorn_penalties(inputs: PMEDMInputs, variance_floor: str | float | None = "zero"
@@ -307,9 +334,17 @@ def _penalties(inputs: PMEDMInputs, targets: np.ndarray, variances: np.ndarray
     return targets, rho
 
 
+#: Appended to IPF's result names since it also rakes to the tract-only tables,
+#: so that fits made before are not taken for current ones.
+IPF_VERSION = "_t"
+
+
 def rake_name(puma: str, method: str, rollup=None) -> str:
-    """The result name of a raking run: ``<puma>_<method>``, with ``_r<spec>``
-    appended when it rakes to the roll-up's cells."""
+    """The result name of a raking run: ``<puma>_<method>`` (IPF's with
+    ``IPF_VERSION``), with ``_r<spec>`` appended when it rakes to the roll-up's
+    cells."""
+    if method == "ipf":
+        method += IPF_VERSION
     if rollup is None:
         return f"{puma}_{method}"
     from pmedm_vb.assemble.rollup import RollupSpec

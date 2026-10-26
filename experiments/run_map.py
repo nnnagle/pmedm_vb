@@ -40,7 +40,7 @@ from the problem itself, so no solver sees them. Skipped where they exist
 unless ``--rebuild``. PUMA-only problems only.
 
 **rake** fits the raking baselines (:mod:`pmedm_vb.rake`), ``--method ipf``
-(hard, block group margins) or ``sinkhorn`` (KL-penalised, both levels), one
+(hard: block group margins and the tract-only tables) or ``sinkhorn`` (KL-penalised, both levels), one
 per PUMA: ``<puma>_<method>.npz`` holds ``W``, the residuals and the trace.
 Neither uses ``Sigma``, so ``--alpha`` and ``--taper`` are ignored; Sinkhorn's
 penalties use ``--variance-floor``.
@@ -146,7 +146,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=0.02, help="vb: Adam step")
     parser.add_argument("--seed", type=int, default=0, help="vb: seed for the Monte Carlo draws")
     parser.add_argument("--method", choices=["ipf", "sinkhorn"], default="ipf",
-                        help="rake: hard IPF to block group margins, or KL-penalised Sinkhorn")
+                        help="rake: hard IPF to block group margins and the tract-only tables, or KL-penalised Sinkhorn")
     parser.add_argument("--tol", type=float, default=None,
                         help="rake: convergence tolerance (default: 1e-3 ipf, 1e-6 sinkhorn)")
     parser.add_argument("--max-sweeps", type=int, default=None,
