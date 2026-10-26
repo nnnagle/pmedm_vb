@@ -33,13 +33,13 @@ suppressPackageStartupMessages({
   library(ggplot2)
 })
 
-# Display labels, in the order the methods are drawn (top to bottom).
+# Display labels, in the order the methods are drawn (top to bottom); a method
+# left out here is left out of the figure (MAP + Laplace and VB skewed are in
+# Table 5).
 DRAWS_METHODS <- c(
   ipf = "IPF",
   ipf_multinomial = "IPF, multinomial",
-  map_laplace = "MAP + Laplace",
   vb_gaussian = "VB Gaussian",
-  vb_skewed = "VB skewed",
   vb_gaussian_trunc = "VB Gaussian, truncated",
   hmc_short = "HMC short",
   hmc_ref = "HMC reference"
@@ -98,7 +98,7 @@ plot_draws <- function(data) {
   # Bandwidth: Sheather & Jones (1991), which follows clusters such as IPF's
   # one tight mode per PUMA that the default (Silverman's rule, set by the whole
   # spread) blurs together. Groups mostly at one value (to 3 significant
-  # digits), as MAP + Laplace's draws of one record per block group, keep the
+  # digits), such as MAP + Laplace's draws of one record per block group, keep the
   # default: there SJ fails, or collapses to a spike.
   key <- interaction(data$metric, data$alpha_label, data$method, data$experiment, drop = TRUE)
   sj <- vapply(split(log10(data$value), key), function(v) {
