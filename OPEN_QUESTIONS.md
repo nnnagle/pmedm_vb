@@ -10,7 +10,7 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 | 2 | n_eff against D/H for IPF | not started: the share-distribution check is not written |
 | 3 | Why IPF does not converge | exp03 4701504: every miss is in a block group the LP cannot meet exactly; other PUMAs and experiments not yet read |
 | 4 | Tweedie error for small cells and zeros, keeping Sigma | zero cells implemented (`+tweedie<w>`); VB fixed (continuation from 90%); starts near the MAP pass on 4701502 (job 6459108); exp04 to use K0 (#5) |
-| 5 | A k = 0 squared-Gaussian dual term: count-like cells with Sigma exact | k = 0's MAP stalls at alpha 0.01; k > 0 added (`+k0w<w>k<k>`), converges on the synthetic problem; waiting on job 6459604 (real PUMA 4701502) |
+| 5 | A k = 0 squared-Gaussian dual term: count-like cells with Sigma exact | k = 0's MAP stalls; k = 0.01 converges on 4701502 (14 iterations) with Sigma barely changed (job 6459604); next: HMC starts |
 
 ## Open
 
@@ -339,6 +339,20 @@ what would answer it. Move an entry to **Answered** with its answer when done.
   (iterations, seconds). Output in `slurm-6459604.log`. If it runs out of time,
   rerun with `--no-map`. Next: `start_check.py` on the chosen k, then the pilot
   HMC run.
+- **Result (job 6459604, 16,049 rows, 2,893 published zero; S's diagonal median
+  4.9 people, 9 on zero rows).** Per k: variance inflation (nonzero median /
+  max; zero rows), mean shift in people (nonzero median / max; zero), largest
+  correlation change over 2 million pairs (no sign flips among the 388,371 with
+  |rho| >= 0.1, at any k), and the MAP:
+
+  | k | variance, nonzero | variance, zero | mean shift, nonzero | zero | max \|d rho\| | MAP |
+  |---|---|---|---|---|---|---|
+  | 0.01 | 0.04% / 3% | 2.25% | 0.04 / 0.74 | 0.09 | 0.006 | 14 iterations, 94 s |
+  | 0.1 | 0.4% / 31% | 22.5% | 0.41 / 7.4 | 0.9 | 0.047 | 13 iterations, 87 s |
+  | 1 | 3.8% / 308% | 225% | 4.1 / 74 | 9 | 0.22 | 57 iterations, 359 s |
+
+  **k = 0.01 is close to Sigma plus a small diagonal and its MAP converges:
+  chosen for exp04 (`+k0w18k0.01`).** Next: `start_check.py` with it.
 - **Answer from:** an implementation checked as #4's was, then a fit against
   Baseline and the #4 fit on the draws' tails and small-cell fit.
 
