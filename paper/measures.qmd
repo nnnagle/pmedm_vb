@@ -1,0 +1,137 @@
+<!--
+The measures section. Include it in the paper with
+  {{< include measures.qmd >}}
+and add measures.bib to the document's `bibliography:`.
+-->
+
+## Measures {#sec-measures}
+
+Every method gives a set of draws of the weights: 4,000 per PUMA for the HMC
+reference, the VB families and IPF multinomial, and a single fit for IPF. Each
+draw is a complete synthetic population for one PUMA. For each published cell
+(a table category in one block group or tract), we summarise a method's draws
+of that cell's allocated count by the posterior mean, the posterior median and
+the 5th and 95th percentiles, which bound the method's 90% posterior interval.
+
+Unless stated otherwise, cell-level measures are pooled over the leaf cells of
+the four PUMAs. Leaf cells are a table's published categories; its totals and
+subtotals are left out, since they are sums of the leaves. Measures against
+published values use *sampled* cells only: cells with a nonzero published
+estimate and a sampling variance. This excludes published zeros, whose variance
+is modelled. A published value $Y$ has standard error
+$\mathrm{SE} = \mathrm{MOE}/1.645$, because the ACS publishes margins of error
+at the 90% level.
+
+### Fit and accuracy against published values
+
+These measures appear in Tables 2 and 3 and in Figures C and D.
+
+$|z|$ and its 90th percentile
+:   For each cell, $|z| = |\bar m - Y| / \mathrm{SE}$, the distance between the
+    method's posterior mean $\bar m$ and the published value, in published
+    standard errors. We report the 90th percentile of $|z|$ over cells
+    ("$|z|$ p90"). This summarises the cells a method fits worst without being
+    set by a single extreme cell.
+
+Coverage
+:   The share of cells whose published value lies inside the method's 90%
+    posterior interval. On the fitted (constraint) cells the published values
+    were used in fitting, so coverage has no nominal level: even for the exact
+    posterior it depends on how strongly each cell's own estimate determines
+    its posterior. On held-out cells the interval is for the true count, while
+    the published value also carries sampling error, so coverage below 0.90 is
+    expected even for a correct model.
+
+Half-width / MOE
+:   The 90% interval's half-width over the published margin of error, median
+    over cells: how wide the method's uncertainty is compared with the survey's
+    own.
+
+Interval score
+:   The interval score of @gneiting2007, in published SEs, averaged over cells.
+    The predictive interval for the published value is centred on the posterior
+    mean. Its half-width $h_{\mathrm{pred}} = \sqrt{h^2 + (1.645\,\mathrm{SE})^2}$
+    combines the posterior half-width $h$ with the published value's sampling
+    error. The score is
+    $$
+    \frac{2h_{\mathrm{pred}} + (2/0.10)\max\left(|\bar m - Y| - h_{\mathrm{pred}},\; 0\right)}{\mathrm{SE}}.
+    $$
+    It rewards intervals that are narrow and contain the published value, so it
+    judges centre and spread together. Lower is better. A method that knew
+    every true count exactly would score about 4.13.
+
+Held-out cells come from ACS tables not used in fitting. They are grouped as
+related or less related to the constraint tables, at block-group and tract
+level.
+
+### Agreement with the reference posterior
+
+These measures appear in Table 4 and Figure E. On the fitted leaf cells, each
+method is compared with the HMC reference at the same $\alpha$; there the
+reference is exactly the target the methods approximate. IPF, which has no
+$\alpha$, is compared with each $\alpha$'s reference.
+
+Median difference
+:   $|\tilde m - \tilde m_{\mathrm{ref}}| / s_{\mathrm{ref}}$: the distance
+    between the method's and the reference's posterior medians, in reference
+    standard deviations. We report its median over cells (the typical cell) and
+    its 99th percentile (the worst-centred cells). Zero is perfect.
+
+Width ratio
+:   The method's 90% interval width over the reference's. We report its median
+    and its 10th percentile (the most overconfident cells). One is right; below
+    one, the method is overconfident.
+
+Pareto $\hat k$
+:   For methods with a density (the VB families and MAP + Laplace), the shape
+    parameter of Pareto-smoothed importance sampling applied to the importance
+    ratios $\log \pi - \log q$, one per fit [@vehtari2024]. We report the median
+    and range over PUMAs. Following @yao2018, $\hat k < 0.5$ indicates a good
+    approximation, 0.5--0.7 an acceptable one, and $\hat k > 0.7$ an unreliable
+    one.
+
+### Usability of the draws
+
+These measures appear in Table 5 and Figures A and B. They treat each draw as a
+population that a user would analyse; they are computed per draw and pooled
+over draws and PUMAs.
+
+D/H, distinct household records per household
+:   In a block group with $H$ published occupied households (ACS table B25003,
+    owners plus renters), let $s_r$ be household record $r$'s share of the
+    block group's households in the draw. Then
+    $$
+    D = \sum_r \left[1 - (1 - s_r)^H\right]
+    $$
+    is the expected number of distinct records among $H$ households drawn
+    independently by those shares, and $D/H$ lies in $(0, 1]$. A value of one
+    means every household is a different record; a small value means a few
+    records are copied many times. It is computed for block groups with more
+    than 100 published households. For each draw we take the smallest over its
+    block groups (its worst block group) and the median (its typical one).
+    Table 5 reports the median over draws of the smallest D/H, and the share of
+    draws whose smallest D/H is below 0.025, about half the smallest any HMC
+    reference draw reached (0.054).
+
+Effective number of records
+:   $n_{\mathrm{eff}} = 1/\sum_r s_r^2$, the effective sample size of
+    @kish1965 applied to the block group's shares. We report the same summaries
+    as for D/H, and the share of draws with $n_{\mathrm{eff}} < 10$ in some
+    block group.
+
+Walls
+:   The share of draws in which a single cell, one household record in one
+    block group, holds more than 1% of the PUMA's population $N$.
+
+Household count $|z|$
+:   For each block group, the draw's allocated occupied households against the
+    published B25003 total, in standard errors. The SE is the square root of
+    the summed variances of the owner and renter cells; their covariance is
+    ignored. We report the median over draws of each draw's largest $|z|$, and
+    the share of draws whose largest exceeds 5.
+
+### Cost
+
+Table 1 and Figure C report minutes per PUMA, the mean over the four PUMAs,
+split into fitting (raking, MAP, or MAP + VB; for HMC, the VB fit that whitens
+it) and sampling.
