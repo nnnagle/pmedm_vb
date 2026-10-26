@@ -64,6 +64,9 @@ DEFAULT_ROOT = Path("/lustre/isaac24/proj/UTK0496/pmedm_vb_runs/paper")
 RAKE_SLURM = ["--partition=short", "--qos=short", "--time=01:00:00", "--cpus-per-task=4"]
 #: MAP and VB on campus (12 h): the all-cell problems outgrow short's hour.
 FITS_SLURM = ["--partition=campus", "--qos=campus", "--time=12:00:00", "--cpus-per-task=48"]
+#: The fits job of an experiment with no VB families: the MAP alone, minutes on
+#: a few cores, so not worth waiting for a whole campus node.
+MAP_SLURM = ["--partition=short", "--qos=short", "--time=01:00:00", "--cpus-per-task=8"]
 #: Each PUMA's HMC bundle (short runs, then the long references) on campus-gpu.
 HMC_SLURM = ["--partition=campus-gpu", "--qos=campus-gpu", "--time=24:00:00"]
 GPU_PARTITION = "campus-gpu"
@@ -406,7 +409,8 @@ def stage_fits(sub: Submitter, spec: dict, exp: Path, puma: str, active: dict) -
     for county in spec["area"].get("counties", ["093"]):
         args += ["--county", county]
     env = {"OUT_DIR": str(exp / puma), "FAMILIES": " ".join(spec["vb_families"])}
-    return sub.submit("fits", puma, "run_map_bundle.sbatch", args, slurm=FITS_SLURM, env=env)
+    return sub.submit("fits", puma, "run_map_bundle.sbatch", args,
+                      slurm=FITS_SLURM if spec["vb_families"] else MAP_SLURM, env=env)
 
 
 #: Optional per-kind HMC settings and the run_mcmc.py options they become.
