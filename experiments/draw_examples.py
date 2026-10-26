@@ -26,10 +26,12 @@ selection draws, except that in ``vb_worst`` VB Gaussian's first draw is its
 least diverse one (``selected``) and the rest are random. Writes one row per (case, method, draw, record) for the
 records over ``--min-share`` of the block group's households, and one row
 (record -1) for all the others together, with each draw's D/H (``dh``) and
-n_eff, and
-``highlight``: the rank (1 to ``--top``) of the case's records with the largest
-mean share over all the HMC reference draws, empty for the rest: the records
-the posterior favours there, against which every method's bars are read::
+n_eff, and three ranks of the record in the case's block group, each empty
+beyond its cut: ``highlight``, by mean share over all the HMC reference draws
+(1 to ``--top``); ``ipf_rank``, by the IPF fit's share (1 to ``--ipf-ranks``);
+and ``method_rank``, the best of its ranks by mean share over each other
+method's draws (IPF multinomial, VB Gaussian over its selection draws, the HMC
+reference; 1 to ``--method-top``). Figure A colours by the last two::
 
     PMEDM_VB_DATA=/lustre/isaac24/scratch/$USER/pmedm_vb_paper_data \\
     $CONDA_PREFIX/bin/python experiments/draw_examples.py \\
@@ -76,7 +78,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--select-draws", type=int, default=4000,
                         help="fresh VB Gaussian draws searched for its least diverse one")
     parser.add_argument("--draws", type=int, default=12, help="draws shown per method")
-    parser.add_argument("--top", type=int, default=5, help="records highlighted per case")
+    parser.add_argument("--top", type=int, default=5,
+                        help="records ranked by the HMC reference's mean share (highlight)")
+    parser.add_argument("--ipf-ranks", type=int, default=20,
+                        help="records ranked by the IPF fit's share (ipf_rank)")
+    parser.add_argument("--method-top", type=int, default=10,
+                        help="records ranked by each other method's mean share (method_rank)")
     parser.add_argument("--min-share", type=float, default=0.002,
                         help="records under this share are written together as record -1")
     parser.add_argument("--seed", type=int, default=0)
@@ -168,7 +175,7 @@ def main() -> None:
     # selection draws' D/H, and the shown draws' shares; and the HMC reference's
     # mean shares over all its draws.
     dh, shares = {}, {}
-    ref_mean = np.zeros((zones.size, households.size))
+    mean_share = {method: np.zeros((zones.size, households.size)) for method in METHODS}
     worst_dh, worst_shares = np.inf, None  # VB Gaussian's least diverse draw
     for method in METHODS:
         margs[method].draws = {"ipf": 1, "ipf_multinomial": args.draws,
@@ -180,8 +187,7 @@ def main() -> None:
         for d, W in enumerate(weights(source, inputs)):
             s = household_shares(W, zones, households)
             values.append(distinct_per_household(s, H))
-            if method == "hmc_ref":
-                ref_mean += s / n
+            mean_share[method] += s / n
             if method == "vb_gaussian" and values[-1].min() < worst_dh:
                 worst_dh, worst_shares = values[-1].min(), s
             if d in shown:
@@ -199,8 +205,17 @@ def main() -> None:
         if case == "vb_worst":  # the worst draw first, then all but one random draw
             by_method["vb_gaussian"] = np.vstack([worst_shares[[position]],
                                                   by_method["vb_gaussian"][:-1]])
-        favoured = np.argsort(-ref_mean[position])[:args.top]
-        highlight = {int(j): rank + 1 for rank, j in enumerate(favoured)}
+        def ranks(method: str, top: int) -> dict[int, int]:
+            order = np.argsort(-mean_share[method][position], kind="stable")[:top]
+            return {int(j): rank + 1 for rank, j in enumerate(order)}
+
+        highlight = ranks("hmc_ref", args.top)
+        ipf_rank = ranks("ipf", args.ipf_ranks)
+        method_rank: dict[int, int] = {}
+        for method in METHODS:
+            if method != "ipf":
+                for j, rank in ranks(method, args.method_top).items():
+                    method_rank[j] = min(rank, method_rank.get(j, rank))
         print(f"{case}: block group {geoid} (row {zone}), {published[zone]:,.0f} households; "
               f"D/H IPF {dh['ipf'][0, position]:.3f}, HMC reference median "
               f"{np.median(dh['hmc_ref'][:, position]):.3f}, VB Gaussian median "
@@ -215,16 +230,20 @@ def main() -> None:
                 big = np.flatnonzero(draw >= args.min_share)
                 for j in big:
                     rows.append(dict(info, record=int(households[j]), share=float(draw[j]),
-                                     highlight=highlight.get(int(j))))
+                                     highlight=highlight.get(int(j)),
+                                     ipf_rank=ipf_rank.get(int(j)),
+                                     method_rank=method_rank.get(int(j))))
                 rows.append(dict(info, record=-1, share=float(1.0 - draw[big].sum()),
-                                 highlight=None))
+                                 highlight=None, ipf_rank=None, method_rank=None))
     frame = pd.DataFrame(rows)
-    frame["highlight"] = frame["highlight"].astype("Int64")
+    for column in ("highlight", "ipf_rank", "method_rank"):
+        frame[column] = frame[column].astype("Int64")
     args.out.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(args.out, index=False)
     write_stamp(args.out, EXAMPLES_SCRIPTS, experiment=args.experiment, puma=args.puma,
                 alpha=args.alpha, draws=args.draws, ref_draws=args.ref_draws,
-                select_draws=args.select_draws,
+                select_draws=args.select_draws, ipf_ranks=args.ipf_ranks,
+                method_top=args.method_top,
                 seed=args.seed)
     print(f"wrote {len(frame):,} rows to {args.out}")
 

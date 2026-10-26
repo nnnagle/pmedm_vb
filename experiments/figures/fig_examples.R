@@ -7,11 +7,14 @@
 # that draw, outlined, then random draws; every other bar is a random draw. One
 # row per method. Each bar is one draw, a whole synthetic population: the block
 # group's households stacked by the household record they copy, largest first.
-# The block group's five records with the largest mean share over all 4,000 HMC
-# reference draws -- the records the posterior favours there -- are coloured,
-# the same record the same colour in every bar of the column; every other
-# record is grey, with records under 1% of the households together in the light
-# grey at the top (EXAMPLES_SMALL). The number above each bar is its D/H,
+# Colour follows the record, the same record the same colour in every bar of
+# the column: the IPF fit's five largest records in the block group in
+# ColorBrewer's YlOrRd (its largest darkest); in blue, records outside IPF's
+# top 20 that are in the top 10 of another method by its mean share over its
+# draws (IPF multinomial, VB Gaussian over 4,000 draws, the HMC reference over
+# 4,000) -- what a method favours that IPF does not; every other record grey,
+# with records under 1% of the households together in the light grey at the
+# top (EXAMPLES_SMALL). The number above each bar is its D/H,
 # distinct household records per household (as Figure B).
 # IPF is one fit: its one bar is repeated.
 #
@@ -44,11 +47,19 @@ EXAMPLES_CASES <- c(
   ipf = "IPF's least spread",
   vb_worst = "VB Gaussian's worst draw"
 )
-# Categorical slots 1-5 of the reference palette, checked for colour-vision
-# deficiency separation; here they name records, not methods.
-EXAMPLES_COLOURS <- c(`1st` = "#2a78d6", `2nd` = "#eb6834", `3rd` = "#1baf7a",
-                      `4th` = "#eda100", `5th` = "#e87ba4",
+# IPF's five largest records: ColorBrewer's YlOrRd, five classes, its largest
+# the darkest (RColorBrewer::brewer.pal(5, "YlOrRd"), reversed); a method's top
+# records that IPF ranks low: the reference palette's blue.
+EXAMPLES_COLOURS <- c(`IPF 1st` = "#BD0026", `IPF 2nd` = "#F03B20", `IPF 3rd` = "#FD8D3C",
+                      `IPF 4th` = "#FECC5C", `IPF 5th` = "#FFFFB2",
+                      `Another method's top 10, not IPF's top 20` = "#2a78d6",
                       `Other records` = "grey62", `Records under 1% each` = "grey88")
+# The cuts the colours use: IPF's top EXAMPLES_IPF_TOP; blue for a method's top
+# EXAMPLES_METHOD_TOP outside IPF's top EXAMPLES_IPF_EXCLUDE (draw_examples.py
+# writes ranks up to --ipf-ranks 20 and --method-top 10).
+EXAMPLES_IPF_TOP <- 5
+EXAMPLES_IPF_EXCLUDE <- 20
+EXAMPLES_METHOD_TOP <- 10
 # Records under this share of the block group's households are drawn together.
 EXAMPLES_SMALL <- 0.01
 
@@ -68,9 +79,13 @@ examples_data <- function(tables_dir) {
   keys <- c("case", "block_group", "households", "method", "draw", "dh", "selected")
   rest <- aggregate(raw$share[small], raw[small, keys], sum)
   names(rest)[ncol(rest)] <- "share"
-  raw <- raw[!small, c(keys, "record", "highlight", "share")]
-  raw$group <- ifelse(is.na(raw$highlight), "Other records",
-                      names(EXAMPLES_COLOURS)[pmax(1, raw$highlight)])
+  raw <- raw[!small, c(keys, "record", "ipf_rank", "method_rank", "share")]
+  ipf_top <- !is.na(raw$ipf_rank) & raw$ipf_rank <= EXAMPLES_IPF_TOP
+  method_only <- (is.na(raw$ipf_rank) | raw$ipf_rank > EXAMPLES_IPF_EXCLUDE) &
+    !is.na(raw$method_rank) & raw$method_rank <= EXAMPLES_METHOD_TOP
+  raw$group <- ifelse(ipf_top, names(EXAMPLES_COLOURS)[pmax(1, raw$ipf_rank)],
+                      ifelse(method_only, "Another method's top 10, not IPF's top 20",
+                             "Other records"))
   raw <- rbind(raw[, c(keys, "record", "group", "share")],
                transform(rest, record = -1, group = "Records under 1% each"))
   # Stack each bar largest first, the small records on top.
@@ -112,8 +127,8 @@ plot_examples <- function(data) {
     scale_x_continuous(breaks = NULL, expand = expansion(add = 0.3)) +
     scale_y_continuous(breaks = c(0, 0.5, 1), labels = c("0", "50%", "100%"),
                        expand = expansion(mult = c(0, 0.14))) +
-    scale_fill_manual(values = EXAMPLES_COLOURS, drop = FALSE,
-                      name = "Household records, by the HMC\nreference's mean share") +
+    scale_fill_manual(values = EXAMPLES_COLOURS, drop = FALSE, name = "Household records") +
+    guides(fill = guide_legend(nrow = 2)) +
     labs(x = paste("Draws (IPF: its one fit, repeated); above each bar its D/H; outlined:",
                    "VB Gaussian's least diverse of 4,000 draws"),
          y = "Share of the block group's households") +
