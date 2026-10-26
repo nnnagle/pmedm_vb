@@ -13,12 +13,14 @@
 #     block group and tract cell (Tables 3 and 3t, "All"; cells the fit never
 #     saw). On the held-out rows the dashed line (about 4.1) is the expected
 #     score of a method that knew every true count;
-#   the share of draws with no single (record, block group) cell above 1% of N
-#     (one minus Table 5's "Draws with a cell > 0.01 N"): how often a draw is a
-#     plausible population.
-# Colour is the method, shape the experiment, and an arrow runs from each
-# method's Baseline point to its Null space and to its Roll-up point, to show
-# what each remedy buys. IPF is shown by its multinomial draws only: the IPF fit
+#   the share of plausible draws: draws whose smallest D/H over their block
+#     groups is at least Table 5's floor, 0.025 (one minus Table 5's "Draws with
+#     D/H < 0.025"; D/H as in Figure B). The floor is about half the smallest D/H
+#     any HMC reference draw reached, and the truncated VB's rule: below it a
+#     draw is unlike anything the posterior was seen to make.
+# Colour is the method, shape the experiment, and a line joins each method's
+# Baseline point to its Null space and to its Roll-up point, to show what each
+# remedy buys. IPF is shown by its multinomial draws only: the IPF fit
 # itself has the same cost and the same estimates. MAP + Laplace is left out:
 # its scores are many times the others' and its draws are never plausible
 # (Tables 2-5 have it), and on these axes it would squeeze every other method
@@ -62,7 +64,9 @@ COST_METHOD_COLOURS <- c(`IPF, multinomial` = "#2a78d6",
                          `HMC short` = "#e87ba4", `HMC reference` = "#008300",
                          `VB Gaussian, truncated` = "#6250d6")
 COST_EXPERIMENT_SHAPES <- c(Baseline = 16, `Null space` = 17, `Roll-up` = 15)
-COST_WALL <- 0.01  # Table 5's share of N that makes a cell a wall (for the label)
+# Table 5's D/H floor (paper_tables.py --dh-floor), for the label; cost_data
+# checks it against the CSV's.
+COST_DH_FLOOR <- 0.025
 # The expected interval score of a method that knew every true count: the
 # published value is then off by a standard normal number of SEs.
 COST_ORACLE_SCORE <- 2 * 1.645 +
@@ -71,7 +75,7 @@ COST_ORACLE_SCORE <- 2 * 1.645 +
 # The rows of panels: (table, key, label), the score rows first.
 COST_ROWS <- data.frame(
   table = c("2", "2t", "3", "3t", "5"),
-  key = c("is", "is", "all_is", "all_is", "walls"),
+  key = c("is", "is", "all_is", "all_is", "dh_lt"),
   row = c("Fitted block group", "Fitted tract", "Held-out block group", "Held-out tract",
           "Plausible draws")
 )
@@ -89,8 +93,14 @@ cost_data <- function(tables_dir) {
   names(minutes)[4] <- "minutes"
   values <- do.call(rbind, lapply(seq_len(nrow(COST_ROWS)), function(i) {
     frame <- read(COST_ROWS$table[i])
+    if (COST_ROWS$key[i] == "dh_lt") {
+      label <- unique(frame$label[frame$key == "dh_lt"])
+      if (!any(grepl(paste0("< ", format(COST_DH_FLOOR), "$"), label))) {
+        stop("Table 5's D/H floor is not ", COST_DH_FLOOR, ": ", paste(label, collapse = "; "))
+      }
+    }
     part <- frame[frame$key == COST_ROWS$key[i], c(keys, "value")]
-    if (COST_ROWS$key[i] == "walls") part$value <- 1 - part$value  # the plausible share
+    if (COST_ROWS$key[i] == "dh_lt") part$value <- 1 - part$value  # the plausible share
     part$row <- COST_ROWS$row[i]
     part
   }))
@@ -110,7 +120,7 @@ plot_cost <- function(data) {
   data$experiment <- factor(data$experiment, levels = unname(COST_EXPERIMENTS))
   data$row <- factor(data$row, levels = COST_ROWS$row)
   shown <- data
-  # One arrow per remedy, from the method's Baseline point.
+  # One line per remedy, from the method's Baseline point.
   base <- shown[shown$experiment == "Baseline", ]
   remedies <- merge(shown[shown$experiment != "Baseline", ], base,
                     by = c("row", "alpha_label", "method"), suffixes = c("", "_base"))
@@ -131,8 +141,7 @@ plot_cost <- function(data) {
     geom_blank(data = bounds, aes(x = minutes, y = value), inherit.aes = FALSE) +
     geom_segment(data = remedies,
                  aes(x = minutes_base, y = value_base, xend = minutes, yend = value),
-                 linewidth = 0.4, alpha = 0.6, show.legend = FALSE,
-                 arrow = arrow(length = unit(1.4, "mm"), type = "closed")) +
+                 linewidth = 0.4, alpha = 0.6, show.legend = FALSE) +
     geom_point(aes(shape = experiment), size = 1.8) +
     facet_grid(row ~ alpha_label, scales = "free_y", switch = "y",
                labeller = labeller(alpha_label = label_parsed, row = row_labels)) +
@@ -146,7 +155,7 @@ plot_cost <- function(data) {
     scale_shape_manual(values = COST_EXPERIMENT_SHAPES, name = "Experiment", drop = FALSE) +
     labs(x = "Total minutes per PUMA (log scale)",
          y = paste0("Interval score / SE, lower is better (rows 1-4)\n",
-                    "Share of draws with no cell > ", 100 * COST_WALL, "% of N (row 5)")) +
+                    "Share of draws with D/H \u2265 ", COST_DH_FLOOR, " (row 5)")) +
     theme_bw(base_size = 8) +
     theme(panel.grid.minor = element_blank(),
           panel.grid.major = element_line(colour = "grey90", linewidth = 0.3),
