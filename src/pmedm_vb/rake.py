@@ -284,7 +284,7 @@ def _fit(
 
 
 def rake_ipf(
-    inputs: PMEDMInputs, *, tol: float = 1e-3, max_sweeps: int = 2000, log_every: int = 50,
+    inputs: PMEDMInputs, *, tol: float = 1e-3, max_sweeps: int = 1000, log_every: int = 50,
     rollup=None,
 ) -> RakeResult:
     """Hard raking of ``N q`` to the block group margins and the tract-only

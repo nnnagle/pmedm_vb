@@ -150,7 +150,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tol", type=float, default=None,
                         help="rake: convergence tolerance (default: 1e-3 ipf, 1e-6 sinkhorn)")
     parser.add_argument("--max-sweeps", type=int, default=None,
-                        help="rake: sweep cap (default: 2000 ipf, 5000 sinkhorn)")
+                        help="rake: sweep cap (default: 1000 ipf, 5000 sinkhorn)")
     parser.add_argument(
         "--tables", choices=["default", "all"], default="default",
         help="prefetch, assemble, heldout: the collapsed default tables, or every published "
