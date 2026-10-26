@@ -10,7 +10,7 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 | 2 | n_eff against D/H for IPF | not started: the share-distribution check is not written |
 | 3 | Why IPF does not converge | exp03 4701504: every miss is in a block group the LP cannot meet exactly; other PUMAs and experiments not yet read |
 | 4 | Tweedie error for small cells and zeros, keeping Sigma | zero cells implemented (`+tweedie<w>`); VB fixed (continuation from 90%); starts near the MAP pass on 4701502 (job 6459108); exp04 to use K0 (#5) |
-| 5 | A k = 0 squared-Gaussian dual term: count-like cells with Sigma exact | k = 0's MAP stalls; k = 0.01 converges on 4701502 (14 iterations) with Sigma barely changed (job 6459604); next: HMC starts |
+| 5 | A k = 0 squared-Gaussian dual term: count-like cells with Sigma exact | k = 0.01 chosen (MAP converges, Sigma barely changed); HMC on it is very slow on the synthetic problem: the posterior hugs the joint boundary; decision pending |
 
 ## Open
 
@@ -353,6 +353,22 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 
   **k = 0.01 is close to Sigma plus a small diagonal and its MAP converges:
   chosen for exp04 (`+k0w18k0.01`; user, 2026-10-26).** Next: `start_check.py` with it.
+- **HMC whitened by the Laplace approximation (synthetic problem, 4 chains, 40
+  warmup + 40 samples, CPU; `run_mcmc.py --map-run`, commit 24cfff2):**
+
+  | model | step size | leapfrog / iteration | divergent | s / iteration |
+  |---|---|---|---|---|
+  | Gaussian (Baseline) | 0.04 | 74 | 0 | 0.5 |
+  | K0, k = 0.1 | 5e-4 | 1,000 (cap) | 18% | 12 |
+  | K0, k = 0.01 | 5e-5 | 1,000 (cap) | 5% | 15 |
+
+  The Laplace whitening serves the Gaussian model well, so the trouble is the
+  K0 posterior's geometry: its MAP sits close to the joint boundary (R's
+  smallest eigenvalues 0.001, 0.0015, 0.0045 at k = 0.01; 0.011, 0.015, 0.032 at
+  k = 0.1; 1 at t = 0), at a distance that scales with k, where the barrier's
+  curvature is large and changes fast -- the remnant of k = 0's wall. A fixed
+  metric then needs a step small enough for the wall. The synthetic weights are
+  small (w = 1.5), so the real PUMA may differ; untested there.
 - **Answer from:** an implementation checked as #4's was, then a fit against
   Baseline and the #4 fit on the draws' tails and small-cell fit.
 
