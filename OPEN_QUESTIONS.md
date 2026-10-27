@@ -10,7 +10,7 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 | 2 | n_eff against D/H for IPF | not started: the share-distribution check is not written |
 | 3 | Why IPF does not converge | exp03 4701504: every miss is in a block group the LP cannot meet exactly; other PUMAs and experiments not yet read |
 | 4 | Tweedie error for small cells and zeros, keeping Sigma | zero cells implemented (`+tweedie<w>`); VB fixed (continuation from 90%); starts near the MAP pass on 4701502 (job 6459108); exp04 to use K0 (#5) |
-| 5 | A k = 0 squared-Gaussian dual term: count-like cells with Sigma exact | k = 0.01 chosen (MAP converges, Sigma barely changed); HMC on it is very slow on the synthetic problem: the posterior hugs the joint boundary; decision pending |
+| 5 | A k = 0 squared-Gaussian dual term: count-like cells with Sigma exact | k = 0.01: MAP converges on 4701502, but the HMC pilot (job 6483177) is impractical: step 3e-4, every iteration at the 1,000-step cap, 10-17% divergent, 52 s/iteration; decision pending |
 
 ## Open
 
@@ -369,6 +369,20 @@ what would answer it. Move an entry to **Answered** with its answer when done.
   curvature is large and changes fast -- the remnant of k = 0's wall. A fixed
   metric then needs a step small enough for the wall. The synthetic weights are
   small (w = 1.5), so the real PUMA may differ; untested there.
+- **Pilot on the real PUMA (job 6483177, 4701502, alpha 0.01, `+k0w18k0.01`,
+  32 chains, Laplace whitening from the exp04 MAP, `--adapt-diag`; V100,
+  timed out at 12 h after 820 of 1,000 iterations, checkpointed in
+  `$R/exp04_k0/4701502/hmc_pilot`).** Warmup settled the step size at 3.0e-4
+  (6x the synthetic problem's); every iteration hit the 1,000-leapfrog cap, so
+  a trajectory covers about 0.3 of its nominal 3.0; 65-112 divergent
+  transitions per 20 iterations of 32 chains (10-17%), no fewer after warmup;
+  acceptance about 0.8; log pi median stable near -1,500 from about iteration
+  300; largest share about 0.4%; 51.6 s per iteration (the Baseline reference
+  for 4701502 took 7.8 h in all). The learned diagonal is near 1 (p10 0.90,
+  median 1.06, max 2.1), so the Laplace whitening has the right scale: the
+  trouble is local curvature, as on the synthetic problem. A reference of
+  2,000 + 10,000 iterations would take about 7 days on one GPU, and its
+  draws would move only about 0.3 whitened sd per iteration. Not run.
 - **Answer from:** an implementation checked as #4's was, then a fit against
   Baseline and the #4 fit on the draws' tails and small-cell fit.
 
