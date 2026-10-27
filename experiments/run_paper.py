@@ -95,7 +95,9 @@ TREES_SLURM = ["--partition=short", "--qos=short", "--time=01:00:00", "--cpus-pe
 TABLES_SLURM = ["--partition=short", "--qos=short", "--time=01:00:00", "--mem=64G"]
 EXAMPLES_SLURM = ["--partition=short", "--qos=short", "--time=01:00:00", "--cpus-per-task=4",
                   "--mem=32G"]
-INVENTORY_SLURM = ["--partition=short", "--qos=short", "--time=01:00:00", "--cpus-per-task=4",
+#: The parameters table finds every experiment's identified coordinates (the
+#: null space's SVDs): about half an hour per PUMA, over short's hour.
+INVENTORY_SLURM = ["--partition=campus", "--qos=campus", "--time=04:00:00", "--cpus-per-task=8",
                    "--mem=32G"]
 NOTIFY = ["--partition=short", "--qos=short", "--time=00:01:00", "--mem=100M",
           "--account=acf-utk0011", "--mail-type=END", "--mail-user=nnagle@utk.edu"]
