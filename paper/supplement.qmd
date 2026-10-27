@@ -1,0 +1,444 @@
+<!--
+The supplement. Replace everything from "# Supplement" up to the appendix in
+manuscript.qmd with this file's content, or include it there with
+  {{< include supplement.qmd >}}
+It needs, in the YAML include-in-header, \usepackage{booktabs}, \usepackage{array}
+and \usepackage{pdflscape}; the tables are paper_tables.py's bare tabulars,
+results/table<key>_<experiment>.tex, so their numbers follow every rebuild.
+[UPDATE] marks numbers that change with IPF's re-raking (it now also rakes to
+the three tract-only tables) or with the 0.04 D/H floor: fill them from the
+rebuilt tables.
+-->
+
+# Supplement {#sec-supplement}
+
+This supplement reports every measure of @sec-measures for each experiment: the
+baseline in full (@sec-supp-baseline), then the null-space and roll-up experiments
+(@sec-supp-null, @sec-supp-rollup), whose effects are summarized in
+@sec-supp-remedies. Within an experiment, every table pools the cells or the draws
+of the four PUMAs, each panel is one value of $\alpha$, and the long HMC run of the
+same experiment and $\alpha$ is the reference posterior. IPF and IPF with
+multinomial draws have no $\alpha$, so they are shown once, in their own panel,
+except in the agreement tables, where they are compared with each $\alpha$'s
+reference. IPF is raked to the block group margins of the six tables published at
+block group level and to the tract margins of the three tables published only at
+tract level (B17024, B23001 and B26001).
+
+## Baseline {#sec-supp-baseline}
+
+### Fit to the published constraints {#sec-supp-fit}
+
+::: {#tbl-fit-bg}
+
+```{=latex}
+\input{results/table2_baseline.tex}
+```
+
+Baseline: fit to the published block group constraints. Block group constraint leaf
+cells of the four PUMAs pooled, sampled cells only (nonzero estimates with a
+sampling variance). Coverage: the share of cells whose published estimate lies
+between the 5th and 95th percentiles of the method's draws. $|z|$ p90: the 90th
+percentile over cells of $|\bar m - \hat y|/\mathrm{SE}$. Half-width / MOE: the
+half-width of the 90 percent interval over the published margin of error, median
+over cells. Interval score / SE: as in @sec-measures-published, mean over cells.
+
+:::
+
+::: {#tbl-fit-tract}
+
+```{=latex}
+\input{results/table2t_baseline.tex}
+```
+
+Baseline: fit to the published tract constraints. As @tbl-fit-bg, for tract cells.
+
+:::
+
+@tbl-fit-bg compares each method's draws with the published block group estimates
+used as constraints. Because these estimates were used in fitting, coverage has no
+nominal level; it describes the fit rather than calibration. A half-width below the
+published margin of error is not in itself a defect, since the posterior combines
+each estimate with the other constraints and the survey records and may
+legitimately be more precise than the estimate alone; a half-width near zero is.
+
+The Laplace approximation stands apart. Its intervals are a negligible fraction of
+the published margins of error (median ratio 0.00 at $\alpha = 0.01$ and 0.12 at
+$\alpha = 1$), they contain the published estimate in only 5 and 17 percent of
+cells, and the 90th percentile of $|z|$ exceeds 11. The Laplace draws express
+near-certainty about counts that the ACS publishes with substantial error. The
+variational and HMC draws, by contrast, have intervals comparable to the published
+margins of error (median ratios 0.93 to 1.13), contain the published value in 95
+to 99 percent of cells, and lie within about one standard error of it in 90 percent
+of cells. IPF reproduces the block group estimates almost exactly ($|z|$ p90 of
+0.06 [UPDATE]); since those estimates are noisy, this is better understood as
+fitting their sampling error than as accuracy, and its multinomial replicates vary
+by about a quarter of the published margin of error [UPDATE]. The tract constraints
+(@tbl-fit-tract) show the same pattern for the posterior methods; IPF's tract
+$|z|$ p90 is [UPDATE] now that it is also raked to the tract-only tables.
+
+### Accuracy on tables not used as constraints {#sec-supp-heldout}
+
+::: {.landscape}
+
+::: {#tbl-heldout}
+
+```{=latex}
+\input{results/table3_baseline.tex}
+```
+
+Baseline: accuracy on held-out ACS tables at block group level, all of them and
+those related and less related to the constraints; leaf cells of the four PUMAs
+pooled, sampled cells only. Coverage and $|z|$ p90 as in @tbl-fit-bg. The interval
+is for the true count, while the published value also carries sampling error, so
+coverage below 0.90 is expected even for a correct model. Interval score / SE: the
+width of a 90 percent predictive interval for the published value plus 20 times
+how far the published value falls outside it, in published SEs, mean over cells
+[@gneiting2007strictly]; a method that knew every true count would score about
+4.13.
+
+:::
+
+:::
+
+::: {#tbl-heldout-tract}
+
+```{=latex}
+\input{results/table3t_baseline.tex}
+```
+
+Baseline: accuracy on held-out tables at tract level. As @tbl-heldout, for tract
+cells.
+
+:::
+
+@tbl-heldout reports accuracy on published block group tables withheld from the
+fit, grouped into those we expected a priori to be related to the constraint tables
+(e.g., [EXAMPLE]) and those we expected to be less related (e.g., [EXAMPLE]).
+
+Three results stand out. First, every method is more accurate for related than for
+less related tables (reference posterior at $\alpha = 0.01$: $|z|$ p90 of 1.21
+against 1.59). Second, $\alpha = 0.01$ is consistently more accurate than
+$\alpha = 1$: for related tables under the reference posterior, coverage is 0.88
+against 0.78 and $|z|$ p90 is 1.21 against 1.47. One possible explanation is that
+the correlations among the constraint estimates carry information about structure
+shared with the held-out tables; another is that the diagonal covariance at
+$\alpha = 1$ counts nested totals several times, and so fits the constraints, and
+their sampling errors, too closely. We have not distinguished between these.
+Third, the posterior mean is not uniformly more accurate than IPF's single
+solution: for related tables, IPF's $|z|$ p90 ([UPDATE]) is to be compared with
+those of the $\alpha = 0.01$ posteriors (1.21 to 1.31) and the $\alpha = 1$
+posteriors (1.47 to 1.55). What IPF lacks is a usable statement of uncertainty: its
+multinomial replicates contain the published value in [UPDATE] of the cells. The
+Laplace approximation is again far from the published values ($|z|$ p90 above 10).
+
+These comparisons are probably optimistic. The held-out and constraint estimates
+come from the same ACS sample, so their sampling errors are correlated, and fitting
+the constraints partly fits the errors of the held-out estimates too. Consistent
+with this, the 90th percentile of $|z|$ for the best methods (1.21) is below the
+1.645 that would be expected even of the true counts.
+
+### Agreement with the reference posterior {#sec-supp-agree}
+
+::: {#tbl-agree}
+
+```{=latex}
+\input{results/table4_baseline.tex}
+```
+
+Baseline: agreement with the reference HMC, block group constraint leaf cells of
+the four PUMAs pooled. Median diff.: $|$median $-$ reference median$|$ in reference
+standard deviations; width ratio: the 90 percent interval's width over the
+reference's; p50, p99 and p10 are percentiles over cells. k-hat: the PSIS $\hat k$
+of the method's density against the posterior, one per fit, median [min, max] over
+PUMAs (methods with a density only).
+
+:::
+
+::: {#tbl-agree-tract}
+
+```{=latex}
+\input{results/table4t_baseline.tex}
+```
+
+Baseline: agreement with the reference HMC for tract constraint leaf cells. As
+@tbl-agree; $\hat k$, one per fit, is in @tbl-agree.
+
+:::
+
+@tbl-agree compares each approximation with the reference posterior cell by cell,
+in units of the reference standard deviation. The short HMC run is
+indistinguishable from the reference in its medians (median difference 0.01 sd;
+99th percentile 0.06) and in the typical width of its intervals (median ratio 0.99
+to 1.00). At $\alpha = 0.01$, however, a tenth of cells have intervals no more than
+a third as wide as the reference's (10th percentile ratio 0.34, against 0.92 at
+$\alpha = 1$); the short run explores some directions of the more weakly
+identified $\alpha = 0.01$ posterior incompletely. The variational fits match the
+reference's typical interval widths (median ratio 0.92 to 1.05) but not its tails.
+At $\alpha = 0.01$, some cells' medians are off by nearly one reference sd (99th
+percentile 0.88 to 0.95), and a tenth of cells have intervals less than five
+percent as wide as the reference's. The PSIS $\hat{k}$ diagnostic, which compares
+each variational density with the posterior jointly rather than cell by cell, is
+far above the threshold of 0.7 for every variational fit (11 to 23 in the
+baseline) [@vehtari2024pareto]; although their marginal summaries are close to the
+reference, their joint distributions are not. The Laplace approximation fails on
+every measure. IPF's solution is [UPDATE] reference sd from the reference medians
+at the 50th percentile, against 0.14 to 0.17 for the variational fits at
+$\alpha = 0.01$, and [UPDATE] at the 99th.
+
+### Usability of the draws {#sec-supp-usable}
+
+::: {.landscape}
+
+::: {#tbl-usable}
+
+```{=latex}
+\input{results/table5_baseline.tex}
+```
+
+Baseline: usability of the draws. Draws of the four PUMAs pooled (4,000 per PUMA;
+IPF's one fit per PUMA, shown as counts of its four fits). A cell is one survey
+record in one block group. Draws with a cell $> 0.01\,N$: the share of draws in
+which one cell holds more than one percent of the PUMA's households. D/H: a block
+group's expected number of distinct records among its $H$ published households,
+drawn by the records' shares, per household (@sec-measures-usability); for each
+draw its smallest over the block groups with more than 100 published households.
+$n_{\mathrm{eff}} = 1/\sum s^2$ over the same shares. Households $|z|$: a block
+group's allocated occupied households against B25003, with the SE from its cells'
+variances; for each draw its largest over block groups.
+
+:::
+
+:::
+
+@tbl-usable asks whether individual draws are plausible populations. The Laplace
+draws are not. In every draw a single survey record accounts for more than one
+percent of a PUMA's households, the least diverse block group has a D/H near zero
+(median 0.001 at $\alpha = 0.01$ and 0.002 at $\alpha = 1$) and an effective
+number of records of one, and the largest departure of a block group's household
+count from its published value is hundreds of standard errors.
+
+Variational draws are much better but often still implausible. At
+$\alpha = 0.01$, about four in five variational Gaussian draws contain a record
+holding more than one percent of the PUMA's households (80 percent; 77 percent for
+the skewed family), and [UPDATE] percent have a block group with D/H below 0.04, a
+value no reference draw reaches. Their typical draw is nonetheless close to the
+reference's: the median of the smallest D/H is 0.099 for the variational Gaussian
+and 0.108 for the reference at $\alpha = 0.01$, and 0.259 and 0.284 at
+$\alpha = 1$. The failures are therefore in the tails of the variational
+distribution, rare enough to leave the small area summaries of @sec-supp-fit
+largely unaffected but each of them an implausible population. No HMC draw
+contains a dominant record, and no reference draw has a block group below the D/H
+floor.
+
+The HMC results also show that concentrated draws are partly a property of the
+posterior itself, not only of the approximation. At $\alpha = 0.01$, 80 percent of
+reference draws have at least one block group with fewer than ten effective
+records, and the median of the smallest effective number of records is 6.6; at
+$\alpha = 1$, the share falls to 13 percent and the median rises to 21. The weakly
+identified directions of the correlated covariance allow even exact posterior draws
+to concentrate a block group's households on fewer records. IPF's multinomial
+replicates [UPDATE: their share under ten effective records and their smallest
+D/H]. For population synthesis, the choice of covariance therefore matters as much
+as the choice of algorithm.
+
+[AUTHOR: In about half ($\alpha = 0.01$) to four-fifths ($\alpha = 1$) of HMC draws,
+at least one block group's allocated households lie more than five standard errors
+from the published count (median of the largest $|z|$ 4.95 and 6.52). Because this
+is a maximum over several hundred block groups, some large values are expected even
+for a correct model, but not values this large. Explanation needed before
+publication.]
+
+### Computation time {#sec-supp-cost}
+
+::: {#tbl-cost}
+
+```{=latex}
+\input{results/table1_baseline.tex}
+```
+
+Baseline: minutes per PUMA, mean over the four PUMAs. Fit: raking, MAP, or MAP and
+the variational fit; for HMC, the variational Gaussian fit that whitens it.
+Sampling: Laplace and drawing, variational drawing (with rejection when truncated),
+or HMC. Fits ran on 48-core CPU nodes, HMC on one GPU.
+
+:::
+
+@tbl-cost reports computation time per PUMA. MAP with the Laplace approximation
+takes about a minute. The variational fits take about one to two hours (48 to 129
+minutes), almost all of it fitting; once fitted, their draws cost almost nothing.
+The short HMC run adds 10 to 27 minutes of sampling to the variational fit that
+whitens it, while the reference run adds 5 to 16 hours. Every posterior method is
+faster at $\alpha = 1$ than at $\alpha = 0.01$ (reference HMC: 329 against 1,033
+minutes), consistent with the poorer conditioning of the nearly singular replicate
+covariance. IPF takes [UPDATE] minutes.
+
+## Effect of the remedies {#sec-supp-remedies}
+
+*Null space* (@sec-supp-null). Removing all structural dependencies changes small
+area accuracy and agreement with the reference little. The main differences are at
+$\alpha = 1$. Fitted block group cells are matched more closely (variational
+Gaussian $|z|$ p90 0.87 against 1.16), and fewer HMC draws have a household count
+more than five standard errors off (59 against 80 percent). The costs are somewhat
+more concentrated draws (median smallest effective number of records 14.8 against
+21.0) and longer runs (reference HMC 532 against 329 minutes).
+
+*Roll-up* (@sec-supp-rollup). Merging small cells has the largest practical effect.
+It shortens every variational and HMC computation by a factor of three to six
+(reference HMC 309 against 1,033 minutes at $\alpha = 0.01$; variational Gaussian 14
+against 70), and it makes variational draws much more usable: at $\alpha = 1$, the
+share of draws with a dominant record falls from 38 to 9 percent, and the share
+with a block group under ten effective records from 76 to 44 percent. Roll-up also
+rescues the Laplace approximation for small area estimation at $\alpha = 1$, whose
+intervals now match the published margins of error (ratio 0.98) and contain the
+published value in 83 percent of fitted cells, although 95 percent of its draws
+still contain a dominant record. The cost is a small loss of accuracy on held-out
+tables at $\alpha = 1$ (coverage of related tables 0.72 against 0.78). Because
+roll-up changes the set of constraint cells, its fitted-cell and agreement results
+are not directly comparable with the other experiments'; its held-out results are.
+
+\clearpage
+
+## Null space {#sec-supp-null}
+
+::: {#tbl-cost-null}
+
+```{=latex}
+\input{results/table1_nullspace.tex}
+```
+
+Null space: minutes per PUMA. As @tbl-cost.
+
+:::
+
+::: {#tbl-fit-bg-null}
+
+```{=latex}
+\input{results/table2_nullspace.tex}
+```
+
+Null space: fit to the published block group constraints. As @tbl-fit-bg.
+
+:::
+
+::: {#tbl-fit-tract-null}
+
+```{=latex}
+\input{results/table2t_nullspace.tex}
+```
+
+Null space: fit to the published tract constraints. As @tbl-fit-tract.
+
+:::
+
+::: {.landscape}
+
+::: {#tbl-heldout-null}
+
+```{=latex}
+\input{results/table3_nullspace.tex}
+```
+
+Null space: accuracy on held-out block group tables. As @tbl-heldout.
+
+:::
+
+:::
+
+::: {#tbl-agree-null}
+
+```{=latex}
+\input{results/table4_nullspace.tex}
+```
+
+Null space: agreement with the reference HMC. As @tbl-agree.
+
+:::
+
+::: {.landscape}
+
+::: {#tbl-usable-null}
+
+```{=latex}
+\input{results/table5_nullspace.tex}
+```
+
+Null space: usability of the draws. As @tbl-usable.
+
+:::
+
+:::
+
+\clearpage
+
+## Roll-up {#sec-supp-rollup}
+
+::: {#tbl-cost-rollup}
+
+```{=latex}
+\input{results/table1_rollup.tex}
+```
+
+Roll-up: minutes per PUMA. As @tbl-cost.
+
+:::
+
+::: {#tbl-fit-bg-rollup}
+
+```{=latex}
+\input{results/table2_rollup.tex}
+```
+
+Roll-up: fit to the published block group constraints. As @tbl-fit-bg. The cells
+scored are the published leaf cells, while the roll-up fits the merged cells.
+
+:::
+
+::: {#tbl-fit-tract-rollup}
+
+```{=latex}
+\input{results/table2t_rollup.tex}
+```
+
+Roll-up: fit to the published tract constraints. As @tbl-fit-tract.
+
+:::
+
+::: {.landscape}
+
+::: {#tbl-heldout-rollup}
+
+```{=latex}
+\input{results/table3_rollup.tex}
+```
+
+Roll-up: accuracy on held-out block group tables. As @tbl-heldout.
+
+:::
+
+:::
+
+::: {#tbl-agree-rollup}
+
+```{=latex}
+\input{results/table4_rollup.tex}
+```
+
+Roll-up: agreement with the reference HMC. As @tbl-agree.
+
+:::
+
+::: {.landscape}
+
+::: {#tbl-usable-rollup}
+
+```{=latex}
+\input{results/table5_rollup.tex}
+```
+
+Roll-up: usability of the draws. As @tbl-usable.
+
+:::
+
+:::
+
+\clearpage

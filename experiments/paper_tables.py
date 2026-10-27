@@ -473,6 +473,30 @@ def latex(stats, table, experiments, part: str | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
+#: Width of each value column of a bare table: its header wraps within it.
+BARE_COLUMN = "1.6cm"
+
+
+def bare_tabular(stats, table, experiment) -> str:
+    """One experiment's table as a bare ``tabular`` (booktabs; no float, caption
+    or note), for a document to wrap in its own table environment, caption and
+    label: ``table<key>_<experiment>.tex``. Value columns are a fixed width, so
+    long headers wrap; the document needs ``\\usepackage{booktabs,array}``."""
+    groups, _, panels = wide(stats, table, [experiment])
+    column = f">{{\\raggedleft\\arraybackslash}}p{{{BARE_COLUMN}}}"
+    lines = ["\\begin{tabular}{l" + column * len(groups) + "}", "\\toprule",
+             "Method & " + " & ".join(tex(label) for _, label in groups) + " \\\\", "\\midrule"]
+    for i, (alpha, rows) in enumerate(panels):
+        if i:
+            lines.append("\\addlinespace")
+        panel = "Raking (no $\\alpha$)" if alpha is None else f"$\\alpha = {alpha:g}$"
+        lines.append(f"\\multicolumn{{{1 + len(groups)}}}{{l}}{{\\textit{{{panel}}}}} \\\\")
+        lines += [f"{tex(label)} & " + " & ".join(tex(v) for v in values) + " \\\\"
+                  for label, values in rows]
+    lines += ["\\bottomrule", "\\end{tabular}"]
+    return "\n".join(lines) + "\n"
+
+
 def tex(text: str) -> str:
     text = text.replace("+-", "$\\pm$").replace("|z|", "$|z|$").replace("%", "\\%")
     text = text.replace("n_eff", "$n_{\\mathrm{eff}}$").replace("<1", "$<$1")
@@ -572,6 +596,10 @@ def main() -> None:
             continue
         slug = f"table{table}_" + re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_")
         stats[stats.table == table].to_csv(args.out / f"{slug}.csv", index=False)
+        for experiment in experiments:  # bare, per experiment: table2_baseline.tex
+            short = re.sub(r"^exp\d+_", "", experiment[0])
+            (args.out / f"table{table}_{short}.tex").write_text(
+                bare_tabular(stats[stats.experiment == experiment[0]], table, experiment))
         if table not in PER_EXPERIMENT:
             (args.out / f"{slug}.tex").write_text(latex(stats, table, experiments))
             md.append(markdown(stats, table, experiments))
