@@ -4,9 +4,11 @@ Reads, for each experiment, the scoring ``<root>/<experiment>/scores/<tag>``:
 ``detail/*/<method>_cells.parquet`` (every scored cell),
 ``detail/*/<method>_draws.parquet`` (every draw) and ``all_scores.csv``
 (timings and PSIS k-hat), and writes five tables, plus the tract versions of
-Tables 2, 3 and 4, each as LaTeX (booktabs), CSV (long: one row per experiment,
-alpha, method and statistic, unrounded, with ``n`` the cells, draws or PUMAs
-behind it) and Markdown (all in ``tables.md``); and ``draws_sample.csv``, up
+Tables 2, 3 and 4, each as LaTeX (a bare booktabs ``tabular`` per experiment,
+``table<key>_<experiment>.tex``, for a document to caption and label), CSV
+(long: one row per experiment, alpha, method and statistic, unrounded, with
+``n`` the cells, draws or PUMAs behind it) and Markdown (all in ``tables.md``,
+with the notes); and ``draws_sample.csv``, up
 to 1,000 random draws of each (experiment, method, alpha, PUMA) with their
 block-group D/H and n_eff and largest cell, for the figures of the draws::
 
@@ -389,8 +391,9 @@ TITLES = {
 }
 
 
-#: Tables written once per experiment (LaTeX and Markdown; the CSV stays one file,
-#: which Figure C reads), the rest with the experiments side by side.
+#: Tables written once per experiment in tables.md (the CSV stays one file, which
+#: Figure C reads), the rest with the experiments side by side. LaTeX is always
+#: per experiment, as bare tables (bare_tabular).
 PER_EXPERIMENT = {"1"}
 
 #: The sentence each table's note gains about the raking (no-alpha) rows.
@@ -436,41 +439,6 @@ def wide(stats: pd.DataFrame, table: str, experiments: list[tuple[str, str]]) ->
         if rows:
             panels.append((alpha, rows))
     return [(k, labels[k]) for k in keys], [label for _, label in experiments], panels
-
-
-def latex(stats, table, experiments, part: str | None = None) -> str:
-    """The table as LaTeX; ``part`` (an experiment's name) for one written per
-    experiment: its title gains the experiment's label and its label the name."""
-    groups, exps, panels = wide(stats, table, experiments)
-    n = len(exps)
-    title, note = TITLES[table]
-    note = note + RAKING_NOTES.get(table, RAKING_NOTES["default"])
-    if part is not None:
-        title = f"{title}: {exps[0]}"
-    lines = ["% requires \\usepackage{booktabs}",
-             "\\begin{table}", "\\centering", f"\\caption{{{title}}}",
-             f"\\label{{tab:{table}}}" if part is None else f"\\label{{tab:{table}-{part}}}",
-             "\\begin{tabular}{l" + "".join(" " + "r" * n for _ in groups) + "}", "\\toprule"]
-    if n == 1:
-        lines += ["Method & " + " & ".join(tex(label) for _, label in groups) + " \\\\",
-                  "\\midrule"]
-    else:
-        lines += [" & " + " & ".join(f"\\multicolumn{{{n}}}{{c}}{{{tex(label)}}}"
-                                     for _, label in groups) + " \\\\",
-                  " ".join(f"\\cmidrule(lr){{{2 + i * n}-{1 + (i + 1) * n}}}"
-                           for i in range(len(groups))),
-                  "Method & " + " & ".join(tex(e) for _ in groups for e in exps) + " \\\\",
-                  "\\midrule"]
-    for i, (alpha, rows) in enumerate(panels):
-        if i:
-            lines.append("\\addlinespace")
-        label = "Raking (no $\\alpha$)" if alpha is None else f"$\\alpha = {alpha:g}$"
-        lines.append(f"\\multicolumn{{{1 + n * len(groups)}}}{{l}}{{\\textit{{{label}}}}} \\\\")
-        lines += [f"{tex(label)} & " + " & ".join(tex(v) for v in values) + " \\\\"
-                  for label, values in rows]
-    lines += ["\\bottomrule", "\\end{tabular}", "\\par\\smallskip",
-              f"\\parbox{{\\linewidth}}{{\\footnotesize {tex(note)}}}", "\\end{table}"]
-    return "\n".join(lines) + "\n"
 
 
 #: Width of each value column of a bare table: its header wraps within it.
@@ -600,17 +568,15 @@ def main() -> None:
             short = re.sub(r"^exp\d+_", "", experiment[0])
             (args.out / f"table{table}_{short}.tex").write_text(
                 bare_tabular(stats[stats.experiment == experiment[0]], table, experiment))
+        # LaTeX only as the bare tables above: remove the floats older code wrote.
+        for old in args.out.glob(f"{slug}*.tex"):
+            old.unlink()
         if table not in PER_EXPERIMENT:
-            (args.out / f"{slug}.tex").write_text(latex(stats, table, experiments))
             md.append(markdown(stats, table, experiments))
             continue
-        (args.out / f"{slug}.tex").unlink(missing_ok=True)  # the side-by-side version
         for experiment in experiments:
-            name = experiment[0]
-            one = stats[stats.experiment == name]
-            short = re.sub(r"^exp\d+_", "", name)
-            (args.out / f"{slug}_{short}.tex").write_text(latex(one, table, [experiment], name))
-            md.append(markdown(one, table, [experiment], name))
+            md.append(markdown(stats[stats.experiment == experiment[0]], table, [experiment],
+                               experiment[0]))
     (args.out / "tables.md").write_text("\n".join(md))
     pd.concat(samples, ignore_index=True).to_csv(args.out / "draws_sample.csv", index=False)
     # Last, so that a run cut short leaves the folder unstamped (run_paper.py).
