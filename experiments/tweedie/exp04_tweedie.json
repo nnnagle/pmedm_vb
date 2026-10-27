@@ -1,0 +1,73 @@
+{
+  "name": "exp04_tweedie",
+  "description": "Baseline (exp01) with a Tweedie error for the rows published as zero (pmedm_vb.assemble.tweedie, p = 1.5, amounts of mean w = 18, Tennessee's average weight), PUMA 4701502 at alpha 0.01: MAP, VB Gaussian (whitening) and the HMC reference only, for comparison with exp01's 4701502. HMC starts are shrunk toward the VB mean until they pass the screens (init_floor). Replaces exp04_k0, whose HMC reference was impractical (OPEN_QUESTIONS.md #5).",
+  "area": {
+    "name": "knoxall",
+    "state": "47",
+    "counties": [
+      "093"
+    ],
+    "year": 2024,
+    "span": 5,
+    "tables": "all"
+  },
+  "pumas": [
+    "4701502"
+  ],
+  "alphas": [
+    0.01
+  ],
+  "data_dir": "/lustre/isaac24/scratch/$USER/pmedm_vb_paper_data",
+  "model": {
+    "taper": "none",
+    "variance_floor": "none",
+    "hierarchy": "puma",
+    "rollup": "pruned",
+    "share_cap": null,
+    "cap_strength": null,
+    "multiplier_prior_sd": 3,
+    "tweedie_weight": 18
+  },
+  "rake": [],
+  "vb_families": [
+    "gaussian"
+  ],
+  "hmc": {
+    "trajectory": 3.0,
+    "chains": 32,
+    "whiten": "gaussian",
+    "short": {
+      "chains": 256,
+      "superchains": 16,
+      "warmup": 1000,
+      "draws": 4000,
+      "ess_target": 400,
+      "max_extend": 3,
+      "init_inflate": 1.5,
+      "warmup_init": 50,
+      "warmup_base": 25,
+      "warmup_term": 25,
+      "seed": 2000
+    },
+    "ref": {
+      "warmup": 2000,
+      "samples": 10000,
+      "thin": 40,
+      "checkpoint": 500,
+      "adapt_diag": true,
+      "seed": 1000,
+      "init_floor": 0.01
+    },
+    "kinds": [
+      "ref"
+    ]
+  },
+  "rake_draws": [],
+  "vb_truncated": false,
+  "fits_slurm": [
+    "--partition=campus",
+    "--qos=campus",
+    "--time=04:00:00",
+    "--cpus-per-task=16"
+  ]
+}

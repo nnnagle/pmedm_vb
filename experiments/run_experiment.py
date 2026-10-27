@@ -72,9 +72,10 @@ HMC_SLURM = ["--partition=campus-gpu", "--qos=campus-gpu", "--time=24:00:00"]
 GPU_PARTITION = "campus-gpu"
 
 #: Keys whose difference does not make a different experiment: the description,
-#: and the scoring-only choices (which VB families are also scored truncated, and
-#: the truncation's rule), which leave every fit as it is.
-FREE_KEYS = {"description", "vb_truncated", "vb_trunc_share", "vb_trunc_distinct"}
+#: the scoring-only choices (which VB families are also scored truncated, and
+#: the truncation's rule), which leave every fit as it is, and the fits job's
+#: Slurm request (fits_slurm).
+FREE_KEYS = {"description", "vb_truncated", "vb_trunc_share", "vb_trunc_distinct", "fits_slurm"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -409,8 +410,10 @@ def stage_fits(sub: Submitter, spec: dict, exp: Path, puma: str, active: dict) -
     for county in spec["area"].get("counties", ["093"]):
         args += ["--county", county]
     env = {"OUT_DIR": str(exp / puma), "FAMILIES": " ".join(spec["vb_families"])}
-    return sub.submit("fits", puma, "run_map_bundle.sbatch", args,
-                      slurm=FITS_SLURM if spec["vb_families"] else MAP_SLURM, env=env)
+    # A spec may set its own request (fits_slurm): a small problem need not wait
+    # for a whole campus node.
+    slurm = spec.get("fits_slurm") or (FITS_SLURM if spec["vb_families"] else MAP_SLURM)
+    return sub.submit("fits", puma, "run_map_bundle.sbatch", args, slurm=slurm, env=env)
 
 
 #: Optional per-kind HMC settings and the run_mcmc.py options they become.
