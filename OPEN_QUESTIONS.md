@@ -9,8 +9,8 @@ what would answer it. Move an entry to **Answered** with its answer when done.
 | 1 | HMC draws consistent with Sigma on fitted cells? | alpha 0.01: bulk matches Sigma's diagonal, tails do not, correlations do not (d/m 18-27) |
 | 2 | n_eff against D/H for IPF | not started: the share-distribution check is not written |
 | 3 | Why IPF does not converge | exp03 4701504: every miss is in a block group the LP cannot meet exactly; other PUMAs and experiments not yet read |
-| 4 | Tweedie error for small cells and zeros, keeping Sigma | zero cells implemented (`+tweedie<w>`); VB fixed (continuation from 90%); starts near the MAP pass on 4701502 (job 6459108); exp04 to use K0 (#5) |
-| 5 | A k = 0 squared-Gaussian dual term: count-like cells with Sigma exact | k = 0.01: MAP converges on 4701502, but the HMC pilot (job 6483177) is impractical: step 3e-4, every iteration at the 1,000-step cap, 10-17% divergent, 52 s/iteration; decision pending |
+| 4 | Tweedie error for small cells and zeros, keeping Sigma | zero cells implemented (`+tweedie<w>`); VB fixed (continuation from 90%); exp04 is this term again (`exp04_tweedie.json`), K0's HMC being impractical (#5); to be run |
+| 5 | A k = 0 squared-Gaussian dual term: count-like cells with Sigma exact | k = 0.01: MAP converges on 4701502, but the HMC pilot (job 6483177) is impractical (step 3e-4, every iteration at the cap, 10-17% divergent, 52 s/iteration); left out of the experiments (2026-10-27), kept as a finding |
 
 ## Open
 
@@ -383,6 +383,12 @@ what would answer it. Move an entry to **Answered** with its answer when done.
   trouble is local curvature, as on the synthetic problem. A reference of
   2,000 + 10,000 iterations would take about 7 days on one GPU, and its
   draws would move only about 0.3 whitened sd per iteration. Not run.
+- **Decision (2026-10-27):** K0 is left out of the experiments and kept as a
+  finding: the correlated count model is easy to fit at its MAP, but its
+  posterior presses against a joint boundary that HMC with a fixed metric
+  cannot sample at reasonable cost. exp04 is the zeros-only Tweedie term
+  again (#4, `experiments/tweedie/exp04_tweedie.json`);
+  `experiments/tweedie/exp04_k0.json` stays as the record of this run.
 - **Answer from:** an implementation checked as #4's was, then a fit against
   Baseline and the #4 fit on the draws' tails and small-cell fit.
 
