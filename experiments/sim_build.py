@@ -116,13 +116,24 @@ def sim_inputs(inputs, heldout, sim_puma: str, columns: dict, rows: np.ndarray, 
             continue
         bare = {name.split(".", 1)[1] for name in drop if name.split(".")[0] == table}
         trees[table] = pruned_tree(entry, bare) if bare else entry
+    from pmedm_vb.data.variance import SDR_FACTOR
+
     n_T = len(inputs.tract_constraints)
+    v = c * inputs.sigma_v[rows]
+    dev = None if inputs.sigma_l is None else np.sqrt(c) * inputs.sigma_l[rows]
+    if dev is not None:
+        # A cell whose variance is all replicate variance (v = s) can come out a
+        # rounding error below its scaled replicates' s; anything more is not rounding.
+        s = SDR_FACTOR * np.square(dev).sum(axis=1)
+        if np.any(s - v > 1e-9 * np.maximum(s, 1.0)):
+            raise SystemExit(f"{sim_puma}: scaled variances below their replicate variance "
+                             "by more than rounding")
+        v = np.maximum(v, s)
     out = dataclasses.replace(
         inputs,
         X_T=sp.csr_matrix(inputs.X_T)[:, kT], X_B=sp.csr_matrix(inputs.X_B)[:, kB],
         Y_T=survey["tract"][:, kT], Y_B=survey["block group"][:, kB],
-        sigma_v=c * inputs.sigma_v[rows],
-        sigma_l=None if inputs.sigma_l is None else np.sqrt(c) * inputs.sigma_l[rows],
+        sigma_v=v, sigma_l=dev,
         puma=sim_puma, N=float(T.sum()),
         tract_constraints=[inputs.tract_constraints[k] for k in kT],
         bg_constraints=[inputs.bg_constraints[k] for k in kB],
