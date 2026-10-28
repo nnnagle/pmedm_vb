@@ -7,7 +7,7 @@
 #   bottom  the share of cells whose published value lies in the method's
 #           posterior 90% interval.
 # Columns of panels: fitted block-group cells (Table 2), fitted tract cells
-# (Table 2t), and every held-out block-group cell together (Table 3's "All";
+# (Table 2t), and every held-out block-group cell together (Table 3;
 # the held-out tables one by one are a separate figure). Sampled cells only,
 # as in the tables. HMC reference is left out (it matches HMC short to two
 # decimals; their agreement is Figure E). Raking has no alpha and is drawn once.

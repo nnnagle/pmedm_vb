@@ -86,9 +86,8 @@ $|z|$ p90 is [UPDATE] now that it is also raked to the tract-only tables.
 \input{results/table3_baseline.tex}
 ```
 
-Baseline: accuracy on held-out ACS tables at block group level, all of them and
-those related and less related to the constraints; leaf cells of the four PUMAs
-pooled, sampled cells only. Coverage and $|z|$ p90 as in @tbl-fit-bg. The interval
+Baseline: accuracy on held-out ACS tables at block group level; leaf cells of the
+four PUMAs pooled, sampled cells only. Coverage and $|z|$ p90 as in @tbl-fit-bg. The interval
 is for the true count, while the published value also carries sampling error, so
 coverage below 0.90 is expected even for a correct model. Interval score / SE: the
 width of a 90 percent predictive interval for the published value plus 20 times
@@ -112,22 +111,19 @@ cells.
 :::
 
 @tbl-heldout reports accuracy on published block group tables withheld from the
-fit, grouped into those we expected a priori to be related to the constraint tables
-(e.g., [EXAMPLE]) and those we expected to be less related (e.g., [EXAMPLE]).
+fit (e.g., [EXAMPLE]), pooled over all held-out tables.
 
-Three results stand out. First, every method is more accurate for related than for
-less related tables (reference posterior at $\alpha = 0.01$: $|z|$ p90 of 1.21
-against 1.59). Second, $\alpha = 0.01$ is consistently more accurate than
-$\alpha = 1$: for related tables under the reference posterior, coverage is 0.88
-against 0.78 and $|z|$ p90 is 1.21 against 1.47. One possible explanation is that
+Two results stand out. First, $\alpha = 0.01$ is consistently more accurate than
+$\alpha = 1$: under the reference posterior, coverage is [UPDATE] against [UPDATE]
+and $|z|$ p90 is [UPDATE] against [UPDATE]. One possible explanation is that
 the correlations among the constraint estimates carry information about structure
 shared with the held-out tables; another is that the diagonal covariance at
 $\alpha = 1$ counts nested totals several times, and so fits the constraints, and
 their sampling errors, too closely. We have not distinguished between these.
-Third, the posterior mean is not uniformly more accurate than IPF's single
-solution: for related tables, IPF's $|z|$ p90 ([UPDATE]) is to be compared with
-those of the $\alpha = 0.01$ posteriors (1.21 to 1.31) and the $\alpha = 1$
-posteriors (1.47 to 1.55). What IPF lacks is a usable statement of uncertainty: its
+Second, the posterior mean is not uniformly more accurate than IPF's single
+solution: IPF's $|z|$ p90 ([UPDATE]) is to be compared with those of the
+$\alpha = 0.01$ posteriors ([UPDATE]) and the $\alpha = 1$ posteriors
+([UPDATE]). What IPF lacks is a usable statement of uncertainty: its
 multinomial replicates contain the published value in [UPDATE] of the cells. The
 Laplace approximation is again far from the published values ($|z|$ p90 above 10).
 
@@ -292,7 +288,7 @@ rescues the Laplace approximation for small area estimation at $\alpha = 1$, who
 intervals now match the published margins of error (ratio 0.98) and contain the
 published value in 83 percent of fitted cells, although 95 percent of its draws
 still contain a dominant record. The cost is a small loss of accuracy on held-out
-tables at $\alpha = 1$ (coverage of related tables 0.72 against 0.78). Because
+tables at $\alpha = 1$ (coverage [UPDATE] against [UPDATE]). Because
 roll-up changes the set of constraint cells, its fitted-cell and agreement results
 are not directly comparable with the other experiments'; its held-out results are.
 

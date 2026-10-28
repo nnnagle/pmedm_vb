@@ -226,19 +226,11 @@ def cell_statistics(cells: pd.DataFrame) -> list[dict]:
         add(table, "is", "Interval score / SE, mean", subset, "interval_score", mean, True)
     for table, level in (("3", "block_group"), ("3t", "tract")):
         held_out = (f"heldout_related_{level}", f"heldout_less_related_{level}")
-        add(table, "all_cover", "All: posterior 90% interval contains published", held_out,
+        add(table, "all_cover", "Posterior 90% interval contains published", held_out,
             "covers_published", mean, True)
-        add(table, "all_absz_p90", "All: |z| p90", held_out, "abs_z", quantile(0.90), True)
-        add(table, "all_is", "All: interval score / SE, mean", held_out, "interval_score", mean,
+        add(table, "all_absz_p90", "|z| p90", held_out, "abs_z", quantile(0.90), True)
+        add(table, "all_is", "Interval score / SE, mean", held_out, "interval_score", mean,
             True)
-        for kind, subset in (("rel", held_out[0]), ("less", held_out[1])):
-            name = "Related" if kind == "rel" else "Less related"
-            add(table, f"{kind}_cover", f"{name}: posterior 90% interval contains published",
-                subset, "covers_published", mean, True)
-            add(table, f"{kind}_absz_p90", f"{name}: |z| p90", subset, "abs_z", quantile(0.90),
-                True)
-            add(table, f"{kind}_is", f"{name}: interval score / SE, mean", subset,
-                "interval_score", mean, True)
     for table, subset in (("4", "constrained_block_group"), ("4t", "constrained_tract")):
         add(table, "mdiff_p50", "Median diff. p50", subset, "median_diff_ref_sd",
             quantile(0.50), False)
@@ -321,8 +313,6 @@ def scores_statistics(scores: pd.DataFrame, whiten: str = "vb_skewed") -> list[d
 DIGITS = {"fit": "min", "sampling": "min", "total": "min",
           "post_cover": 2, "absz_p90": 2, "hw_p50": 2, "is": 2,
           "all_cover": 2, "all_absz_p90": 2, "all_is": 2,
-          "rel_cover": 2, "rel_absz_p90": 2, "rel_is": 2,
-          "less_cover": 2, "less_absz_p90": 2, "less_is": 2,
           "mdiff_p50": 2, "mdiff_p99": 2, "width_p10": 2, "width_p50": 2, "khat": "khat",
           "walls": 3, "dh_min_p50": 3, "dh_lt": 3, "neff_min_p50": 1, "neff_lt": 3, "hhz_gt": 3, "hhz_p50": 2}
 
@@ -361,9 +351,8 @@ TITLES = {
           "assessed against the reference posterior in Table 4."),
     "2t": ("Fit to the published tract constraints", "As Table 2, for tract cells."),
     "3": ("Held-out block-group accuracy",
-          "Held-out ACS tables at block-group level: all of them, then those related and "
-          "less related to the constraints; leaf cells of the four PUMAs pooled, sampled "
-          "cells only. Posterior 90% "
+          "Held-out ACS tables at block-group level; leaf cells of the four PUMAs pooled, "
+          "sampled cells only. Posterior 90% "
           "interval contains published, and |z|, as in Table 2. The interval is for the true "
           "count, while the published value also carries sampling error, so coverage below "
           "0.90 is expected even for a correct model. Interval score / SE: the width of a "

@@ -10,7 +10,7 @@
 #     the whole distribution, centre and spread. Lower is better. Four sets:
 #     fitted block group and fitted tract cells (Tables 2 and 2t; the published
 #     values were used in the fit, so these describe the fit) and every held-out
-#     block group and tract cell (Tables 3 and 3t, "All"; cells the fit never
+#     block group and tract cell (Tables 3 and 3t; cells the fit never
 #     saw). On the held-out rows the dashed line (about 4.1) is the expected
 #     score of a method that knew every true count;
 #   the share of usable draws: draws in which every block group (over 100

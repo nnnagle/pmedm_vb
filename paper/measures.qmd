@@ -60,9 +60,8 @@ Interval score
     judges centre and spread together. Lower is better. A method that knew
     every true count exactly would score about 4.13.
 
-Held-out cells come from ACS tables not used in fitting. They are grouped as
-related or less related to the constraint tables, at block-group and tract
-level.
+Held-out cells come from ACS tables not used in fitting. They are pooled over
+all held-out tables and reported at block-group and tract level.
 
 ### Agreement with the reference posterior
 
