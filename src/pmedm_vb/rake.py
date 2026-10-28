@@ -285,11 +285,12 @@ def _fit(
 
 def rake_ipf(
     inputs: PMEDMInputs, *, tol: float = 1e-3, max_sweeps: int = 1000, log_every: int = 50,
-    rollup=None,
+    rollup=None, tract_first: bool = True,
 ) -> RakeResult:
     """Hard raking of ``N q`` to the block group margins and the tract-only
     tables' tract margins (see the module docstring); each sweep visits the
-    tract margins first.
+    tract margins first (``tract_first=False``: last). When the cycle stops
+    short of ``tol``, the margins visited last are the ones met most nearly.
 
     ``tol`` is on ``|log(m / Y)|``, the relative error of each fitted margin;
     ``1e-3`` is 0.1%. The residual reported at a sweep's end is each row's
@@ -299,7 +300,8 @@ def rake_ipf(
     tract = tract_only_categories(inputs)
     if rollup is not None:
         h = _rolled(inputs, rollup)
-        columns = (_cell_rows(inputs, h, "tract", tract) + _cell_rows(inputs, h, "block group"))
+        tracts, groups = _cell_rows(inputs, h, "tract", tract), _cell_rows(inputs, h, "block group")
+        columns = tracts + groups if tract_first else groups + tracts
         return _fit(inputs, columns, h.Y_c.astype(float).copy(), None, tol=tol,
                     max_sweeps=max_sweeps, fix_total=False, method="ipf", log_every=log_every)
     targets = inputs.targets().astype(float).copy()
@@ -308,7 +310,8 @@ def rake_ipf(
     for k in tract:
         fitted[k * n_tracts:(k + 1) * n_tracts] = True
     targets[: inputs.Y_T.size][~fitted] = np.nan  # the other tract rows are not fitted
-    columns = _rows(inputs, "tract", tract) + _rows(inputs, "block group")
+    tracts, groups = _rows(inputs, "tract", tract), _rows(inputs, "block group")
+    columns = tracts + groups if tract_first else groups + tracts
     return _fit(inputs, columns, np.nan_to_num(targets, nan=1.0), None, tol=tol,
                 max_sweeps=max_sweeps, fix_total=False, method="ipf", log_every=log_every)
 
