@@ -219,15 +219,13 @@ def cell_statistics(cells: pd.DataFrame) -> list[dict]:
                              value=fn(group[column]), n=int(group[column].notna().sum())))
 
     for table, subset in (("2", "constrained_block_group"), ("2t", "constrained_tract")):
-        add(table, "post_cover", "Posterior 90% interval contains published", subset,
-            "covers_published", mean, True)
+        add(table, "post_cover", "90% coverage", subset, "covers_published", mean, True)
         add(table, "absz_p90", "|z| p90", subset, "abs_z", quantile(0.90), True)
         add(table, "hw_p50", "Half-width / MOE", subset, "halfwidth_over_moe", quantile(0.50), True)
         add(table, "is", "Interval score / SE, mean", subset, "interval_score", mean, True)
     for table, level in (("3", "block_group"), ("3t", "tract")):
         held_out = (f"heldout_related_{level}", f"heldout_less_related_{level}")
-        add(table, "all_cover", "Posterior 90% interval contains published", held_out,
-            "covers_published", mean, True)
+        add(table, "all_cover", "90% coverage", held_out, "covers_published", mean, True)
         add(table, "all_absz_p90", "|z| p90", held_out, "abs_z", quantile(0.90), True)
         add(table, "all_is", "Interval score / SE, mean", held_out, "interval_score", mean,
             True)
@@ -339,8 +337,8 @@ TITLES = {
     "2": ("Fit to the published block-group constraints",
           "All block-group constraint leaf cells of the four PUMAs pooled (published "
           "categories; totals and subtotals left out); sampled cells only "
-          "(nonzero estimates with a sampling variance). Posterior 90% interval contains "
-          "published: the share of cells whose published estimate lies between the 5th and "
+          "(nonzero estimates with a sampling variance). 90% coverage: "
+          "the share of cells whose published estimate lies between the 5th and "
           "95th percentiles of the method's draws. The published values were used in "
           "fitting, so this describes the fit and has no nominal level: even for the exact "
           "posterior it depends on how strongly each cell's own estimate determines its "
@@ -352,8 +350,7 @@ TITLES = {
     "2t": ("Fit to the published tract constraints", "As Table 2, for tract cells."),
     "3": ("Held-out block-group accuracy",
           "Held-out ACS tables at block-group level; leaf cells of the four PUMAs pooled, "
-          "sampled cells only. Posterior 90% "
-          "interval contains published, and |z|, as in Table 2. The interval is for the true "
+          "sampled cells only. 90% coverage and |z| as in Table 2. The interval is for the true "
           "count, while the published value also carries sampling error, so coverage below "
           "0.90 is expected even for a correct model. Interval score / SE: the width of a "
           "90% predictive interval for the published value (about the posterior mean, the "
