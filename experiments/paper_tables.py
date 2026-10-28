@@ -4,7 +4,7 @@ Reads, for each experiment, the scoring ``<root>/<experiment>/scores/<tag>``:
 ``detail/*/<method>_cells.parquet`` (every scored cell),
 ``detail/*/<method>_draws.parquet`` (every draw) and ``all_scores.csv``
 (timings and PSIS k-hat), and writes five tables, plus the tract versions of
-Tables 2, 3 and 4, each as LaTeX (a bare booktabs ``tabular`` per experiment,
+Tables 2, 3 and 4, and two tables by ACS table (6 and 7), each as LaTeX (a bare booktabs ``tabular`` per experiment,
 ``table<key>_<experiment>.tex``, for a document to caption and label), CSV
 (long: one row per experiment, alpha, method and statistic, unrounded, with
 ``n`` the cells, draws or PUMAs behind it) and Markdown (all in ``tables.md``,
@@ -26,6 +26,10 @@ experiment. Pooling:
   posterior 90% interval (the draws' 5th to 95th percentiles) contains the
   published value; it has no nominal level, since the interval is for the true
   count and the published value also carries sampling error.
+- By ACS table (Tables 6 and 7): the same pooled block-group leaf cells, one row
+  per ACS table, columns the methods at each alpha; each value is followed (in
+  parentheses) by the same statistic over the table's published zeros, whose
+  SE is the modelled zero-cell one.
 - Over draws (Table 5): the draws of every PUMA together; each draw is one
   PUMA's, so "any block group" means any in that PUMA.
 - Not poolable: PSIS k-hat, one value per fit, as the median [min, max] over
@@ -74,7 +78,7 @@ NO_ALPHA = ("ipf", "ipf_multinomial")
 SHARE_KEYS = ("walls", "dh_lt", "neff_lt", "hhz_gt")
 
 #: Cell columns read from the detail files.
-CELL_COLUMNS = ["method", "puma", "alpha", "subset", "sampled", "abs_z",
+CELL_COLUMNS = ["method", "puma", "alpha", "subset", "sampled", "published", "abs_z",
                 "covers_published",
                 "halfwidth_over_moe", "median_diff_ref_sd", "width_ratio_ref"]
 CELL_SUBSETS = ("constrained_block_group", "constrained_tract",
@@ -128,7 +132,8 @@ def read_detail(folder: Path, kind: str, columns: list[str], subsets=None) -> pd
 
     Cells are leaf cells only: an all-cell table's totals and subtotals (names
     ending in ``":"``) are sums of its leaves, so counting them as cells would
-    count the same people again and weight the large aggregates."""
+    count the same people again and weight the large aggregates. Cells also
+    get ``acs_table``, the ACS table of their name ``"{table}.{category}"``."""
     frames = []
     for path in sorted(folder.glob(f"*/*_{kind}.parquet")):
         names = pq.read_schema(path).names
@@ -136,7 +141,12 @@ def read_detail(folder: Path, kind: str, columns: list[str], subsets=None) -> pd
         leaves_only = kind == "cells" and "cell" in names
         frame = pd.read_parquet(path, columns=have + (["cell"] if leaves_only else []))
         if leaves_only:
-            frame = frame[~frame.pop("cell").str.endswith(SUBTOTAL_MARK)]
+            cell = frame.pop("cell").astype("category")
+            names = cell.cat.categories
+            codes = cell.cat.codes.to_numpy()
+            acs = np.asarray(names.str.split(".", n=1).str[0])
+            frame["acs_table"] = pd.Categorical(acs[codes])
+            frame = frame[~np.asarray(names.str.endswith(SUBTOTAL_MARK))[codes]]
         if subsets is not None:
             frame = frame[frame.subset.isin(subsets)]
         for column in frame.columns:
@@ -147,6 +157,8 @@ def read_detail(folder: Path, kind: str, columns: list[str], subsets=None) -> pd
         raise SystemExit(f"no *_{kind}.parquet under {folder}")
     frame = pd.concat(frames, ignore_index=True)
     frame["alpha"] = frame.alpha.astype(float).round(12)
+    if "acs_table" in frame:  # concat makes differing categories plain strings
+        frame["acs_table"] = frame.acs_table.astype("category")
     return frame
 
 
@@ -241,6 +253,50 @@ def cell_statistics(cells: pd.DataFrame) -> list[dict]:
     return rows
 
 
+#: Tables 6 and 7's panels: (panel, label, subsets), block-group cells.
+ACS_PANELS = [("constraint", "Constraint tables", ("constrained_block_group",)),
+              ("heldout", "Held-out tables", ("heldout_related_block_group",
+                                              "heldout_less_related_block_group"))]
+
+
+#: (column, key with {} for the zeros' "0", table, label)
+ACS_KEYS = [("tz_p50", "tz{}_p50", "6", "|z| p50"), ("tz_p90", "tz{}_p90", "6", "|z| p90"),
+            ("tis", "tis{}", "7", "Interval score / SE, mean")]
+#: Each table's statistics in one cell, joined by "/": the sampled cells', then
+#: the published zeros'.
+ACS_CELLS = {"6": (("tz_p50", "tz_p90"), ("tz0_p50", "tz0_p90")), "7": (("tis",), ("tis0",))}
+
+
+def acs_table_statistics(cells: pd.DataFrame) -> list[dict]:
+    """Tables 6 and 7, per ACS table: |z| p50 and p90 and the mean interval
+    score over the sampled leaf cells, and the same over the published zeros
+    (keys ending ``0``)."""
+    if not {"acs_table", "published", "abs_z"} <= set(cells.columns):
+        return []
+    if "halfwidth_over_moe" in cells:
+        cells = cells.assign(interval_score=interval_score(cells))
+    rows = []
+    for panel, _, subsets in ACS_PANELS:
+        part = cells[cells.subset.isin(subsets)]
+        sampled = part.sampled.fillna(False).astype(bool)
+        for suffix, mask in (("", sampled), ("0", part.published == 0)):
+            group = part[mask].groupby(["acs_table", "alpha", "method"], observed=True)
+            stats = pd.DataFrame({"tz_p50": group.abs_z.quantile(0.50),
+                                  "tz_p90": group.abs_z.quantile(0.90),
+                                  "n": group.abs_z.count()})
+            if "interval_score" in part:
+                stats["tis"] = group.interval_score.mean()
+            for (acs, alpha, method), r in stats.iterrows():
+                base = dict(alpha=alpha, method=method, n=int(r["n"]), acs_table=acs,
+                            panel=panel)
+                for column, key, table, label in ACS_KEYS:
+                    if column in r and pd.notna(r[column]):
+                        rows.append(dict(base, table=table, key=key.format(suffix),
+                                         label=label + (", published zeros" if suffix else ""),
+                                         value=float(r[column])))
+    return rows
+
+
 def draw_statistics(draws: pd.DataFrame, args) -> list[dict]:
     rows = []
     for (alpha, method), group in draws.groupby(["alpha", "method"]):
@@ -311,6 +367,7 @@ def scores_statistics(scores: pd.DataFrame, whiten: str = "vb_skewed") -> list[d
 DIGITS = {"fit": "min", "sampling": "min", "total": "min",
           "post_cover": 2, "absz_p90": 2, "hw_p50": 2, "is": 2,
           "all_cover": 2, "all_absz_p90": 2, "all_is": 2,
+          "tz_p50": 2, "tz_p90": 2, "tz0_p50": 2, "tz0_p90": 2, "tis": 2, "tis0": 2,
           "mdiff_p50": 2, "mdiff_p99": 2, "width_p10": 2, "width_p50": 2, "khat": "khat",
           "walls": 3, "dh_min_p50": 3, "dh_lt": 3, "neff_min_p50": 1, "neff_lt": 3, "hhz_gt": 3, "hhz_p50": 2}
 
@@ -366,6 +423,17 @@ TITLES = {
           "per fit, median [min, max] over PUMAs (methods with a density only)."),
     "4t": ("Tract agreement with the reference HMC",
            "As Table 4, for tract constraint leaf cells; k-hat, one per fit, is in Table 4."),
+    "6": ("|z| by ACS table",
+          "Block-group leaf cells of the four PUMAs pooled, by ACS table: constraint tables, "
+          "then held-out tables. Each entry is |z| p50/p90 over the table's sampled cells "
+          "(as in Table 2); below it, in parentheses, the same over the table's published "
+          "zeros, whose SE is the modelled zero-cell one, so their |z| is not on the "
+          "sampled cells' scale."),
+    "7": ("Interval score by ACS table",
+          "Block-group leaf cells of the four PUMAs pooled, by ACS table, as in Table 6. "
+          "Each entry is the mean interval score / SE (as in Table 3) over the table's "
+          "sampled cells; below it, in parentheses, over its published zeros, with the "
+          "modelled zero-cell SE. IPF, a single fit, has no interval."),
     "5": ("Usability of the draws",
           "Draws of the four PUMAs pooled (4,000 per PUMA; one for raking). A cell is one "
           "record in one block group. D/H: the expected number of distinct household records "
@@ -380,7 +448,18 @@ TITLES = {
 #: Tables written once per experiment in tables.md (the CSV stays one file, which
 #: Figure C reads), the rest with the experiments side by side. LaTeX is always
 #: per experiment, as bare tables (bare_tabular).
-PER_EXPERIMENT = {"1"}
+PER_EXPERIMENT = {"1", "6", "7"}
+
+#: Tables by ACS table (rows ACS tables, columns methods at each alpha).
+BY_ACS_TABLE = ("6", "7")
+
+#: Short method labels for the by-ACS-table columns.
+SHORT_METHODS = {"ipf": "IPF", "ipf_multinomial": "IPF mult.", "map_laplace": "Laplace",
+                 "vb_gaussian": "VB G", "vb_skewed": "VB S", "vb_gaussian_trunc": "VB G tr.",
+                 "vb_skewed_trunc": "VB S tr.", "hmc_short": "HMC short",
+                 "hmc_ref": "HMC ref."}
+SHORT_NOTE = (" Columns: IPF; IPF mult., IPF multinomial; Laplace, MAP + Laplace; VB G and "
+              "VB S, VB Gaussian and skewed; tr., truncated; HMC short and reference.")
 
 #: The sentence each table's note gains about the raking (no-alpha) rows.
 RAKING_NOTES = {
@@ -448,6 +527,85 @@ def bare_tabular(stats, table, experiment) -> str:
         lines += [f"{tex(label)} & " + " & ".join(tex(v) for v in values) + " \\\\"
                   for label, values in rows]
     lines += ["\\bottomrule", "\\end{tabular}"]
+    return "\n".join(lines) + "\n"
+
+
+def acs_wide(stats: pd.DataFrame, table: str) -> tuple[list, list]:
+    """Tables 6 and 7's columns, ``(method, alpha or None)``, raking first, and
+    their panels ``(label, [(acs table, values, zeros' values or None)])``."""
+    part = stats[stats.table == table]
+    index = {(r.panel, r.acs_table, r.alpha, r.method, r.key): r for r in part.itertuples()}
+    have = set(zip(part.method, part.alpha))
+    columns = [(m, None) for m, _ in METHODS if m in NO_ALPHA and any(m == h for h, _ in have)]
+    columns += [(m, a) for a in ALPHAS for m, _ in METHODS
+                if m not in NO_ALPHA and (m, a) in have]
+    main, zeros = ACS_CELLS[table]
+
+    def cell(panel, acs, method, alpha, keys):
+        alphas = ALPHAS if alpha is None else (alpha,)  # raking: the same in every alpha
+        found = [next((index[(panel, acs, a, method, k)] for a in alphas
+                       if (panel, acs, a, method, k) in index), None) for k in keys]
+        if all(f is None for f in found):
+            return None
+        return "/".join(fmt(None if f is None else pd.Series(f._asdict()), k)
+                        for f, k in zip(found, keys))
+
+    panels = []
+    for panel, label, _ in ACS_PANELS:
+        rows = []
+        for acs in sorted(part[part.panel == panel].acs_table.unique()):
+            values = [cell(panel, acs, m, a, main) or "--" for m, a in columns]
+            zero = [cell(panel, acs, m, a, zeros) for m, a in columns]
+            rows.append((acs, values, None if all(z is None for z in zero)
+                         else [f"({z})" if z else "" for z in zero]))
+        if rows:
+            panels.append((label, rows))
+    return columns, panels
+
+
+def acs_tabular(stats, table) -> str:
+    """Table 6 or 7 for one experiment as a bare ``tabular``: a row per ACS table,
+    its published zeros' values on the row below; columns grouped by alpha."""
+    columns, panels = acs_wide(stats, table)
+    groups = [(alpha, sum(1 for _, a in columns if a == alpha))
+              for alpha in dict.fromkeys(a for _, a in columns)]
+    lines = ["\\setlength{\\tabcolsep}{3pt}", "\\begin{tabular}{l" + "r" * len(columns) + "}",
+             "\\toprule"]
+    header, rules, start = [""], [], 2
+    for alpha, n in groups:
+        name = "Raking" if alpha is None else f"$\\alpha = {alpha:g}$"
+        header.append(f"\\multicolumn{{{n}}}{{c}}{{{name}}}")
+        rules.append(f"\\cmidrule(lr){{{start}-{start + n - 1}}}")
+        start += n
+    lines += [" & ".join(header) + " \\\\", " ".join(rules),
+              "ACS table & " + " & ".join(SHORT_METHODS.get(m, m) for m, _ in columns) + " \\\\",
+              "\\midrule"]
+    for i, (label, rows) in enumerate(panels):
+        if i:
+            lines.append("\\addlinespace")
+        lines.append(f"\\multicolumn{{{1 + len(columns)}}}{{l}}{{\\textit{{{label}}}}} \\\\")
+        for acs, values, zero in rows:
+            lines.append(acs.replace("_", "\\_") + " & " + " & ".join(values) + " \\\\")
+            if zero is not None:
+                lines.append(" & " + " & ".join(zero) + " \\\\")
+    lines += ["\\bottomrule", "\\end{tabular}"]
+    return "\n".join(lines) + "\n"
+
+
+def acs_markdown(stats, table, experiment) -> str:
+    columns, panels = acs_wide(stats, table)
+    title, note = TITLES[table]
+    header = ["ACS table"] + [SHORT_METHODS.get(m, m) + ("" if a is None else f", α = {a:g}")
+                              for m, a in columns]
+    lines = [f"### Table {table}. {title}: {experiment[1]}".replace("|z|", "\\|z\\|"), "",
+             "| " + " | ".join(header) + " |", "|" + "---|" + "---:|" * len(columns)]
+    for label, rows in panels:
+        lines.append(f"| *{label}* |" + " |" * len(columns))
+        for acs, values, zero in rows:
+            lines.append("| " + " | ".join([acs] + [v if zero is None or not z else f"{v} {z}"
+                                                    for v, z in zip(values, zero or values)])
+                         + " |")
+    lines += ["", (note + SHORT_NOTE).replace("|z|", "\\|z\\|"), ""]
     return "\n".join(lines) + "\n"
 
 
@@ -520,7 +678,7 @@ def main() -> None:
             continue
         experiments.append((name, labels.get(name, name)))
         cells = keep(read_detail(folder / "detail", "cells", CELL_COLUMNS, CELL_SUBSETS), args)
-        rows = cell_statistics(cells)
+        rows = cell_statistics(cells) + acs_table_statistics(cells)
         del cells
         draws = keep(read_detail(folder / "detail", "draws", DRAW_COLUMNS), args)
         rows += draw_statistics(draws, args)
@@ -549,11 +707,16 @@ def main() -> None:
         if not (stats.table == table).any():
             continue
         slug = f"table{table}_" + re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_")
-        stats[stats.table == table].to_csv(args.out / f"{slug}.csv", index=False)
+        part = stats[stats.table == table]
+        if table not in BY_ACS_TABLE:
+            part = part.drop(columns=["acs_table", "panel"], errors="ignore")
+        part.to_csv(args.out / f"{slug}.csv", index=False)
         for experiment in experiments:  # bare, per experiment: table2_baseline.tex
             short = re.sub(r"^exp\d+_", "", experiment[0])
+            one = stats[stats.experiment == experiment[0]]
             (args.out / f"table{table}_{short}.tex").write_text(
-                bare_tabular(stats[stats.experiment == experiment[0]], table, experiment))
+                acs_tabular(one, table) if table in BY_ACS_TABLE
+                else bare_tabular(one, table, experiment))
         # LaTeX only as the bare tables above: remove the floats older code wrote.
         for old in args.out.glob(f"{slug}*.tex"):
             old.unlink()
@@ -561,8 +724,9 @@ def main() -> None:
             md.append(markdown(stats, table, experiments))
             continue
         for experiment in experiments:
-            md.append(markdown(stats[stats.experiment == experiment[0]], table, [experiment],
-                               experiment[0]))
+            one = stats[stats.experiment == experiment[0]]
+            md.append(acs_markdown(one, table, experiment) if table in BY_ACS_TABLE
+                      else markdown(one, table, [experiment], experiment[0]))
     (args.out / "tables.md").write_text("\n".join(md))
     pd.concat(samples, ignore_index=True).to_csv(args.out / "draws_sample.csv", index=False)
     # Last, so that a run cut short leaves the folder unstamped (run_paper.py).

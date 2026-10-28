@@ -130,8 +130,54 @@ Laplace approximation is again far from the published values ($|z|$ p90 above 10
 These comparisons are probably optimistic. The held-out and constraint estimates
 come from the same ACS sample, so their sampling errors are correlated, and fitting
 the constraints partly fits the errors of the held-out estimates too. Consistent
-with this, the 90th percentile of $|z|$ for the best methods (1.21) is below the
+with this, the 90th percentile of $|z|$ for the best methods ([UPDATE]) is below the
 1.645 that would be expected even of the true counts.
+
+### Accuracy by ACS table {#sec-supp-by-table}
+
+@tbl-by-table-z and @tbl-by-table-is break the block group results of
+@tbl-fit-bg and @tbl-heldout down by ACS table, for the constraint tables and the
+held-out tables. Each table's published zeros are reported separately, in
+parentheses. Their SE is the modelled zero-cell SE, not a sampling SE, so their
+$|z|$ and interval scores are not on the same scale as the sampled cells'.
+
+::: {.landscape}
+
+::: {#tbl-by-table-z}
+
+```{=latex}
+\scriptsize
+\input{results/table6_baseline.tex}
+```
+
+Baseline: $|z|$ by ACS table, block group leaf cells of the four PUMAs pooled.
+Each entry is the 50th/90th percentile of $|z|$ over the table's sampled cells;
+below it, in parentheses, the same over the table's published zeros, with the
+modelled zero-cell SE. Columns: IPF; IPF mult., IPF multinomial; Laplace,
+MAP + Laplace; VB G and VB S, VB Gaussian and skewed; tr., truncated; HMC short
+and reference.
+
+:::
+
+:::
+
+::: {.landscape}
+
+::: {#tbl-by-table-is}
+
+```{=latex}
+\scriptsize
+\input{results/table7_baseline.tex}
+```
+
+Baseline: mean interval score / SE by ACS table, block group leaf cells of the
+four PUMAs pooled, as in @tbl-heldout; below each entry, in parentheses, the mean
+over the table's published zeros, with the modelled zero-cell SE. IPF, a single
+fit, has no interval. Columns as in @tbl-by-table-z.
+
+:::
+
+:::
 
 ### Agreement with the reference posterior {#sec-supp-agree}
 
