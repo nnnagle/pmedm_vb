@@ -151,7 +151,7 @@ $|z|$ and interval scores are not on the same scale as the sampled cells'.
 ```
 
 Baseline: $|z|$ by ACS table, block group leaf cells of the four PUMAs pooled.
-Each entry is the 50th/90th percentile of $|z|$ over the table's sampled cells;
+Each entry is the median $|z|$ over the table's sampled cells;
 below it, in parentheses, the same over the table's published zeros, with the
 modelled zero-cell SE. Columns: IPF; IPF mult., IPF multinomial; Laplace,
 MAP + Laplace; VB G and VB S, VB Gaussian and skewed; tr., truncated; HMC short

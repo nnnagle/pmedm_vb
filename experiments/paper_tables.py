@@ -260,15 +260,15 @@ ACS_PANELS = [("constraint", "Constraint tables", ("constrained_block_group",)),
 
 
 #: (column, key with {} for the zeros' "0", table, label)
-ACS_KEYS = [("tz_p50", "tz{}_p50", "6", "|z| p50"), ("tz_p90", "tz{}_p90", "6", "|z| p90"),
+ACS_KEYS = [("tz_p50", "tz{}_p50", "6", "|z| p50"),
             ("tis", "tis{}", "7", "Interval score / SE, mean")]
 #: Each table's statistics in one cell, joined by "/": the sampled cells', then
 #: the published zeros'.
-ACS_CELLS = {"6": (("tz_p50", "tz_p90"), ("tz0_p50", "tz0_p90")), "7": (("tis",), ("tis0",))}
+ACS_CELLS = {"6": (("tz_p50",), ("tz0_p50",)), "7": (("tis",), ("tis0",))}
 
 
 def acs_table_statistics(cells: pd.DataFrame) -> list[dict]:
-    """Tables 6 and 7, per ACS table: |z| p50 and p90 and the mean interval
+    """Tables 6 and 7, per ACS table: the median |z| and the mean interval
     score over the sampled leaf cells, and the same over the published zeros
     (keys ending ``0``)."""
     if not {"acs_table", "published", "abs_z"} <= set(cells.columns):
@@ -282,7 +282,6 @@ def acs_table_statistics(cells: pd.DataFrame) -> list[dict]:
         for suffix, mask in (("", sampled), ("0", part.published == 0)):
             group = part[mask].groupby(["acs_table", "alpha", "method"], observed=True)
             stats = pd.DataFrame({"tz_p50": group.abs_z.quantile(0.50),
-                                  "tz_p90": group.abs_z.quantile(0.90),
                                   "n": group.abs_z.count()})
             if "interval_score" in part:
                 stats["tis"] = group.interval_score.mean()
@@ -367,7 +366,7 @@ def scores_statistics(scores: pd.DataFrame, whiten: str = "vb_skewed") -> list[d
 DIGITS = {"fit": "min", "sampling": "min", "total": "min",
           "post_cover": 2, "absz_p90": 2, "hw_p50": 2, "is": 2,
           "all_cover": 2, "all_absz_p90": 2, "all_is": 2,
-          "tz_p50": 2, "tz_p90": 2, "tz0_p50": 2, "tz0_p90": 2, "tis": 2, "tis0": 2,
+          "tz_p50": 2, "tz0_p50": 2, "tis": 2, "tis0": 2,
           "mdiff_p50": 2, "mdiff_p99": 2, "width_p10": 2, "width_p50": 2, "khat": "khat",
           "walls": 3, "dh_min_p50": 3, "dh_lt": 3, "neff_min_p50": 1, "neff_lt": 3, "hhz_gt": 3, "hhz_p50": 2}
 
@@ -425,8 +424,8 @@ TITLES = {
            "As Table 4, for tract constraint leaf cells; k-hat, one per fit, is in Table 4."),
     "6": ("|z| by ACS table",
           "Block-group leaf cells of the four PUMAs pooled, by ACS table: constraint tables, "
-          "then held-out tables. Each entry is |z| p50/p90 over the table's sampled cells "
-          "(as in Table 2); below it, in parentheses, the same over the table's published "
+          "then held-out tables. Each entry is the median |z| over the table's sampled cells "
+          "(|z| as in Table 2); below it, in parentheses, the same over the table's published "
           "zeros, whose SE is the modelled zero-cell one, so their |z| is not on the "
           "sampled cells' scale."),
     "7": ("Interval score by ACS table",
