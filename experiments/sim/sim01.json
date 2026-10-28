@@ -1,0 +1,42 @@
+{
+  "name": "sim01",
+  "description": "Design-based simulation: truths drawn from the baseline's fits of PUMA 4701502 at alpha 0.01, a 1-in-8 Bernoulli survey of each truth's weighting units within block groups, refitted to a smaller constraint set with the original Sigma times one calibrated scalar per truth kind.",
+  "source": {
+    "spec": "experiments/paper_v3/exp01_baseline.json",
+    "puma": "4701502",
+    "alpha": 0.01
+  },
+  "fits": "experiments/sim/sim01_fits.json",
+  "truths": {
+    "hmc_ref": 25,
+    "ipf_multinomial": 25
+  },
+  "puma_letters": {
+    "hmc_ref": "h",
+    "ipf_multinomial": "m"
+  },
+  "sampling_fraction": 0.125,
+  "constraints": {
+    "block group": [
+      "B01001",
+      "B03002",
+      "B08301",
+      "B25003",
+      "C24010"
+    ],
+    "tract": [
+      "B01001",
+      "B03002",
+      "B08301",
+      "B25003",
+      "C24010",
+      "B17024",
+      "B26001"
+    ]
+  },
+  "drop_deepest": [
+    "C24010"
+  ],
+  "draws": 16,
+  "seed": 4100
+}

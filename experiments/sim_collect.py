@@ -1,0 +1,270 @@
+"""Tabulate a simulation's truths, surveys and fits (``experiments/sim/<name>.json``;
+``sim_common.py``), for scoring afterwards.
+
+Every published line of the source PUMA -- its constraint tables, all of them,
+and its held-out tables -- at block group and tract, for each truth:
+
+``estimates/kind=<kind>/truth_id=<i>/part.parquet``
+    One row per (draw, level, geoid, line): ``tract`` (a block group's tract;
+    a tract's own GEOID), ``table``; ``truth`` (the true count), ``survey``
+    (the survey's estimate), ``se`` (the square root of ``c`` times the line's
+    published variance), ``bernoulli_se`` (the survey's exact standard error
+    given the truth), ``ipf`` (the IPF fit, the same on every draw), and the
+    ``draw``-th of ``draws`` draws of ``ipf_multinomial``, ``vb_gaussian`` and
+    ``hmc_short`` (one from each of HMC short's superchains). Draw ``k`` of one
+    method has nothing to do with draw ``k`` of another: score each column
+    against ``truth``, never one method's row against another's.
+    ``arrow::open_dataset()`` reads the folder as one table, with ``kind`` and
+    ``truth_id`` from the paths.
+``cells.parquet``
+    One row per (level, line): ``table``, ``subtotal``, ``parent`` (the
+    constraint tables'), ``role`` -- ``constraint``, ``dropped_line`` (a
+    constraint table's line left out, ``drop_deepest``), ``other_table`` (a
+    source constraint table the simulation does not fit) or ``heldout``.
+``draws.parquet``
+    One row per (kind, truth_id, method, draw), the truth itself among the
+    methods: per block group with more than ``--hh-min`` households in the
+    truth, ``D / H`` (expected distinct household records among the truth's
+    ``H`` households) and ``n_eff = 1 / sum s^2`` over the household records'
+    shares, their smallest and median over block groups, and the largest cell's
+    share of the total.
+
+A method whose fit is missing is left empty (NaN) and reported::
+
+    sbatch --account=acf-utk0011 experiments/run_python.sbatch sim_collect.py \\
+        --sim experiments/sim/sim01.json --root $R
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import run_experiment as rx  # noqa: E402
+from sim_common import Simulation, Tabulator, constraint_columns  # noqa: E402
+
+METHODS = ("ipf_multinomial", "vb_gaussian", "hmc_short")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--sim", type=Path, required=True, help="experiments/sim/<name>.json")
+    parser.add_argument("--root", type=Path, required=True, help="the experiments' folder")
+    parser.add_argument("--pumas", nargs="+", default=None,
+                        help="only these synthetic PUMAs (default: every one)")
+    parser.add_argument("--hh-min", type=float, default=100)
+    parser.add_argument("--out", type=Path, default=None,
+                        help="default: <root>/<fits name>/simulation/output")
+    return parser.parse_args()
+
+
+# -- the fits' draws ------------------------------------------------------------
+
+
+def ipf_fit(sim: Simulation, puma: str) -> np.ndarray | None:
+    from pmedm_vb.rake import rake_name
+
+    path = (sim.fits_folder / puma / "ipf"
+            / f"{rake_name(puma, 'ipf', sim.fits['model'].get('rollup'))}.npz")
+    if not path.exists():
+        return None
+    with np.load(path) as saved:
+        return np.asarray(saved["W"], dtype=float)
+
+
+def multinomial_draws(W: np.ndarray, rng, draws: int) -> list[np.ndarray]:
+    total = int(round(W.sum()))
+    p = np.clip(W.ravel() / W.sum(), 0.0, None)
+    p /= p.sum()
+    return [rng.multinomial(total, p).reshape(W.shape).astype(float) for _ in range(draws)]
+
+
+def populations(inputs, lam: np.ndarray) -> list[np.ndarray]:
+    """``W = N p`` of each column of ``lam`` (multipliers in the inputs' layout)."""
+    from compare_methods import log_p_of
+    from pmedm_vb.solvers.base import ConstraintOperator
+
+    op = ConstraintOperator(inputs)
+    return [inputs.N * np.exp(log_p_of(inputs, op, lam[:, d])) for d in range(lam.shape[1])]
+
+
+def vb_draws(sim: Simulation, puma: str, inputs, rng) -> list[np.ndarray] | None:
+    from compare_methods import check_level, floor_spec, taper_spec, with_lambda
+    from laplace_diagnostic import load_vb
+    from pmedm_vb.assemble.hierarchy import Hierarchy
+
+    path = sim.fits_folder / puma / "vb_gaussian" / f"{rx.fit_name(sim.fits, puma, sim.alpha)}.npz"
+    if not path.exists():
+        return None
+    level = rx.level(sim.fits)
+    with np.load(path) as saved:
+        check_level(path, saved, level)
+    q, _, _ = load_vb(path)
+    model = sim.fits["model"]
+    h = Hierarchy.build(inputs, level, alpha=sim.alpha, taper=taper_spec(model["taper"]),
+                        variance_floor=floor_spec(str(model["variance_floor"])))
+    return populations(inputs, with_lambda(h, q.sample(rng, sim.draws), q)["lam"])
+
+
+def hmc_draws(sim: Simulation, puma: str, inputs) -> list[np.ndarray] | None:
+    """One draw from each superchain of HMC short: the last iteration of the
+    first chain of each (chain ``c`` is in superchain ``c // M``)."""
+    path = (sim.fits_folder / puma / "hmc_short"
+            / f"{rx.fit_name(sim.fits, puma, sim.alpha)}_trace.npz")
+    if not path.exists():
+        return None
+    with np.load(path) as saved:
+        kept, k = saved["lam"], int(saved["superchains"])
+    chains = kept.shape[1]
+    if k != sim.draws:
+        raise SystemExit(f"{path}: {k} superchains, but the simulation takes {sim.draws} draws")
+    return populations(inputs, kept[-1, np.arange(k) * (chains // k), :].T)
+
+
+# -- tables ---------------------------------------------------------------------
+
+
+def cell_frame(tab: Tabulator, inputs, columns: dict, sim: Simulation) -> pd.DataFrame:
+    """``cells.parquet``: one row per (level, line)."""
+    from pmedm_vb.assemble.allcells import is_subtotal
+
+    fitted = {"tract": {inputs.tract_constraints[k] for k in columns["tract"]},
+              "block group": {inputs.bg_constraints[k] for k in columns["block group"]}}
+    parents = {}
+    for table, entry in inputs.trees.items():
+        lines = entry["lines"]
+        for line, parent in zip(lines, entry["parents"]):
+            parents[f"{table}.{line}"] = None if parent < 0 else lines[parent]
+    rows = []
+    for level, names in tab.names.items():
+        constrained = set(sim.settings["constraints"][level])
+        for name in names:
+            table = name.split(".")[0]
+            role = ("heldout" if name in tab.heldout[level]
+                    else "constraint" if name in fitted[level]
+                    else "dropped_line" if table in constrained else "other_table")
+            rows.append(dict(level=level, table=table, line=name.split(".", 1)[1],
+                             subtotal=is_subtotal(name), parent=parents.get(name), role=role))
+    return pd.DataFrame(rows)
+
+
+def keys(tab: Tabulator, inputs) -> dict[str, pd.DataFrame]:
+    """Per level, the (geoid, tract, table, line) of each cell, row-major over
+    (area, line) as the tabulations ravel."""
+    bg = inputs.block_groups["block_group_geoid"].astype(str).to_numpy()
+    tracts = inputs.tracts["tract_geoid"].astype(str).to_numpy()
+    areas = {"block group": (bg, tracts[inputs.zone_tracts()]), "tract": (tracts, tracts)}
+    out = {}
+    for level, names in tab.names.items():
+        geoid, tract = areas[level]
+        n, k = len(geoid), len(names)
+        out[level] = pd.DataFrame({
+            "level": level,
+            "geoid": np.repeat(geoid, k), "tract": np.repeat(tract, k),
+            "table": np.tile([name.split(".")[0] for name in names], n),
+            "line": np.tile([name.split(".", 1)[1] for name in names], n)})
+    return out
+
+
+def usability(W: np.ndarray, H: np.ndarray, households: np.ndarray, hh_min: float) -> dict:
+    """Per-draw D/H, n_eff and largest share, over block groups with more than
+    ``hh_min`` households (``H``, the truth's)."""
+    from compare_methods import expected_distinct
+
+    zones = H > hh_min
+    if not zones.any():
+        return dict(dh_min=np.nan, dh_median=np.nan, neff_min=np.nan, neff_median=np.nan,
+                    max_share=float(W.max() / W.sum()), block_groups=0)
+    w = W[np.ix_(zones, households)]
+    s = w / np.maximum(w.sum(axis=1, keepdims=True), 1e-300)
+    dh = expected_distinct(s, H[zones]) / H[zones]
+    neff = 1.0 / np.square(s).sum(axis=1)
+    return dict(dh_min=float(dh.min()), dh_median=float(np.median(dh)),
+                neff_min=float(neff.min()), neff_median=float(np.median(neff)),
+                max_share=float(W.max() / W.sum()), block_groups=int(zones.sum()))
+
+
+def main() -> None:
+    args = parse_args()
+    sim = Simulation(args.sim, args.root)
+    from pmedm_vb.assemble.allcells import table_leaves
+    from pmedm_vb.assemble.heldout import HeldOut
+    from pmedm_vb.assemble.inputs import PMEDMInputs
+
+    out = args.out or sim.folder / "output"
+    out.mkdir(parents=True, exist_ok=True)
+    source = PMEDMInputs.load(sim.source_inputs())
+    tab = Tabulator(source, HeldOut.load(sim.source_inputs()))
+    columns = constraint_columns(sim, source)
+    cell_frame(tab, source, columns, sim).to_parquet(out / "cells.parquet", index=False)
+    key = keys(tab, source)
+    tenure = table_leaves(source.bg_constraints, "B25003")
+    households = ~source.units["is_group_quarters"].to_numpy(bool)
+    usable, missing = [], []
+    pumas = args.pumas or sim.sim_pumas()
+    for index, puma in enumerate(pumas):
+        with np.load(sim.truth_file(puma)) as saved:
+            T, S = saved["T"].astype(float), saved["S"].astype(float)
+            c, kind, f = float(saved["c"]), str(saved["kind"]), float(saved["fraction"])
+        truth_id = int(puma[-2:])
+        inputs = PMEDMInputs.load(sim.sim_inputs(puma))
+        rng = np.random.default_rng([sim.settings["seed"], 1 + sim.sim_pumas().index(puma)])
+        ipf = ipf_fit(sim, puma)
+        draws = {"ipf_multinomial": None if ipf is None else multinomial_draws(ipf, rng, sim.draws),
+                 "vb_gaussian": vb_draws(sim, puma, inputs, rng),
+                 "hmc_short": hmc_draws(sim, puma, inputs)}
+        missing += [f"{puma} {m}" for m, d in [("ipf", ipf), *draws.items()] if d is None]
+
+        truth, survey = tab(T), tab(S / f)
+        bern = {level: np.sqrt(v * (1 - f) / f) for level, v in tab(T, squared=True).items()}
+        fitted = None if ipf is None else tab(ipf)
+        tabulated = {m: None if d is None else [tab(W) for W in d] for m, d in draws.items()}
+        frames = []
+        for level in ("block group", "tract"):
+            base = key[level].assign(
+                truth=truth[level].ravel(), survey=survey[level].ravel(),
+                se=np.sqrt(c * tab.v[level]).ravel(), bernoulli_se=bern[level].ravel(),
+                ipf=np.nan if fitted is None else fitted[level].ravel())
+            for d in range(sim.draws):
+                frame = base.assign(draw=d + 1)
+                for m in METHODS:
+                    frame[m] = np.nan if tabulated[m] is None else tabulated[m][d][level].ravel()
+                frames.append(frame)
+        frame = pd.concat(frames, ignore_index=True)
+        for column in ("level", "geoid", "tract", "table", "line"):
+            frame[column] = frame[column].astype("category")
+        for column in ("truth", "survey", "se", "bernoulli_se", "ipf", *METHODS):
+            frame[column] = frame[column].astype(np.float32)
+        frame = frame[["draw", "level", "geoid", "tract", "table", "line", "truth", "survey", "se",
+                       "bernoulli_se", "ipf", *METHODS]]
+        folder = out / "estimates" / f"kind={kind}" / f"truth_id={truth_id:02d}"
+        folder.mkdir(parents=True, exist_ok=True)
+        frame.to_parquet(folder / "part.parquet", index=False)
+
+        H = T @ np.asarray(source.X_B[:, tenure].sum(axis=1)).ravel()
+        base = dict(kind=kind, truth_id=truth_id)
+        usable.append(dict(base, method="truth", draw=1,
+                           **usability(T, H, households, args.hh_min)))
+        if ipf is not None:
+            usable.append(dict(base, method="ipf", draw=1,
+                               **usability(ipf, H, households, args.hh_min)))
+        for m, d in draws.items():
+            for i, W in enumerate(d or []):
+                usable.append(dict(base, method=m, draw=i + 1,
+                                   **usability(W, H, households, args.hh_min)))
+        print(f"[{index + 1}/{len(pumas)}] {puma}: {len(frame):,} rows", flush=True)
+    pd.DataFrame(usable).to_parquet(out / "draws.parquet", index=False)
+    if missing:
+        print(f"missing fits, left empty: {', '.join(missing)}")
+    print(f"wrote {out}")
+
+
+if __name__ == "__main__":
+    main()

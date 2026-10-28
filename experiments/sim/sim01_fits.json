@@ -1,0 +1,112 @@
+{
+  "name": "sim01",
+  "description": "Simulation fits: 50 synthetic surveys of PUMA 4701502 (h01-h25 from HMC-ref truths, m01-m25 from IPF-multinomial truths; experiments/sim/sim01.json), each fitted with the baseline's model at alpha 0.01 to a smaller constraint set.",
+  "area": {
+    "name": "knoxsim",
+    "state": "47",
+    "counties": [
+      "093"
+    ],
+    "year": 2024,
+    "span": 5,
+    "tables": "all"
+  },
+  "pumas": [
+    "4701502h01",
+    "4701502h02",
+    "4701502h03",
+    "4701502h04",
+    "4701502h05",
+    "4701502h06",
+    "4701502h07",
+    "4701502h08",
+    "4701502h09",
+    "4701502h10",
+    "4701502h11",
+    "4701502h12",
+    "4701502h13",
+    "4701502h14",
+    "4701502h15",
+    "4701502h16",
+    "4701502h17",
+    "4701502h18",
+    "4701502h19",
+    "4701502h20",
+    "4701502h21",
+    "4701502h22",
+    "4701502h23",
+    "4701502h24",
+    "4701502h25",
+    "4701502m01",
+    "4701502m02",
+    "4701502m03",
+    "4701502m04",
+    "4701502m05",
+    "4701502m06",
+    "4701502m07",
+    "4701502m08",
+    "4701502m09",
+    "4701502m10",
+    "4701502m11",
+    "4701502m12",
+    "4701502m13",
+    "4701502m14",
+    "4701502m15",
+    "4701502m16",
+    "4701502m17",
+    "4701502m18",
+    "4701502m19",
+    "4701502m20",
+    "4701502m21",
+    "4701502m22",
+    "4701502m23",
+    "4701502m24",
+    "4701502m25"
+  ],
+  "alphas": [
+    0.01
+  ],
+  "data_dir": "/lustre/isaac24/scratch/$USER/pmedm_vb_paper_data",
+  "model": {
+    "taper": "none",
+    "variance_floor": "none",
+    "hierarchy": "puma",
+    "rollup": "pruned",
+    "share_cap": null,
+    "cap_strength": null,
+    "multiplier_prior_sd": 3
+  },
+  "rake": [
+    "ipf"
+  ],
+  "vb_families": [
+    "gaussian"
+  ],
+  "hmc": {
+    "trajectory": 3.0,
+    "chains": 32,
+    "whiten": "gaussian",
+    "kinds": [
+      "short"
+    ],
+    "short": {
+      "chains": 256,
+      "superchains": 16,
+      "warmup": 1000,
+      "draws": 256,
+      "ess_target": 400,
+      "max_extend": 0,
+      "init_inflate": 1.5,
+      "warmup_init": 50,
+      "warmup_base": 25,
+      "warmup_term": 25,
+      "seed": 2000
+    }
+  },
+  "fits_slurm": [
+    "--partition=campus",
+    "--qos=campus",
+    "--time=04:00:00",
+    "--cpus-per-task=16"
+  ]
+}
