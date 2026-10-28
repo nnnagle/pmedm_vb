@@ -38,8 +38,9 @@ whole grid is reused.
 
 Every stage looks at what exists, so the same call runs the analysis from an
 empty data directory and results root, or resumes one part way, without redoing
-what is done. A stage that has failed ``--max-attempts`` times stops the run
-and asks for attention rather than resubmitting forever.
+what is done. A stage that has failed ``--max-attempts`` times at the current
+commit stops the run and asks for attention rather than resubmitting forever;
+pushing a change to the code starts every stage's count again.
 
 Usage, from the repository root::
 
@@ -126,7 +127,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--every", type=int, default=30, help="minutes between driver runs")
     parser.add_argument("--max-gpu-jobs", type=int, default=6)
     parser.add_argument("--max-attempts", type=int, default=4,
-                        help="submissions of one stage's job before asking for attention")
+                        help="submissions of one stage's job at the current commit before "
+                             "asking for attention")
     parser.add_argument("--examples-experiment", default="exp01_baseline",
                         help="Figure A's experiment (draw_examples.py)")
     parser.add_argument("--examples-puma", default="4701504", help="Figure A's PUMA")
@@ -189,6 +191,7 @@ class Jobs:
         self.dir = root / "run_paper"
         self.path = self.dir / "jobs.jsonl"
         self.dry_run = dry_run
+        self.commit = rx.git_commit()
         self.records = ([json.loads(line) for line in self.path.read_text().splitlines()
                          if line.strip()] if self.path.exists() else [])
         latest = {r["key"]: r for r in self.records}
@@ -201,7 +204,8 @@ class Jobs:
         return bool(record) and record["job_id"] in self.live
 
     def attempts(self, key: str) -> int:
-        return sum(1 for r in self.records if r["key"] == key)
+        """Submissions of ``key`` at the current commit."""
+        return sum(1 for r in self.records if r["key"] == key and r.get("commit") == self.commit)
 
     def submit(self, key: str, command: list[str]) -> str:
         if self.dry_run:
@@ -214,7 +218,7 @@ class Jobs:
             raise SystemExit(f"sbatch failed: {result.stderr.strip()}\n{' '.join(command)}")
         job_id = result.stdout.strip().split(";")[0]
         record = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "key": key, "job_id": job_id,
-                  "commit": rx.git_commit(), "command": command}
+                  "commit": self.commit, "command": command}
         with open(self.path, "a") as handle:
             handle.write(json.dumps(record) + "\n")
         self.records.append(record)
@@ -228,7 +232,8 @@ class Jobs:
         if self.dry_run:
             return
         self.dir.mkdir(parents=True, exist_ok=True)
-        record = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "key": key, "job_id": ""}
+        record = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "key": key, "job_id": "",
+                  "commit": self.commit}
         with open(self.path, "a") as handle:
             handle.write(json.dumps(record) + "\n")
         self.records.append(record)
@@ -254,8 +259,8 @@ class Attention(Exception):
 
 def guard(jobs: Jobs, key: str, args) -> None:
     if jobs.attempts(key) >= args.max_attempts:
-        raise Attention(f"{key}: submitted {jobs.attempts(key)} times without finishing; "
-                        f"see {jobs.dir / 'logs'}")
+        raise Attention(f"{key}: submitted {jobs.attempts(key)} times at commit "
+                        f"{jobs.commit[:12]} without finishing; see {jobs.dir / 'logs'}")
 
 
 def advance_data(specs, jobs: Jobs, args) -> bool:
@@ -302,9 +307,12 @@ def key_done(spec: dict, exp: Path, key: tuple) -> bool:
     return all(path.exists() for path in paths)
 
 
-def exp_attempts(exp: Path) -> dict:
+def exp_attempts(exp: Path, commit: str) -> dict:
+    """Submissions per (stage, PUMA, method) at ``commit``."""
     counts: dict = {}
     for job in rx.read_jobs(exp):
+        if job.get("commit") != commit:
+            continue
         key = (job["stage"], job["puma"], job.get("method"))
         counts[key] = counts.get(key, 0) + 1
     return counts
@@ -316,12 +324,14 @@ def advance_experiment(spec: dict, jobs: Jobs, args) -> bool:
     if (exp / "experiment.json").exists():
         rx.prepare(exp, spec, args.dry_run)  # the record's scoring-only keys follow the JSON
     if not rx.is_complete(spec, exp):
-        over = {k: n for k, n in exp_attempts(exp).items() if n >= args.max_attempts}
+        over = {k: n for k, n in exp_attempts(exp, jobs.commit).items()
+                if n >= args.max_attempts}
         live = rx.active_for(exp)
         stuck = [k for k in over if k not in live and not key_done(spec, exp, k)]
         if stuck:
             raise Attention(f"{spec['name']}: {stuck} submitted {args.max_attempts}+ times "
-                            f"without finishing; see {exp / 'logs'}")
+                            f"at commit {jobs.commit[:12]} without finishing; "
+                            f"see {exp / 'logs'}")
         print(f"{spec['name']}: fits")
         rx.advance(spec, args.root, max_gpu_jobs=args.max_gpu_jobs, dry_run=args.dry_run)
         return False
