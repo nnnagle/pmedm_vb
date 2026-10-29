@@ -30,12 +30,15 @@ Point methods: ``survey`` (the direct estimate) and ``ipf``. Sampled:
     Every cell's scores, one row per (kind, truth_id, level, geoid, table,
     line), with its role.
 ``summary.csv``, ``summary.md``
-    By truth kind, level and role (``--by-table``: and ACS table): cells; per
+    By truth kind, level, role (``--by-table``: and ACS table) and whether the
+    truth is zero (``truth_zero``: a sampled method's draws, N p, are never
+    exactly zero, so a zero truth is never inside them): cells; per
     method the median and 90th percentile of |error|, mean CRPS, mean interval
     score, coverage and
     the share of ranks in the two outer bins (nominally ``2 / (m + 1)``).
 ``ranks.csv``
-    The rank histograms: share of cells per rank, by kind, level, role, method.
+    The rank histograms: share of cells per rank, by kind, level, role,
+    ``truth_zero`` and method.
 ``usability.csv``
     From ``draws.parquet``: per kind and method, over draws and truths, the
     median smallest D/H and smallest n_eff, each over the truth's own (median
@@ -156,13 +159,14 @@ def rank_histograms(cells: pd.DataFrame, m: int) -> pd.DataFrame:
     for method in SAMPLED:
         if f"{method}_rank" not in cells:
             continue
-        share = (cells.groupby(["kind", "level", "role"], observed=True)[f"{method}_rank"]
+        share = (cells.groupby(["kind", "level", "role", "truth_zero"],
+                               observed=True)[f"{method}_rank"]
                  .value_counts(normalize=True).rename("share").reset_index()
                  .rename(columns={f"{method}_rank": "rank"}))
         frames.append(share.assign(method=method))
     out = pd.concat(frames, ignore_index=True)
     out["nominal"] = 1 / (m + 1)
-    return out.sort_values(["kind", "level", "role", "method", "rank"])
+    return out.sort_values(["kind", "level", "role", "truth_zero", "method", "rank"])
 
 
 def usability(draws: pd.DataFrame, floor: float) -> pd.DataFrame:
@@ -219,9 +223,10 @@ def main() -> None:
                         on=["level", "table", "line"], how="left")
     if not args.subtotals:
         cells = cells[~cells.subtotal]
+    cells["truth_zero"] = cells["truth"] == 0
     cells.to_parquet(out / "cells.parquet", index=False)
 
-    by = ["kind", "level", "role"] + (["table"] if args.by_table else [])
+    by = ["kind", "level", "role"] + (["table"] if args.by_table else []) + ["truth_zero"]
     summary = summarise(cells, by, m)
     summary.to_csv(out / "summary.csv", index=False)
     ranks = rank_histograms(cells, m)
