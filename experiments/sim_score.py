@@ -1,0 +1,234 @@
+"""Score a simulation's tabulation (``sim_collect.py``) against the truth.
+
+Per cell -- a published line in one block group or tract, of one truth -- and
+method, in units of the cell's ``se`` (the square root of ``c`` times its
+published variance):
+
+- **error**: estimate - truth, the estimate being a point method's value or the
+  mean of a method's draws;
+- **CRPS**: the continuous ranked probability score of the draws as an
+  ensemble, ``mean|X - T| - mean|X - X'| / 2`` (Gneiting & Raftery 2007,
+  *JASA* 102); for a point method it is ``|estimate - truth|``, so point and
+  sampled methods are on one scale; lower is better;
+- **covered**: the truth between the smallest and largest draw, an interval
+  that holds a new draw from the same distribution with probability
+  ``(m - 1) / (m + 1)`` (15/17 for 16 draws);
+- **rank**: the truth's rank among the draws, 0 to ``m``, ties (common at zero)
+  broken at random: uniform if the draws and the truth come from one
+  distribution.
+
+Point methods: ``survey`` (the direct estimate) and ``ipf``. Sampled:
+``ipf_multinomial``, ``vb_gaussian``, ``hmc_short``. Leaf cells only unless
+``--subtotals``. Writes, under ``<output>/scores``:
+
+``cells.parquet``
+    Every cell's scores, one row per (kind, truth_id, level, geoid, table,
+    line), with its role.
+``summary.csv``, ``summary.md``
+    By truth kind, level and role (``--by-table``: and ACS table): cells; per
+    method the median and 90th percentile of |error|, mean CRPS, coverage and
+    the share of ranks in the two outer bins (nominally ``2 / (m + 1)``).
+``ranks.csv``
+    The rank histograms: share of cells per rank, by kind, level, role, method.
+``usability.csv``
+    From ``draws.parquet``: per kind and method, over draws and truths, the
+    median smallest D/H and smallest n_eff, each over the truth's own (median
+    of the per-draw ratio), the share of draws whose smallest D/H is below
+    ``--dh-floor``, and the median largest share::
+
+    $CONDA_PREFIX/bin/python experiments/sim_score.py --sim experiments/sim/sim01.json --root $R
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pyarrow.dataset as ds
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+POINT = ("survey", "ipf")
+SAMPLED = ("ipf_multinomial", "vb_gaussian", "hmc_short")
+KEYS = ["level", "geoid", "table", "line"]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--sim", type=Path, help="experiments/sim/<name>.json (with --root)")
+    parser.add_argument("--root", type=Path, help="the experiments' folder")
+    parser.add_argument("--output", type=Path, default=None,
+                        help="sim_collect.py's output folder (default from --sim and --root)")
+    parser.add_argument("--subtotals", action="store_true", help="score subtotals too")
+    parser.add_argument("--by-table", action="store_true", help="summaries by ACS table too")
+    parser.add_argument("--dh-floor", type=float, default=0.04)
+    parser.add_argument("--seed", type=int, default=0, help="for breaking rank ties")
+    args = parser.parse_args()
+    if args.output is None:
+        if args.sim is None or args.root is None:
+            parser.error("give --output, or --sim and --root")
+        from sim_common import Simulation
+
+        args.output = Simulation(args.sim, args.root).folder / "output"
+    return args
+
+
+def ensemble_scores(X: np.ndarray, T: np.ndarray, rng) -> dict[str, np.ndarray]:
+    """``X`` (cells, m) draws, ``T`` (cells,) truths: mean, CRPS, covered, rank, width."""
+    m = X.shape[1]
+    Xs = np.sort(X, axis=1)
+    spread = (2 * np.arange(1, m + 1) - m - 1) @ Xs.T * 2 / m**2  # mean |X - X'|
+    below = (X < T[:, None]).sum(axis=1)
+    ties = (X == T[:, None]).sum(axis=1)
+    return {"mean": X.mean(axis=1),
+            "crps": np.abs(X - T[:, None]).mean(axis=1) - spread / 2,
+            "covered": (Xs[:, 0] <= T) & (T <= Xs[:, -1]),
+            "rank": below + np.floor(rng.random(len(T)) * (ties + 1)).astype(int),
+            "width": Xs[:, -1] - Xs[:, 0]}
+
+
+def truth_scores(frame: pd.DataFrame, rng) -> tuple[pd.DataFrame, int]:
+    """One truth's cells, scored; the number of draws."""
+    m = int(frame["draw"].max())
+    frame = frame.sort_values(KEYS + ["draw"], kind="stable")
+    counts = frame.groupby(KEYS, observed=True).size()
+    if not (counts == m).all():
+        raise SystemExit(f"cells without {m} draws: {counts[counts != m].head()}")
+    first = frame[frame["draw"] == 1].reset_index(drop=True)
+    T = first["truth"].to_numpy(float)
+    se = first["se"].to_numpy(float)
+    out = first[KEYS + ["truth", "se"]].copy()
+    for method in POINT:
+        value = first[method].to_numpy(float)
+        out[f"{method}_error"] = (value - T) / se
+        out[f"{method}_crps"] = np.abs(value - T) / se
+    for method in SAMPLED:
+        X = frame[method].to_numpy(float).reshape(-1, m)
+        if np.isnan(X).all():
+            continue
+        s = ensemble_scores(X, T, rng)
+        out[f"{method}_error"] = (s["mean"] - T) / se
+        out[f"{method}_crps"] = s["crps"] / se
+        out[f"{method}_covered"] = s["covered"]
+        out[f"{method}_rank"] = s["rank"]
+        out[f"{method}_width"] = s["width"] / se
+    return out, m
+
+
+def summarise(cells: pd.DataFrame, by: list[str], m: int) -> pd.DataFrame:
+    rows = []
+    for key, group in cells.groupby(by, observed=True):
+        row = dict(zip(by, key if isinstance(key, tuple) else (key,)), cells=len(group))
+        for method in POINT + SAMPLED:
+            if f"{method}_error" not in group:
+                continue
+            error = group[f"{method}_error"].abs()
+            row[f"{method}_abs_error_p50"] = error.median()
+            row[f"{method}_abs_error_p90"] = error.quantile(0.9)
+            row[f"{method}_crps"] = group[f"{method}_crps"].mean()
+            if f"{method}_rank" in group:
+                rank = group[f"{method}_rank"]
+                row[f"{method}_covered"] = group[f"{method}_covered"].mean()
+                row[f"{method}_outer_ranks"] = ((rank == 0) | (rank == m)).mean()
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def rank_histograms(cells: pd.DataFrame, m: int) -> pd.DataFrame:
+    frames = []
+    for method in SAMPLED:
+        if f"{method}_rank" not in cells:
+            continue
+        share = (cells.groupby(["kind", "level", "role"], observed=True)[f"{method}_rank"]
+                 .value_counts(normalize=True).rename("share").reset_index()
+                 .rename(columns={f"{method}_rank": "rank"}))
+        frames.append(share.assign(method=method))
+    out = pd.concat(frames, ignore_index=True)
+    out["nominal"] = 1 / (m + 1)
+    return out.sort_values(["kind", "level", "role", "method", "rank"])
+
+
+def usability(draws: pd.DataFrame, floor: float) -> pd.DataFrame:
+    truth = draws[draws.method == "truth"].set_index(["kind", "truth_id"])
+    rows = []
+    for (kind, method), group in draws.groupby(["kind", "method"]):
+        own = truth.loc[list(zip(group.kind, group.truth_id))]
+        rows.append(dict(
+            kind=kind, method=method, draws=len(group),
+            dh_min_p50=group.dh_min.median(),
+            dh_min_over_truth_p50=float(np.median(group.dh_min.to_numpy()
+                                                  / own.dh_min.to_numpy())),
+            neff_min_p50=group.neff_min.median(),
+            neff_min_over_truth_p50=float(np.median(group.neff_min.to_numpy()
+                                                    / own.neff_min.to_numpy())),
+            dh_below_floor=float((group.dh_min < floor).mean()),
+            max_share_p50=group.max_share.median()))
+    order = {"truth": 0, "ipf": 1, **{m: 2 + i for i, m in enumerate(SAMPLED)}}
+    return pd.DataFrame(rows).sort_values(["kind", "method"], key=lambda s: s.map(
+        lambda v: order.get(v, 99)) if s.name == "method" else s)
+
+
+def markdown(frame: pd.DataFrame, title: str) -> str:
+    cols = list(frame.columns)
+    lines = [f"### {title}", "", "| " + " | ".join(cols) + " |",
+             "|" + "---|" * len(cols)]
+    for _, row in frame.iterrows():
+        lines.append("| " + " | ".join(f"{v:.3g}" if isinstance(v, float) else str(v)
+                                       for v in row) + " |")
+    return "\n".join(lines) + "\n"
+
+
+def main() -> None:
+    args = parse_args()
+    out = args.output / "scores"
+    out.mkdir(parents=True, exist_ok=True)
+    roles = pd.read_parquet(args.output / "cells.parquet")
+    dataset = ds.dataset(args.output / "estimates", partitioning="hive")
+    parts = sorted({(f.split("kind=")[1].split("/")[0], int(f.split("truth_id=")[1].split("/")[0]))
+                    for f in dataset.files})
+    rng = np.random.default_rng(args.seed)
+    scored, m = [], None
+    for kind, truth_id in parts:
+        frame = dataset.to_table(filter=(ds.field("kind") == kind)
+                                 & (ds.field("truth_id") == truth_id)).to_pandas()
+        frame = frame.drop(columns=["kind", "truth_id"])
+        for column in KEYS:
+            frame[column] = frame[column].astype(str)
+        cells, m = truth_scores(frame, rng)
+        scored.append(cells.assign(kind=kind, truth_id=truth_id))
+        print(f"{kind} {truth_id:02d}: {len(cells):,} cells", flush=True)
+    cells = pd.concat(scored, ignore_index=True)
+    cells = cells.merge(roles[["level", "table", "line", "subtotal", "role"]],
+                        on=["level", "table", "line"], how="left")
+    if not args.subtotals:
+        cells = cells[~cells.subtotal]
+    cells.to_parquet(out / "cells.parquet", index=False)
+
+    by = ["kind", "level", "role"] + (["table"] if args.by_table else [])
+    summary = summarise(cells, by, m)
+    summary.to_csv(out / "summary.csv", index=False)
+    ranks = rank_histograms(cells, m)
+    ranks.to_csv(out / "ranks.csv", index=False)
+    use = usability(pd.read_parquet(args.output / "draws.parquet"), args.dh_floor)
+    use.to_csv(out / "usability.csv", index=False)
+
+    text = [f"# Simulation scores ({'all lines' if args.subtotals else 'leaf cells'}; "
+            f"{m} draws; errors and CRPS in units of se; nominal coverage "
+            f"{(m - 1) / (m + 1):.3f}, nominal outer-rank share {2 / (m + 1):.3f})", ""]
+    for measure in ("abs_error_p50", "abs_error_p90", "crps", "covered", "outer_ranks"):
+        columns = [c for c in summary.columns if c.endswith(measure)]
+        table = summary[by + ["cells"] + columns].rename(
+            columns={c: c[:-len(measure) - 1] for c in columns})
+        text.append(markdown(table, measure))
+    text.append(markdown(use, "usability of the draws"))
+    (out / "summary.md").write_text("\n".join(text))
+    print("\n".join(text))
+    print(f"wrote {out}")
+
+
+if __name__ == "__main__":
+    main()
