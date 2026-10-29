@@ -13,6 +13,11 @@ published variance):
 - **covered**: the truth between the smallest and largest draw, an interval
   that holds a new draw from the same distribution with probability
   ``(m - 1) / (m + 1)`` (15/17 for 16 draws);
+- **interval**: the interval score of that interval at its level, ``alpha =
+  2 / (m + 1)``: ``(max - min) + (2 / alpha) (min - T)+ + (2 / alpha) (T -
+  max)+`` (Gneiting & Raftery 2007); a point method's interval has zero width,
+  so its score is ``(2 / alpha) |estimate - truth|``; lower is better, and a
+  method that knew the truth would score 0;
 - **rank**: the truth's rank among the draws, 0 to ``m``, ties (common at zero)
   broken at random: uniform if the draws and the truth come from one
   distribution.
@@ -26,7 +31,8 @@ Point methods: ``survey`` (the direct estimate) and ``ipf``. Sampled:
     line), with its role.
 ``summary.csv``, ``summary.md``
     By truth kind, level and role (``--by-table``: and ACS table): cells; per
-    method the median and 90th percentile of |error|, mean CRPS, coverage and
+    method the median and 90th percentile of |error|, mean CRPS, mean interval
+    score, coverage and
     the share of ranks in the two outer bins (nominally ``2 / (m + 1)``).
 ``ranks.csv``
     The rank histograms: share of cells per rank, by kind, level, role, method.
@@ -78,8 +84,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def ensemble_scores(X: np.ndarray, T: np.ndarray, rng) -> dict[str, np.ndarray]:
-    """``X`` (cells, m) draws, ``T`` (cells,) truths: mean, CRPS, covered, rank, width."""
+    """``X`` (cells, m) draws, ``T`` (cells,) truths: mean, CRPS, covered, rank, width,
+    and the interval score of the draws' range."""
     m = X.shape[1]
+    alpha = 2 / (m + 1)
     Xs = np.sort(X, axis=1)
     spread = (2 * np.arange(1, m + 1) - m - 1) @ Xs.T * 2 / m**2  # mean |X - X'|
     below = (X < T[:, None]).sum(axis=1)
@@ -88,7 +96,9 @@ def ensemble_scores(X: np.ndarray, T: np.ndarray, rng) -> dict[str, np.ndarray]:
             "crps": np.abs(X - T[:, None]).mean(axis=1) - spread / 2,
             "covered": (Xs[:, 0] <= T) & (T <= Xs[:, -1]),
             "rank": below + np.floor(rng.random(len(T)) * (ties + 1)).astype(int),
-            "width": Xs[:, -1] - Xs[:, 0]}
+            "width": Xs[:, -1] - Xs[:, 0],
+            "interval": (Xs[:, -1] - Xs[:, 0]) + 2 / alpha * (np.maximum(Xs[:, 0] - T, 0)
+                                                              + np.maximum(T - Xs[:, -1], 0))}
 
 
 def truth_scores(frame: pd.DataFrame, rng) -> tuple[pd.DataFrame, int]:
@@ -106,6 +116,7 @@ def truth_scores(frame: pd.DataFrame, rng) -> tuple[pd.DataFrame, int]:
         value = first[method].to_numpy(float)
         out[f"{method}_error"] = (value - T) / se
         out[f"{method}_crps"] = np.abs(value - T) / se
+        out[f"{method}_interval"] = (m + 1) * np.abs(value - T) / se  # 2 / alpha
     for method in SAMPLED:
         X = frame[method].to_numpy(float).reshape(-1, m)
         if np.isnan(X).all():
@@ -113,6 +124,7 @@ def truth_scores(frame: pd.DataFrame, rng) -> tuple[pd.DataFrame, int]:
         s = ensemble_scores(X, T, rng)
         out[f"{method}_error"] = (s["mean"] - T) / se
         out[f"{method}_crps"] = s["crps"] / se
+        out[f"{method}_interval"] = s["interval"] / se
         out[f"{method}_covered"] = s["covered"]
         out[f"{method}_rank"] = s["rank"]
         out[f"{method}_width"] = s["width"] / se
@@ -130,6 +142,7 @@ def summarise(cells: pd.DataFrame, by: list[str], m: int) -> pd.DataFrame:
             row[f"{method}_abs_error_p50"] = error.median()
             row[f"{method}_abs_error_p90"] = error.quantile(0.9)
             row[f"{method}_crps"] = group[f"{method}_crps"].mean()
+            row[f"{method}_interval"] = group[f"{method}_interval"].mean()
             if f"{method}_rank" in group:
                 rank = group[f"{method}_rank"]
                 row[f"{method}_covered"] = group[f"{method}_covered"].mean()
@@ -219,7 +232,8 @@ def main() -> None:
     text = [f"# Simulation scores ({'all lines' if args.subtotals else 'leaf cells'}; "
             f"{m} draws; errors and CRPS in units of se; nominal coverage "
             f"{(m - 1) / (m + 1):.3f}, nominal outer-rank share {2 / (m + 1):.3f})", ""]
-    for measure in ("abs_error_p50", "abs_error_p90", "crps", "covered", "outer_ranks"):
+    for measure in ("abs_error_p50", "abs_error_p90", "crps", "interval", "covered",
+                    "outer_ranks"):
         columns = [c for c in summary.columns if c.endswith(measure)]
         table = summary[by + ["cells"] + columns].rename(
             columns={c: c[:-len(measure) - 1] for c in columns})
