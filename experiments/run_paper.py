@@ -185,10 +185,13 @@ def data_state(specs: list[dict]) -> dict[str, bool]:
 
 
 class Jobs:
-    """The driver's jobs (data, combine, tables, itself), in ``<root>/run_paper/jobs.jsonl``."""
+    """The driver's jobs (data, combine, tables, itself), in ``<root>/<folder>/jobs.jsonl``
+    (``run_paper``; ``run_sim.py`` keeps its own), named ``<prefix>-<key>``."""
 
-    def __init__(self, root: Path, dry_run: bool):
-        self.dir = root / "run_paper"
+    def __init__(self, root: Path, dry_run: bool, folder: str = "run_paper",
+                 prefix: str = "paper"):
+        self.dir = root / folder
+        self.prefix = prefix
         self.path = self.dir / "jobs.jsonl"
         self.dry_run = dry_run
         self.commit = rx.git_commit()
@@ -243,7 +246,7 @@ class Jobs:
                after: str | None = None) -> str:
         command = ["sbatch", "--parsable",
                    f"--export=ALL,PMEDM_VB_DATA={rx.data_dir(spec)}",
-                   f"--job-name=paper-{key.replace(':', '-')}",
+                   f"--job-name={self.prefix}-{key.replace(':', '-')}",
                    f"--output={self.dir / 'logs' / 'slurm-%j.log'}", *slurm]
         if after:
             command.append(f"--dependency=afterok:{after}")
@@ -524,8 +527,8 @@ def advance(args) -> int:
 
 
 class Lock:
-    def __init__(self, root: Path):
-        self.path = root / "run_paper" / "lock"
+    def __init__(self, root: Path, folder: str = "run_paper"):
+        self.path = root / folder / "lock"
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)

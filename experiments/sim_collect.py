@@ -47,6 +47,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import run_experiment as rx  # noqa: E402
+from provenance import SIM_COLLECT_SCRIPTS, write_stamp  # noqa: E402
 from sim_common import Simulation, Tabulator, constraint_columns  # noqa: E402
 
 METHODS = ("ipf_multinomial", "vb_gaussian", "hmc_short")
@@ -263,6 +264,10 @@ def main() -> None:
     pd.DataFrame(usable).to_parquet(out / "draws.parquet", index=False)
     if missing:
         print(f"missing fits, left empty: {', '.join(missing)}")
+    elif args.pumas is None:
+        # Last, and only when complete, so that run_sim.py takes it as current.
+        write_stamp(out / "draws.parquet", SIM_COLLECT_SCRIPTS, sim=sim.settings["name"],
+                    hh_min=args.hh_min)
     print(f"wrote {out}")
 
 

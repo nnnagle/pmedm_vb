@@ -1,0 +1,21 @@
+# What sim.zip carries to the Quarto project (experiments/run_sim.py, by
+# experiments/figures/make_results.py's build()).
+#
+# One file or glob per line: <source> <path> <used by>
+#   source  repo    a path relative to the repository root
+#           scores  a path relative to the simulation's scores folder
+#                   (experiments/sim_score.py: <root>/<sim>/simulation/output/scores)
+#           sim     a path relative to the simulation's folder (<root>/<sim>/simulation)
+#   used by the figures and tables that read it, for reference only
+#
+# Everything lands flat in sim/:
+#   source("sim/fig_sim.R"); plot_sim(sim_data("sim"))
+
+repo    experiments/figures/fig_sim.R           Figure S
+scores  ranks.csv                               Figure S: rank histograms
+scores  summary.csv                             Figure S: accuracy; every summary
+scores  summary.md                              every summary, Markdown
+scores  table_sim_*.tex                         the supplement tables, LaTeX (one per truth kind)
+scores  table_sim.csv                           the supplement tables' values, long, zero truths too
+scores  usability.csv                           the draws' D/H, n_eff and largest share against the truth's
+sim     calibration.json                        c per truth kind, the dropped C24010 lines

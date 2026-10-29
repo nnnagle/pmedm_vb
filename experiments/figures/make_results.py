@@ -54,25 +54,27 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def entries(tables: Path) -> list[tuple[Path, str, str]]:
-    """(file, source, used by) for every manifest line, globs expanded."""
-    roots = {"repo": REPO, "tables": tables}
+def entries(tables: Path, manifest: Path = MANIFEST,
+            roots: dict | None = None) -> list[tuple[Path, str, str]]:
+    """(file, source, used by) for every manifest line, globs expanded. ``roots``
+    maps a line's source to its folder (default: ``repo`` and ``tables``)."""
+    roots = {"repo": REPO, "tables": tables} if roots is None else {"repo": REPO, **roots}
     out = []
-    for number, line in enumerate(MANIFEST.read_text().splitlines(), start=1):
+    for number, line in enumerate(manifest.read_text().splitlines(), start=1):
         line = line.split("#", 1)[0].strip()
         if not line:
             continue
         source, pattern, *used = line.split(maxsplit=2)
         if source not in roots:
-            raise SystemExit(f"{MANIFEST}:{number}: unknown source {source!r}")
+            raise SystemExit(f"{manifest}:{number}: unknown source {source!r}")
         matches = sorted(roots[source].glob(pattern))
         if not matches:
-            raise SystemExit(f"{MANIFEST}:{number}: nothing matches {roots[source] / pattern}")
+            raise SystemExit(f"{manifest}:{number}: nothing matches {roots[source] / pattern}")
         out += [(path, source, used[0] if used else "") for path in matches]
     names = [path.name for path, _, _ in out]
     clashes = sorted({name for name in names if names.count(name) > 1})
     if clashes:
-        raise SystemExit(f"two files would land on the same name in results/: {clashes}")
+        raise SystemExit(f"two files would land on the same name in the zip: {clashes}")
     return out
 
 
@@ -97,37 +99,43 @@ def inputs(tables: Path) -> list[Path]:
     return [MANIFEST, *(path for path, _, _ in entries(tables))]
 
 
-def build(tables: Path, out: Path) -> list[str]:
-    """Write ``out`` from ``tables``; the MANIFEST.txt lines."""
+def build(tables: Path, out: Path, manifest: Path = MANIFEST,
+          roots: dict | None = None) -> list[str]:
+    """Write ``out`` from ``tables`` (or ``roots``, see :func:`entries`); the
+    MANIFEST.txt lines. The files land in ``<out's stem>/``: ``results/`` for
+    results.zip, ``sim/`` for run_sim.py's sim.zip."""
     tables = tables.resolve()
-    files = entries(tables)
+    files = entries(tables, manifest, roots)
     reasons = staleness(tables, files)
     if reasons:
-        raise SystemExit("not building results.zip; rerun run_paper.py first:\n  "
+        raise SystemExit(f"not building {out.name}; rerun the driver first:\n  "
                          + "\n  ".join(reasons))
+    folder = out.stem
     commit = subprocess.run(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"],
                             capture_output=True, text=True).stdout.strip() or "unknown"
-    lines = [f"results.zip, made {time.strftime('%Y-%m-%d %H:%M')} from commit {commit}",
-             f"tables: {tables}", "",
+    lines = [f"{out.name}, made {time.strftime('%Y-%m-%d %H:%M')} from commit {commit}",
+             *(f"{name}: {path}" for name, path in
+               ({"tables": tables} if roots is None else roots).items()), "",
              f"{'file':<62} {'bytes':>10}  {'modified':<16}  used by"]
     out.parent.mkdir(parents=True, exist_ok=True)
     partial = out.with_name(out.name + ".partial")
     with zipfile.ZipFile(partial, "w", zipfile.ZIP_DEFLATED) as archive:
         for path, source, used in files:
-            archive.write(path, f"results/{path.name}")
+            archive.write(path, f"{folder}/{path.name}")
             stat = path.stat()
             lines.append(f"{path.name:<62} {stat.st_size:>10,}  "
                          f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(stat.st_mtime))}  "
                          f"{used} ({source})")
-        archive.writestr("results/MANIFEST.txt", "\n".join(lines) + "\n")
+        archive.writestr(f"{folder}/MANIFEST.txt", "\n".join(lines) + "\n")
     partial.replace(out)
     return lines
 
 
 def main() -> None:
     args = parse_args()
-    print("\n".join(build(args.tables, args.out)))
-    print(f"\nwrote {args.out} ({len(files)} files)")
+    lines = build(args.tables, args.out)
+    print("\n".join(lines))
+    print(f"\nwrote {args.out} ({len(lines) - 4} files)")
 
 
 if __name__ == "__main__":

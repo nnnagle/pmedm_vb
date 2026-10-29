@@ -39,6 +39,12 @@ Point methods: ``survey`` (the direct estimate) and ``ipf``. Sampled:
 ``ranks.csv``
     The rank histograms: share of cells per rank, by kind, level, role,
     ``truth_zero`` and method.
+``table_sim_<kind>.tex``, ``table_sim.csv``
+    The supplement's tables: per truth kind, a bare booktabs ``tabular`` of the
+    nonzero truths (block group, then tract; rows the roles), with median
+    |error|, CRPS, interval score and coverage for IPF, IPF multinomial, VB
+    Gaussian and HMC short; and every value of those tables, zero truths and
+    the survey too, in one long CSV.
 ``usability.csv``
     From ``draws.parquet``: per kind and method, over draws and truths, the
     median smallest D/H and smallest n_eff, each over the truth's own (median
@@ -59,6 +65,8 @@ import pandas as pd
 import pyarrow.dataset as ds
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from provenance import SIM_SCORE_SCRIPTS, write_stamp  # noqa: E402
 
 POINT = ("survey", "ipf")
 SAMPLED = ("ipf_multinomial", "vb_gaussian", "hmc_short")
@@ -189,6 +197,56 @@ def usability(draws: pd.DataFrame, floor: float) -> pd.DataFrame:
         lambda v: order.get(v, 99)) if s.name == "method" else s)
 
 
+#: The supplement tables' rows, columns and labels.
+ROLES = {"constraint": "Fitted", "dropped_line": "Unfitted lines (C24010 detail)",
+         "other_table": "Unfitted tables (B19001, B23001)", "heldout": "Held-out tables"}
+MEASURES = {"abs_error_p50": "Median $|$error$|$", "crps": "CRPS", "interval": "Interval score",
+            "covered": "Coverage"}
+TABLE_METHODS = {"ipf": "IPF", "ipf_multinomial": "IPF m.", "vb_gaussian": "VB G",
+                 "hmc_short": "HMC s."}
+
+
+def long_table(summary: pd.DataFrame) -> pd.DataFrame:
+    """Every (kind, level, role, truth_zero, method, measure) value of ``summary``."""
+    keys = ["kind", "level", "role", "truth_zero", "cells"]
+    frame = summary.melt(id_vars=keys, var_name="column", value_name="value").dropna()
+    for measure in MEASURES:
+        hit = frame.column.str.endswith("_" + measure)
+        frame.loc[hit, "measure"] = measure
+        frame.loc[hit, "method"] = frame.loc[hit, "column"].str[:-len(measure) - 1]
+    return frame.dropna(subset=["measure"]).drop(columns="column")[
+        keys + ["method", "measure", "value"]]
+
+
+def tabular(summary: pd.DataFrame, kind: str) -> str:
+    """The nonzero truths of ``kind`` as a bare booktabs ``tabular``."""
+    part = summary[(summary.kind == kind) & ~summary.truth_zero.astype(bool)]
+    n = len(TABLE_METHODS)
+    lines = ["\\setlength{\\tabcolsep}{3pt}",
+             "\\begin{tabular}{l" + ("r" * n) * len(MEASURES) + "}", "\\toprule",
+             " & " + " & ".join(f"\\multicolumn{{{n}}}{{c}}{{{label}}}"
+                                for label in MEASURES.values()) + " \\\\",
+             " ".join(f"\\cmidrule(lr){{{2 + i * n}-{1 + (i + 1) * n}}}"
+                      for i in range(len(MEASURES))),
+             "Cells & " + " & ".join(list(TABLE_METHODS.values()) * len(MEASURES)) + " \\\\",
+             "\\midrule"]
+    for i, level in enumerate(("block group", "tract")):
+        if i:
+            lines.append("\\addlinespace")
+        lines.append(f"\\multicolumn{{{1 + n * len(MEASURES)}}}{{l}}"
+                     f"{{\\textit{{{level.capitalize()}}}}} \\\\")
+        for role, label in ROLES.items():
+            row = part[(part.level == level) & (part.role == role)]
+            if row.empty:
+                continue
+            row = row.iloc[0]
+            values = [f"{row[f'{m}_{measure}']:.2f}" if pd.notna(row.get(f"{m}_{measure}"))
+                      else "--" for measure in MEASURES for m in TABLE_METHODS]
+            lines.append(f"{label} & " + " & ".join(values) + " \\\\")
+    lines += ["\\bottomrule", "\\end{tabular}"]
+    return "\n".join(lines) + "\n"
+
+
 def markdown(frame: pd.DataFrame, title: str) -> str:
     cols = list(frame.columns)
     lines = [f"### {title}", "", "| " + " | ".join(cols) + " |",
@@ -233,6 +291,10 @@ def main() -> None:
     ranks.to_csv(out / "ranks.csv", index=False)
     use = usability(pd.read_parquet(args.output / "draws.parquet"), args.dh_floor)
     use.to_csv(out / "usability.csv", index=False)
+    base = summarise(cells, ["kind", "level", "role", "truth_zero"], m)
+    long_table(base).to_csv(out / "table_sim.csv", index=False)
+    for kind in base.kind.unique():
+        (out / f"table_sim_{kind}.tex").write_text(tabular(base, kind))
 
     text = [f"# Simulation scores ({'all lines' if args.subtotals else 'leaf cells'}; "
             f"{m} draws; errors and CRPS in units of se; nominal coverage "
@@ -245,6 +307,9 @@ def main() -> None:
         text.append(markdown(table, measure))
     text.append(markdown(use, "usability of the draws"))
     (out / "summary.md").write_text("\n".join(text))
+    # Last, so that a run cut short leaves the scores unstamped (run_sim.py).
+    write_stamp(out / "summary.md", SIM_SCORE_SCRIPTS, subtotals=args.subtotals,
+                by_table=args.by_table, dh_floor=args.dh_floor, seed=args.seed)
     print("\n".join(text))
     print(f"wrote {out}")
 
