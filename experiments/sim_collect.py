@@ -11,7 +11,11 @@ and its held-out tables -- at block group and tract, for each truth:
     published variance), ``bernoulli_se`` (the survey's exact standard error
     given the truth), ``ipf`` (the IPF fit, the same on every draw), and the
     ``draw``-th of ``draws`` draws of ``ipf_multinomial``, ``vb_gaussian`` and
-    ``hmc_short`` (one from each of HMC short's superchains). Draw ``k`` of one
+    ``hmc_short`` (one from each of HMC short's superchains). VB's and HMC's
+    draws are ``W = N p``, never exactly zero; ``vb_gaussian_int`` and
+    ``hmc_short_int`` are the same draws made populations as the truths and
+    IPF multinomial are, each by one multinomial draw of ``round(N)`` units
+    from its ``p``, so that a zero truth can be matched. Draw ``k`` of one
     method has nothing to do with draw ``k`` of another: score each column
     against ``truth``, never one method's row against another's.
     ``arrow::open_dataset()`` reads the folder as one table, with ``kind`` and
@@ -50,7 +54,7 @@ import run_experiment as rx  # noqa: E402
 from provenance import SIM_COLLECT_SCRIPTS, write_stamp  # noqa: E402
 from sim_common import Simulation, Tabulator, constraint_columns  # noqa: E402
 
-METHODS = ("ipf_multinomial", "vb_gaussian", "hmc_short")
+METHODS = ("ipf_multinomial", "vb_gaussian", "hmc_short", "vb_gaussian_int", "hmc_short_int")
 
 
 def parse_args() -> argparse.Namespace:
@@ -222,6 +226,9 @@ def main() -> None:
                  "vb_gaussian": vb_draws(sim, puma, inputs, rng),
                  "hmc_short": hmc_draws(sim, puma, inputs)}
         missing += [f"{puma} {m}" for m, d in [("ipf", ipf), *draws.items()] if d is None]
+        for m in ("vb_gaussian", "hmc_short"):  # integer populations, as the truths are
+            draws[f"{m}_int"] = (None if draws[m] is None
+                                 else [multinomial_draws(W, rng, 1)[0] for W in draws[m]])
 
         truth, survey = tab(T), tab(S / f)
         bern = {level: np.sqrt(v * (1 - f) / f) for level, v in tab(T, squared=True).items()}

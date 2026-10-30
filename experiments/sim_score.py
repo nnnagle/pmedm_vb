@@ -23,7 +23,9 @@ published variance):
   distribution.
 
 Point methods: ``survey`` (the direct estimate) and ``ipf``. Sampled:
-``ipf_multinomial``, ``vb_gaussian``, ``hmc_short``. Leaf cells only unless
+``ipf_multinomial``, ``vb_gaussian``, ``hmc_short``, and the last two as
+integer populations, ``vb_gaussian_int`` and ``hmc_short_int``
+(``sim_collect.py``). Leaf cells only unless
 ``--subtotals``. Writes, under ``<output>/scores``:
 
 ``cells.parquet``
@@ -38,12 +40,14 @@ Point methods: ``survey`` (the direct estimate) and ``ipf``. Sampled:
     the share of ranks in the two outer bins (nominally ``2 / (m + 1)``).
 ``ranks.csv``
     The rank histograms: share of cells per rank, by kind, level, role,
-    ``truth_zero`` and method.
+    ``truth_zero`` and method, and over all cells (``truth_zero`` ``all``):
+    selecting cells by their truth skews a rank histogram even for a calibrated
+    method, so calibration is read from ``all``, with the integer draws.
 ``table_sim_<kind>.tex``, ``table_sim.csv``
     The supplement's tables: per truth kind, a bare booktabs ``tabular`` of the
     nonzero truths (block group, then tract; rows the roles), with median
     |error|, CRPS, interval score and coverage for IPF, IPF multinomial, VB
-    Gaussian and HMC short; and every value of those tables, zero truths and
+    Gaussian and HMC short (their integer draws); and every value of those tables, zero truths and
     the survey too, in one long CSV.
 ``usability.csv``
     From ``draws.parquet``: per kind and method, over draws and truths, the
@@ -69,7 +73,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from provenance import SIM_SCORE_SCRIPTS, write_stamp  # noqa: E402
 
 POINT = ("survey", "ipf")
-SAMPLED = ("ipf_multinomial", "vb_gaussian", "hmc_short")
+SAMPLED = ("ipf_multinomial", "vb_gaussian", "hmc_short", "vb_gaussian_int", "hmc_short_int")
 KEYS = ["level", "geoid", "table", "line"]
 
 
@@ -167,12 +171,16 @@ def rank_histograms(cells: pd.DataFrame, m: int) -> pd.DataFrame:
     for method in SAMPLED:
         if f"{method}_rank" not in cells:
             continue
-        share = (cells.groupby(["kind", "level", "role", "truth_zero"],
-                               observed=True)[f"{method}_rank"]
-                 .value_counts(normalize=True).rename("share").reset_index()
-                 .rename(columns={f"{method}_rank": "rank"}))
-        frames.append(share.assign(method=method))
+        for split in (True, False):
+            by = ["kind", "level", "role"] + (["truth_zero"] if split else [])
+            share = (cells.groupby(by, observed=True)[f"{method}_rank"]
+                     .value_counts(normalize=True).rename("share").reset_index()
+                     .rename(columns={f"{method}_rank": "rank"}))
+            if not split:
+                share["truth_zero"] = "all"
+            frames.append(share.assign(method=method))
     out = pd.concat(frames, ignore_index=True)
+    out["truth_zero"] = out["truth_zero"].astype(str)
     out["nominal"] = 1 / (m + 1)
     return out.sort_values(["kind", "level", "role", "truth_zero", "method", "rank"])
 
@@ -202,8 +210,8 @@ ROLES = {"constraint": "Fitted", "dropped_line": "Unfitted lines (C24010 detail)
          "other_table": "Unfitted tables (B19001, B23001)", "heldout": "Held-out tables"}
 MEASURES = {"abs_error_p50": "Median $|$error$|$", "crps": "CRPS", "interval": "Interval score",
             "covered": "Coverage"}
-TABLE_METHODS = {"ipf": "IPF", "ipf_multinomial": "IPF m.", "vb_gaussian": "VB G",
-                 "hmc_short": "HMC s."}
+TABLE_METHODS = {"ipf": "IPF", "ipf_multinomial": "IPF m.", "vb_gaussian_int": "VB G",
+                 "hmc_short_int": "HMC s."}
 
 
 def long_table(summary: pd.DataFrame) -> pd.DataFrame:

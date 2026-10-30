@@ -3,16 +3,20 @@
 # Truths are populations of one PUMA drawn from the baseline's reference HMC
 # and from its IPF multinomial draws; each was surveyed (1 in 8, Bernoulli,
 # within block groups) and refitted to a smaller constraint set. Held-out
-# tables, nonzero truths, one level (block group by default):
+# tables, one level (block group by default). Every method's draws are integer
+# populations, as the truths are (VB's and HMC's made so by one multinomial
+# draw each: sim_collect.py's *_int):
 #   top     the truth's rank among each method's 16 draws, as the share of
 #           cells per rank (0: the truth below every draw; 16: above every
-#           draw). Flat at 1/17 (dashed) if the draws and the truth come from
-#           one distribution; a U, too narrow; a slope, biased. One row per
-#           kind of truth, one column per sampled method;
-#   bottom  accuracy: the median |estimate - truth| (IPF's fit; the other
-#           methods' draws' mean) and the mean CRPS of the draws (for IPF,
-#           its absolute error), in units of the cell's SE; lower is better.
-#           Colour is the kind of truth.
+#           draw; ties, common at zero, broken at random), over every held-out
+#           cell: selecting cells by their truth (say, nonzero) would skew the
+#           ranks even of a calibrated method. Flat at 1/17 (dashed) if the
+#           draws and the truth come from one distribution; a U, too narrow; a
+#           slope, biased. One row per kind of truth, one column per method;
+#   bottom  accuracy on the nonzero truths: the median |estimate - truth|
+#           (IPF's fit; the other methods' draws' mean) and the mean CRPS of
+#           the draws (for IPF, its absolute error), in units of the cell's
+#           SE; lower is better. Colour is the kind of truth.
 #
 # Reads ranks.csv and summary.csv from the scores folder
 # (<root>/<sim>/simulation/output/scores), and writes to <out>:
@@ -32,20 +36,18 @@ suppressPackageStartupMessages({
 
 # Display labels, in drawing order; colours as in Figure C, IPF's fit in grey.
 SIM_METHODS <- c(ipf = "IPF", ipf_multinomial = "IPF, multinomial",
-                 vb_gaussian = "VB Gaussian", hmc_short = "HMC short")
+                 vb_gaussian_int = "VB Gaussian", hmc_short_int = "HMC short")
 SIM_METHOD_COLOURS <- c(IPF = "#5b5b5b", `IPF, multinomial` = "#2a78d6",
                         `VB Gaussian` = "#1baf7a", `HMC short` = "#e87ba4")
-SIM_KINDS <- c(hmc_ref = "Truth: HMC reference draw",
-               ipf_multinomial = "Truth: IPF multinomial draw")
-SIM_KIND_COLOURS <- c(`Truth: HMC reference draw` = "#008300",
-                      `Truth: IPF multinomial draw` = "#eb6834")
+SIM_KINDS <- c(hmc_ref = "HMC-reference truth", ipf_multinomial = "IPF-multinomial truth")
+SIM_KIND_COLOURS <- c(`HMC-reference truth` = "#008300", `IPF-multinomial truth` = "#eb6834")
 SIM_MEASURES <- c(abs_error_p50 = "Median |error| / SE", crps = "Mean CRPS / SE")
 
 nonzero <- function(x) as.character(x) %in% c("FALSE", "False", "false")
 
 sim_data <- function(scores_dir, role = "heldout") {
   ranks <- read.csv(file.path(scores_dir, "ranks.csv"))
-  ranks <- ranks[ranks$role == role & nonzero(ranks$truth_zero) &
+  ranks <- ranks[ranks$role == role & ranks$truth_zero == "all" &
                    ranks$method %in% names(SIM_METHODS), ]
   # Every rank 0..m in every panel, an empty bin as 0.
   m <- round(1 / ranks$nominal[1]) - 1
@@ -53,6 +55,8 @@ sim_data <- function(scores_dir, role = "heldout") {
   grid <- merge(grid, data.frame(rank = 0:m))
   ranks <- merge(grid, ranks[, c("kind", "level", "method", "rank", "share")],
                  all.x = TRUE)
+  if (nrow(ranks) == 0) stop("no rank histograms of ", role, " cells over all truths in ",
+                             scores_dir, ": rerun sim_score.py")
   ranks$share[is.na(ranks$share)] <- 0
   summary <- read.csv(file.path(scores_dir, "summary.csv"))
   summary <- summary[summary$role == role & nonzero(summary$truth_zero), ]
