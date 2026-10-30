@@ -23,9 +23,9 @@ published variance):
   distribution.
 
 Point methods: ``survey`` (the direct estimate) and ``ipf``. Sampled:
-``ipf_multinomial``, ``vb_gaussian``, ``hmc_short``, and the last two as
-integer populations, ``vb_gaussian_int`` and ``hmc_short_int``
-(``sim_collect.py``). Leaf cells only unless
+``ipf_multinomial``, ``vb_gaussian``, ``vb_gaussian_trunc``, ``hmc_short``, and
+the last three as integer populations, ``vb_gaussian_int``,
+``vb_gaussian_trunc_int`` and ``hmc_short_int`` (``sim_collect.py``). Leaf cells only unless
 ``--subtotals``. Writes, under ``<output>/scores``:
 
 ``cells.parquet``
@@ -46,9 +46,11 @@ integer populations, ``vb_gaussian_int`` and ``hmc_short_int``
 ``table_sim_<kind>.tex``, ``table_sim.csv``
     The supplement's tables: per truth kind, a bare booktabs ``tabular`` of the
     nonzero truths (block group, then tract; rows the roles), with median
-    |error|, CRPS, interval score and coverage for IPF, IPF multinomial, VB
-    Gaussian and HMC short (their integer draws); and every value of those tables, zero truths and
-    the survey too, in one long CSV.
+    |error| and CRPS for IPF, IPF multinomial, VB Gaussian, VB Gaussian
+    truncated and HMC short (the last three's integer draws), and interval
+    score and coverage for the sampled four (IPF, a point, has no interval);
+    and every value of those tables, zero truths and the survey too, in one
+    long CSV.
 ``usability.csv``
     From ``draws.parquet``: per kind and method, over draws and truths, the
     median smallest D/H and smallest n_eff, each over the truth's own (median
@@ -73,7 +75,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from provenance import SIM_SCORE_SCRIPTS, write_stamp  # noqa: E402
 
 POINT = ("survey", "ipf")
-SAMPLED = ("ipf_multinomial", "vb_gaussian", "hmc_short", "vb_gaussian_int", "hmc_short_int")
+SAMPLED = ("ipf_multinomial", "vb_gaussian", "vb_gaussian_trunc", "hmc_short", "vb_gaussian_int",
+           "vb_gaussian_trunc_int", "hmc_short_int")
 KEYS = ["level", "geoid", "table", "line"]
 
 
@@ -211,7 +214,11 @@ ROLES = {"constraint": "Fitted", "dropped_line": "Unfitted lines (C24010 detail)
 MEASURES = {"abs_error_p50": "Median $|$error$|$", "crps": "CRPS", "interval": "Interval score",
             "covered": "Coverage"}
 TABLE_METHODS = {"ipf": "IPF", "ipf_multinomial": "IPF m.", "vb_gaussian_int": "VB G",
-                 "hmc_short_int": "HMC s."}
+                 "vb_gaussian_trunc_int": "VB G tr.", "hmc_short_int": "HMC s."}
+#: Each measure's methods: IPF is a point, so it has no interval and no coverage.
+MEASURE_METHODS = {measure: [m for m in TABLE_METHODS
+                             if m != "ipf" or measure in ("abs_error_p50", "crps")]
+                   for measure in MEASURES}
 
 
 def long_table(summary: pd.DataFrame) -> pd.DataFrame:
@@ -229,19 +236,21 @@ def long_table(summary: pd.DataFrame) -> pd.DataFrame:
 def tabular(summary: pd.DataFrame, kind: str) -> str:
     """The nonzero truths of ``kind`` as a bare booktabs ``tabular``."""
     part = summary[(summary.kind == kind) & ~summary.truth_zero.astype(bool)]
-    n = len(TABLE_METHODS)
+    widths = [len(MEASURE_METHODS[measure]) for measure in MEASURES]
+    total = sum(widths)
+    starts = [2 + sum(widths[:i]) for i in range(len(widths))]
     lines = ["\\setlength{\\tabcolsep}{3pt}",
-             "\\begin{tabular}{l" + ("r" * n) * len(MEASURES) + "}", "\\toprule",
+             "\\begin{tabular}{l" + "r" * total + "}", "\\toprule",
              " & " + " & ".join(f"\\multicolumn{{{n}}}{{c}}{{{label}}}"
-                                for label in MEASURES.values()) + " \\\\",
-             " ".join(f"\\cmidrule(lr){{{2 + i * n}-{1 + (i + 1) * n}}}"
-                      for i in range(len(MEASURES))),
-             "Cells & " + " & ".join(list(TABLE_METHODS.values()) * len(MEASURES)) + " \\\\",
+                                for n, label in zip(widths, MEASURES.values())) + " \\\\",
+             " ".join(f"\\cmidrule(lr){{{a}-{a + n - 1}}}" for a, n in zip(starts, widths)),
+             "Cells & " + " & ".join(TABLE_METHODS[m] for measure in MEASURES
+                                     for m in MEASURE_METHODS[measure]) + " \\\\",
              "\\midrule"]
     for i, level in enumerate(("block group", "tract")):
         if i:
             lines.append("\\addlinespace")
-        lines.append(f"\\multicolumn{{{1 + n * len(MEASURES)}}}{{l}}"
+        lines.append(f"\\multicolumn{{{1 + total}}}{{l}}"
                      f"{{\\textit{{{level.capitalize()}}}}} \\\\")
         for role, label in ROLES.items():
             row = part[(part.level == level) & (part.role == role)]
@@ -249,7 +258,7 @@ def tabular(summary: pd.DataFrame, kind: str) -> str:
                 continue
             row = row.iloc[0]
             values = [f"{row[f'{m}_{measure}']:.2f}" if pd.notna(row.get(f"{m}_{measure}"))
-                      else "--" for measure in MEASURES for m in TABLE_METHODS]
+                      else "--" for measure in MEASURES for m in MEASURE_METHODS[measure]]
             lines.append(f"{label} & " + " & ".join(values) + " \\\\")
     lines += ["\\bottomrule", "\\end{tabular}"]
     return "\n".join(lines) + "\n"

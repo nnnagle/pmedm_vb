@@ -10,10 +10,14 @@ and its held-out tables -- at block group and tract, for each truth:
     (the survey's estimate), ``se`` (the square root of ``c`` times the line's
     published variance), ``bernoulli_se`` (the survey's exact standard error
     given the truth), ``ipf`` (the IPF fit, the same on every draw), and the
-    ``draw``-th of ``draws`` draws of ``ipf_multinomial``, ``vb_gaussian`` and
+    ``draw``-th of ``draws`` draws of ``ipf_multinomial``, ``vb_gaussian``,
+    ``vb_gaussian_trunc`` (the same fit's draws with the main experiments'
+    rejection rule, ``compare_methods.truncated_draws``, from the source
+    spec's ``vb_trunc_share`` and ``vb_trunc_distinct``; a random stream of
+    its own, so the other methods' draws do not depend on it) and
     ``hmc_short`` (one from each of HMC short's superchains). VB's and HMC's
-    draws are ``W = N p``, never exactly zero; ``vb_gaussian_int`` and
-    ``hmc_short_int`` are the same draws made populations as the truths and
+    draws are ``W = N p``, never exactly zero; ``vb_gaussian_int``,
+    ``vb_gaussian_trunc_int`` and ``hmc_short_int`` are the same draws made populations as the truths and
     IPF multinomial are, each by one multinomial draw of ``round(N)`` units
     from its ``p``, so that a zero truth can be matched. Draw ``k`` of one
     method has nothing to do with draw ``k`` of another: score each column
@@ -33,7 +37,9 @@ and its held-out tables -- at block group and tract, for each truth:
     shares, their smallest and median over block groups, and the largest cell's
     share of the total.
 
-And, for the text's numbers: ``cells.csv`` (``cells.parquet`` as CSV),
+And, for the text's numbers: ``truncation.csv`` (per synthetic PUMA, the
+truncated VB's draws tried and kept, and those rejected by each rule),
+``cells.csv`` (``cells.parquet`` as CSV),
 ``timing.csv`` (per synthetic PUMA, the seconds of its IPF fit, its MAP + VB
 fit and its HMC short run, warmup apart) and ``settings.csv`` (the simulation's
 and its fits' specs, flattened to ``sim.<path>`` and ``fits.<path>``, and the
@@ -60,7 +66,8 @@ import run_experiment as rx  # noqa: E402
 from provenance import SIM_COLLECT_SCRIPTS, write_stamp  # noqa: E402
 from sim_common import Simulation, Tabulator, constraint_columns  # noqa: E402
 
-METHODS = ("ipf_multinomial", "vb_gaussian", "hmc_short", "vb_gaussian_int", "hmc_short_int")
+METHODS = ("ipf_multinomial", "vb_gaussian", "vb_gaussian_trunc", "hmc_short", "vb_gaussian_int",
+           "vb_gaussian_trunc_int", "hmc_short_int")
 
 
 def parse_args() -> argparse.Namespace:
@@ -106,14 +113,33 @@ def populations(inputs, lam: np.ndarray) -> list[np.ndarray]:
     return [inputs.N * np.exp(log_p_of(inputs, op, lam[:, d])) for d in range(lam.shape[1])]
 
 
-def vb_draws(sim: Simulation, puma: str, inputs, rng) -> list[np.ndarray] | None:
-    from compare_methods import check_level, floor_spec, taper_spec, with_lambda
+#: As compare_methods.py's ``--trunc-max-factor``: give up after this many times
+#: ``draws`` tries.
+TRUNC_MAX_FACTOR = 20
+
+
+def truncation(sim: Simulation, hh_min: float) -> argparse.Namespace:
+    """The truncated VB's rejection rule, the source spec's (``vb_trunc_share``,
+    ``vb_trunc_distinct``), as compare_methods.py takes it."""
+    missing = [k for k in ("vb_trunc_share", "vb_trunc_distinct") if k not in sim.source]
+    if missing:
+        raise SystemExit(f"the source spec sets no {', '.join(missing)}: the truncated VB's rule")
+    return argparse.Namespace(draws=sim.draws, hh_min=hh_min, trunc_max_factor=TRUNC_MAX_FACTOR,
+                              trunc_share=float(sim.source["vb_trunc_share"]),
+                              trunc_distinct=float(sim.source["vb_trunc_distinct"]))
+
+
+def vb_draws(sim: Simulation, puma: str, inputs, rng, trunc_rng,
+             rule: argparse.Namespace) -> tuple[list | None, list | None, dict]:
+    """VB Gaussian's draws, and the same fit's truncated draws with their
+    acceptance counts (``compare_methods.truncated_draws``)."""
+    from compare_methods import check_level, floor_spec, taper_spec, truncated_draws, with_lambda
     from laplace_diagnostic import load_vb
     from pmedm_vb.assemble.hierarchy import Hierarchy
 
     path = sim.fits_folder / puma / "vb_gaussian" / f"{rx.fit_name(sim.fits, puma, sim.alpha)}.npz"
     if not path.exists():
-        return None
+        return None, None, {}
     level = rx.level(sim.fits)
     with np.load(path) as saved:
         check_level(path, saved, level)
@@ -121,7 +147,9 @@ def vb_draws(sim: Simulation, puma: str, inputs, rng) -> list[np.ndarray] | None
     model = sim.fits["model"]
     h = Hierarchy.build(inputs, level, alpha=sim.alpha, taper=taper_spec(model["taper"]),
                         variance_floor=floor_spec(str(model["variance_floor"])))
-    return populations(inputs, with_lambda(h, q.sample(rng, sim.draws), q)["lam"])
+    plain = populations(inputs, with_lambda(h, q.sample(rng, sim.draws), q)["lam"])
+    xi, counts = truncated_draws(rule, inputs, trunc_rng, h, q)
+    return plain, populations(inputs, with_lambda(h, xi, q)["lam"]), counts
 
 
 def hmc_draws(sim: Simulation, puma: str, inputs) -> list[np.ndarray] | None:
@@ -139,7 +167,7 @@ def hmc_draws(sim: Simulation, puma: str, inputs) -> list[np.ndarray] | None:
     return populations(inputs, kept[-1, np.arange(k) * (chains // k), :].T)
 
 
-def settings(sim: Simulation) -> pd.DataFrame:
+def settings(sim: Simulation, hh_min: float) -> pd.DataFrame:
     """The simulation's settings and calibration, flattened (``paper_tables.flatten``)."""
     import json
 
@@ -147,6 +175,9 @@ def settings(sim: Simulation) -> pd.DataFrame:
 
     rows = flatten(sim.settings, "sim") + flatten(
         {k: v for k, v in sim.fits.items() if not k.startswith("_")}, "fits")
+    rule = truncation(sim, hh_min)
+    rows += [("truncation.share", rule.trunc_share), ("truncation.distinct", rule.trunc_distinct),
+             ("truncation.hh_min", rule.hh_min)]
     calibration = sim.folder / "calibration.json"
     if calibration.exists():
         rows += flatten(json.loads(calibration.read_text()), "calibration")
@@ -260,12 +291,13 @@ def main() -> None:
     cells = cell_frame(tab, source, columns, sim)
     cells.to_parquet(out / "cells.parquet", index=False)
     cells.to_csv(out / "cells.csv", index=False)
-    settings(sim).to_csv(out / "settings.csv", index=False)
+    settings(sim, args.hh_min).to_csv(out / "settings.csv", index=False)
     timing(sim).to_csv(out / "timing.csv", index=False)
     key = keys(tab, source)
     tenure = table_leaves(source.bg_constraints, "B25003")
     households = ~source.units["is_group_quarters"].to_numpy(bool)
-    usable, missing = [], []
+    usable, missing, accepted = [], [], []
+    rule = truncation(sim, args.hh_min)
     pumas = args.pumas or sim.sim_pumas()
     for index, puma in enumerate(pumas):
         with np.load(sim.truth_file(puma)) as saved:
@@ -273,15 +305,24 @@ def main() -> None:
             c, kind, f = float(saved["c"]), str(saved["kind"]), float(saved["fraction"])
         truth_id = int(puma[-2:])
         inputs = PMEDMInputs.load(sim.sim_inputs(puma))
-        rng = np.random.default_rng([sim.settings["seed"], 1 + sim.sim_pumas().index(puma)])
+        stream = [sim.settings["seed"], 1 + sim.sim_pumas().index(puma)]
+        rng = np.random.default_rng(stream)
+        trunc_rng = np.random.default_rng(stream + [2])  # its own: the rest as before
         ipf = ipf_fit(sim, puma)
-        draws = {"ipf_multinomial": None if ipf is None else multinomial_draws(ipf, rng, sim.draws),
-                 "vb_gaussian": vb_draws(sim, puma, inputs, rng),
+        multinomial = None if ipf is None else multinomial_draws(ipf, rng, sim.draws)
+        vb, vb_trunc, counts = vb_draws(sim, puma, inputs, rng, trunc_rng, rule)
+        draws = {"ipf_multinomial": multinomial, "vb_gaussian": vb, "vb_gaussian_trunc": vb_trunc,
                  "hmc_short": hmc_draws(sim, puma, inputs)}
         missing += [f"{puma} {m}" for m, d in [("ipf", ipf), *draws.items()] if d is None]
+        if vb_trunc is not None and len(vb_trunc) < sim.draws:
+            missing.append(f"{puma} vb_gaussian_trunc ({len(vb_trunc)} of {sim.draws} kept)")
+        if counts:
+            accepted.append(dict(puma=puma, kind=kind, truth_id=truth_id, **counts))
         for m in ("vb_gaussian", "hmc_short"):  # integer populations, as the truths are
             draws[f"{m}_int"] = (None if draws[m] is None
                                  else [multinomial_draws(W, rng, 1)[0] for W in draws[m]])
+        draws["vb_gaussian_trunc_int"] = (None if vb_trunc is None else
+                                          [multinomial_draws(W, trunc_rng, 1)[0] for W in vb_trunc])
 
         truth, survey = tab(T), tab(S / f)
         bern = {level: np.sqrt(v * (1 - f) / f) for level, v in tab(T, squared=True).items()}
@@ -296,7 +337,8 @@ def main() -> None:
             for d in range(sim.draws):
                 frame = base.assign(draw=d + 1)
                 for m in METHODS:
-                    frame[m] = np.nan if tabulated[m] is None else tabulated[m][d][level].ravel()
+                    have = tabulated[m] is not None and d < len(tabulated[m])
+                    frame[m] = tabulated[m][d][level].ravel() if have else np.nan
                 frames.append(frame)
         frame = pd.concat(frames, ignore_index=True)
         for column in ("level", "geoid", "tract", "table", "line"):
@@ -321,6 +363,7 @@ def main() -> None:
                 usable.append(dict(base, method=m, draw=i + 1,
                                    **usability(W, H, households, args.hh_min)))
         print(f"[{index + 1}/{len(pumas)}] {puma}: {len(frame):,} rows", flush=True)
+    pd.DataFrame(accepted).to_csv(out / "truncation.csv", index=False)
     pd.DataFrame(usable).to_parquet(out / "draws.parquet", index=False)
     if missing:
         print(f"missing fits, left empty: {', '.join(missing)}")

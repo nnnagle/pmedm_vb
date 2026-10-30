@@ -23,3 +23,4 @@ sim     calibration.json                        c per truth kind, the dropped C2
 output  settings.csv                            the simulation's settings and calibration, flattened (numbers.R)
 output  timing.csv                              seconds per fit (numbers.R)
 output  cells.csv                               every line's role (numbers.R)
+output  truncation.csv                          truncated VB's draws tried and kept per fit (numbers.R)
