@@ -1,0 +1,138 @@
+<!--
+The simulation with known truth: a design subsection for Section 4 and a
+results subsection, with Figure S (experiments/figures/fig_sim.R, from sim.zip,
+unzipped as sim/ beside the manuscript). Suggested placement:
+
+  - "Simulation with known truth" as Section 4.5, after 4.4 Measures;
+  - "Calibration against known truth" as Section 5.2, directly after 5.1 Small
+    area estimation, which ends by noting that comparisons with published
+    held-out estimates are probably optimistic: this section answers that.
+    The figure becomes Figure 2 and the later ones are renumbered.
+
+Numbers marked [UPDATE: ...] are to be read from sim.zip (the file named);
+the others are fixed by the design. References marked [check] are in
+measures.bib, written from memory.
+-->
+
+### Simulation with known truth {#sec-sim-design}
+
+Comparisons with published estimates (@sec-measures) cannot show whether a
+method's uncertainty is right: the published values are themselves estimates,
+and the held-out estimates share the constraints' sample, so their errors are
+correlated. We therefore also evaluate the methods where the truth is known.
+For PUMA 4701502 we took 50 populations as truths: 25 draws of the reference
+posterior at $\alpha = 0.01$, each made an integer population by one
+multinomial draw of the PUMA's households and group-quarters persons, and 25
+IPF multinomial draws. The first kind of truth shares the model's structure;
+the second does not, and is the case most favourable to IPF.
+
+From each truth we drew a survey, keeping each household and group-quarters
+person independently with probability 1/8, and estimated every published cell
+from the sampled records' weights. Each survey was refitted to a reduced set of
+constraints: B01001, B03002, B08301, B25003 and C24010 at block group and tract,
+less the 26 finest occupation lines of C24010, and B17024 and B26001 at tract
+(141 block group and 273 tract cells). B19001 and B23001 were left unfitted, and
+the six held-out tables remained held out. The refits use the published
+covariance $\Sigma$, scaled by one constant per kind of truth so that its
+diagonal matches the survey's sampling variance in the median constraint cell
+($c = 0.40$ for the posterior truths and [UPDATE: calibration.json,
+ipf_multinomial c] for the IPF truths); its correlations are kept. IPF, IPF
+multinomial, VB Gaussian and short HMC were refitted to every survey, at
+$\alpha = 0.01$. We keep 16 draws per method and truth: for short HMC, one from
+each of its 16 superchains (256 chains in all); a short HMC refit took a median
+of 6.4 minutes of sampling. So that every method is compared with the integer
+truths on equal terms, each VB and HMC draw is made an integer population by
+one multinomial draw, as the IPF multinomial draws are.
+
+We measure calibration by the rank of the true count among a method's 16 draws,
+from 0 (below every draw) to 16 (above every draw), with ties broken at random
+[@hamill2001; @talts2018]. If the draws and the truth came from one
+distribution, every rank would be equally likely, each with probability 1/17;
+draws that are too narrow put the truth at the extreme ranks, and a biased
+method tilts the histogram. We measure accuracy by the absolute error of the
+point estimate (IPF's fit; the mean of the other methods' draws) and by the
+continuous ranked probability score (CRPS) of the draws [@gneiting2007], which
+rewards draws that are both centred on the truth and no wider than necessary,
+and equals the absolute error for a point estimate. Both are in units of the
+cell's standard error.
+
+### Calibration against known truth {#sec-sim-results}
+
+@fig-sim gives the result. On the held-out tables, which none of the refits saw,
+the short HMC posterior is close to calibrated: the true count is about equally
+likely to fall at any rank among its draws, and it falls outside all 16 of them
+in [UPDATE: ranks.csv, hmc_short_int, block group, heldout, all, ranks 0 + 16]
+of cells against a nominal 12 percent. The IPF multinomial draws are not
+calibrated: the true count falls outside all 16 of them in [UPDATE: ranks.csv,
+ipf_multinomial, ranks 0 + 16, both kinds] of held-out cells. Their spread is
+only multinomial noise around a single allocation, which has absorbed the
+survey's sampling error rather than expressed it. This holds when the truth is
+itself an IPF multinomial draw, the case most favourable to IPF. VB Gaussian
+lies between the two: its histogram slopes upward, so it tends to underestimate
+the held-out counts. When the truth is an IPF draw, short HMC shows an excess of
+cells whose truth lies below every draw ([UPDATE: ranks.csv, hmc_short_int,
+ipf_multinomial truths, rank 0]); [UPDATE: confirm from the truth_zero rows of
+ranks.csv that these are mostly zero truths, which IPF enforces exactly and the
+model does not].
+
+The methods differ far less in point accuracy than in calibration. IPF's single
+fit is slightly the most accurate point estimate (median absolute error of
+[UPDATE: summary.csv, ipf_abs_error_p50, heldout, nonzero] standard errors,
+against [UPDATE: hmc_short_int_abs_error_p50] for the mean of the short HMC
+draws), while the short HMC draws have the lowest CRPS of any method, for both
+kinds of truth ([UPDATE: summary.csv, *_crps]; Table S[UPDATE]). The posterior
+therefore buys little in point accuracy over raking. What it buys is an
+uncertainty statement that can be trusted on tables it was not fitted to, which
+the multinomial replicates of IPF do not provide.
+
+```{r}
+#| label: fig-sim
+#| echo: false
+#| fig-width: 7.48
+#| fig-height: 5.9
+#| fig-cap: >-
+#|   Calibration and accuracy against known truth (@sec-sim-design). Fifty
+#|   populations of PUMA 4701502 serve as truths: 25 draws of the reference
+#|   posterior (upper row of the top panels) and 25 IPF multinomial draws (lower
+#|   row). Each was surveyed by Bernoulli sampling of 1 in 8 households and
+#|   group-quarters persons and refitted, at $\alpha = 0.01$, to a reduced set
+#|   of constraints. Top: for every block group cell of the six held-out tables,
+#|   the rank of the true count among the method's 16 draws, from 0 (below every
+#|   draw) to 16 (above every draw), ties broken at random. A calibrated method
+#|   gives every rank equally often (dashed line, 1/17); a U shape means the
+#|   draws are too narrow, a slope that they are biased. Bottom: the median
+#|   absolute error of the point estimate (IPF's single fit; the mean of the
+#|   other methods' draws) and the mean continuous ranked probability score of
+#|   the draws, over the held-out cells whose true count is not zero, in units
+#|   of the cell's standard error; lower is better. All draws are integer
+#|   populations: VB's and HMC's are made so by one multinomial draw each, as
+#|   IPF's multinomial draws and the truths are.
+source("sim/fig_sim.R")
+plot_sim(sim_data("sim"))
+```
+
+<!--
+Elsewhere in the paper:
+
+  - Abstract: one sentence, e.g. "In a simulation with known truth, the
+    posterior's intervals are close to calibrated on tables withheld from the
+    fit, while the multinomial replicates of raking miss the true count in
+    [UPDATE] percent of cells."
+  - Introduction, contribution 4: add "and, in a simulation with known truth,
+    whether each method's uncertainty is calibrated".
+  - 4.4 Measures says "we do not integerize": the simulation does, for its
+    comparison with integer truths; say so there or point to @sec-sim-design.
+  - 5.1, last paragraph ("These comparisons are probably optimistic"): end it
+    with a pointer to @sec-sim-results.
+  - 6.1: the recommendation for uncertainty statements can now rest on the
+    simulation as well as on agreement with the reference posterior.
+  - 6.4 Limitations: the held-out caveat is now answered in part; the
+    simulation's own limits are one PUMA, one alpha, Bernoulli rather than the
+    ACS design, Sigma matched to the survey only in the median cell (its
+    ratio's 10th and 90th percentiles 0.095 and 1.28 for the posterior truths),
+    truths that are populations of the PUMS records themselves, and 16 draws
+    per fit.
+  - Conclusion: a sentence with the headline.
+  - Supplement: the two tables of sim.zip (table_sim_hmc_ref.tex and
+    table_sim_ipf_multinomial.tex), landscape, as a new section.
+-->
