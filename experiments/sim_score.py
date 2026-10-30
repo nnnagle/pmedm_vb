@@ -45,12 +45,13 @@ the last three as integer populations, ``vb_gaussian_int``,
     method, so calibration is read from ``all``, with the integer draws.
 ``table_sim_<kind>.tex``, ``table_sim.csv``
     The supplement's tables: per truth kind, a bare booktabs ``tabular`` of the
-    nonzero truths (block group, then tract; rows the roles), with median
-    |error| and CRPS for IPF, IPF multinomial, VB Gaussian, VB Gaussian
-    truncated and HMC short (the last three's integer draws), and interval
-    score and coverage for the sampled four (IPF, a point, has no interval);
-    and every value of those tables, zero truths and the survey too, in one
-    long CSV.
+    nonzero truths, a row per level (block group, then tract), cells (fitted;
+    held out: the held-out tables and the constraint tables not fitted,
+    together; not the left-out lines of fitted tables) and method (IPF, IPF
+    multinomial, VB Gaussian, VB Gaussian truncated and HMC short, the last
+    three's integer draws), a column per measure (median |error|, CRPS,
+    interval score and coverage; IPF, a point, has no interval); and every
+    value of those tables, zero truths and the survey too, in one long CSV.
 ``usability.csv``
     From ``draws.parquet``: per kind and method, over draws and truths, the
     median smallest D/H and smallest n_eff, each over the truth's own (median
@@ -208,17 +209,19 @@ def usability(draws: pd.DataFrame, floor: float) -> pd.DataFrame:
         lambda v: order.get(v, 99)) if s.name == "method" else s)
 
 
-#: The supplement tables' rows, columns and labels.
-ROLES = {"constraint": "Fitted", "dropped_line": "Unfitted lines (C24010 detail)",
-         "other_table": "Unfitted tables (B19001, B23001)", "heldout": "Held-out tables"}
+#: The supplement tables' rows, columns and labels. Their rows are fitted cells
+#: and held-out cells, the held-out tables and the constraint tables the
+#: simulation does not fit (``other_table``) together; the constraint tables'
+#: lines it leaves out (``dropped_line``) are not shown.
+TABLE_ROLES = {"constraint": "constraint", "heldout": "heldout", "other_table": "heldout"}
+ROLES = {"constraint": "Fitted", "heldout": "Held out"}
 MEASURES = {"abs_error_p50": "Median $|$error$|$", "crps": "CRPS", "interval": "Interval score",
             "covered": "Coverage"}
-TABLE_METHODS = {"ipf": "IPF", "ipf_multinomial": "IPF m.", "vb_gaussian_int": "VB G",
-                 "vb_gaussian_trunc_int": "VB G tr.", "hmc_short_int": "HMC s."}
-#: Each measure's methods: IPF is a point, so it has no interval and no coverage.
-MEASURE_METHODS = {measure: [m for m in TABLE_METHODS
-                             if m != "ipf" or measure in ("abs_error_p50", "crps")]
-                   for measure in MEASURES}
+TABLE_METHODS = {"ipf": "IPF", "ipf_multinomial": "IPF, multinomial",
+                 "vb_gaussian_int": "VB Gaussian", "vb_gaussian_trunc_int": "VB Gaussian, truncated",
+                 "hmc_short_int": "HMC short"}
+#: IPF is a point: it has no interval, so no interval score or coverage.
+POINT_MEASURES = ("abs_error_p50", "crps")
 
 
 def long_table(summary: pd.DataFrame) -> pd.DataFrame:
@@ -234,32 +237,28 @@ def long_table(summary: pd.DataFrame) -> pd.DataFrame:
 
 
 def tabular(summary: pd.DataFrame, kind: str) -> str:
-    """The nonzero truths of ``kind`` as a bare booktabs ``tabular``."""
+    """The nonzero truths of ``kind`` as a bare booktabs ``tabular``: a row per
+    (level, fitted or held out, method), a column per measure."""
     part = summary[(summary.kind == kind) & ~summary.truth_zero.astype(bool)]
-    widths = [len(MEASURE_METHODS[measure]) for measure in MEASURES]
-    total = sum(widths)
-    starts = [2 + sum(widths[:i]) for i in range(len(widths))]
-    lines = ["\\setlength{\\tabcolsep}{3pt}",
-             "\\begin{tabular}{l" + "r" * total + "}", "\\toprule",
-             " & " + " & ".join(f"\\multicolumn{{{n}}}{{c}}{{{label}}}"
-                                for n, label in zip(widths, MEASURES.values())) + " \\\\",
-             " ".join(f"\\cmidrule(lr){{{a}-{a + n - 1}}}" for a, n in zip(starts, widths)),
-             "Cells & " + " & ".join(TABLE_METHODS[m] for measure in MEASURES
-                                     for m in MEASURE_METHODS[measure]) + " \\\\",
-             "\\midrule"]
+    lines = ["\\begin{tabular}{ll" + "r" * len(MEASURES) + "}", "\\toprule",
+             "Cells & Method & " + " & ".join(MEASURES.values()) + " \\\\", "\\midrule"]
     for i, level in enumerate(("block group", "tract")):
         if i:
             lines.append("\\addlinespace")
-        lines.append(f"\\multicolumn{{{1 + total}}}{{l}}"
+        lines.append(f"\\multicolumn{{{2 + len(MEASURES)}}}{{l}}"
                      f"{{\\textit{{{level.capitalize()}}}}} \\\\")
         for role, label in ROLES.items():
             row = part[(part.level == level) & (part.role == role)]
             if row.empty:
                 continue
             row = row.iloc[0]
-            values = [f"{row[f'{m}_{measure}']:.2f}" if pd.notna(row.get(f"{m}_{measure}"))
-                      else "--" for measure in MEASURES for m in MEASURE_METHODS[measure]]
-            lines.append(f"{label} & " + " & ".join(values) + " \\\\")
+            for j, (method, name) in enumerate(TABLE_METHODS.items()):
+                values = [f"{row[f'{method}_{measure}']:.2f}"
+                          if (method != "ipf" or measure in POINT_MEASURES)
+                          and pd.notna(row.get(f"{method}_{measure}")) else "--"
+                          for measure in MEASURES]
+                lines.append(f"{label if j == 0 else ''} & {name} & " + " & ".join(values)
+                             + " \\\\")
     lines += ["\\bottomrule", "\\end{tabular}"]
     return "\n".join(lines) + "\n"
 
@@ -308,7 +307,9 @@ def main() -> None:
     ranks.to_csv(out / "ranks.csv", index=False)
     use = usability(pd.read_parquet(args.output / "draws.parquet"), args.dh_floor)
     use.to_csv(out / "usability.csv", index=False)
-    base = summarise(cells, ["kind", "level", "role", "truth_zero"], m)
+    table_cells = cells[cells.role.isin(TABLE_ROLES)]
+    base = summarise(table_cells.assign(role=table_cells.role.map(TABLE_ROLES)),
+                     ["kind", "level", "role", "truth_zero"], m)
     long_table(base).to_csv(out / "table_sim.csv", index=False)
     for kind in base.kind.unique():
         (out / f"table_sim_{kind}.tex").write_text(tabular(base, kind))
