@@ -39,6 +39,7 @@ from provenance import EXAMPLES_SCRIPTS, INVENTORY_SCRIPTS, TABLES_SCRIPTS, stal
 #: (the output whose stamp covers it, the scripts). Any other tables-folder file
 #: is paper_tables.py's, covered by tables.md's stamp.
 STAMPED = {"draw_examples.csv": ("draw_examples.csv", EXAMPLES_SCRIPTS),
+           "study_area.csv": ("table_inventory.md", INVENTORY_SCRIPTS),
            **{f"{stem}.{ext}": ("table_inventory.md", INVENTORY_SCRIPTS)
               for stem in ("table_inventory", "table_cells", "puma_cells", "parameters")
               for ext in ("md", "tex", "csv")}}

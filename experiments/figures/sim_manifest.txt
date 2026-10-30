@@ -6,6 +6,7 @@
 #           scores  a path relative to the simulation's scores folder
 #                   (experiments/sim_score.py: <root>/<sim>/simulation/output/scores)
 #           sim     a path relative to the simulation's folder (<root>/<sim>/simulation)
+#           output  a path relative to its tabulation (<root>/<sim>/simulation/output)
 #   used by the figures and tables that read it, for reference only
 #
 # Everything lands flat in sim/:
@@ -19,3 +20,6 @@ scores  table_sim_*.tex                         the supplement tables, LaTeX (on
 scores  table_sim.csv                           the supplement tables' values, long, zero truths too
 scores  usability.csv                           the draws' D/H, n_eff and largest share against the truth's
 sim     calibration.json                        c per truth kind, the dropped C24010 lines
+output  settings.csv                            the simulation's settings and calibration, flattened (numbers.R)
+output  timing.csv                              seconds per fit (numbers.R)
+output  cells.csv                               every line's role (numbers.R)

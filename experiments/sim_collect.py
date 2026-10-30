@@ -33,6 +33,12 @@ and its held-out tables -- at block group and tract, for each truth:
     shares, their smallest and median over block groups, and the largest cell's
     share of the total.
 
+And, for the text's numbers: ``cells.csv`` (``cells.parquet`` as CSV),
+``timing.csv`` (per synthetic PUMA, the seconds of its IPF fit, its MAP + VB
+fit and its HMC short run, warmup apart) and ``settings.csv`` (the simulation's
+and its fits' specs, flattened to ``sim.<path>`` and ``fits.<path>``, and the
+calibration, ``calibration.<path>``).
+
 A method whose fit is missing is left empty (NaN) and reported::
 
     sbatch --account=acf-utk0011 experiments/run_python.sbatch sim_collect.py \\
@@ -133,6 +139,49 @@ def hmc_draws(sim: Simulation, puma: str, inputs) -> list[np.ndarray] | None:
     return populations(inputs, kept[-1, np.arange(k) * (chains // k), :].T)
 
 
+def settings(sim: Simulation) -> pd.DataFrame:
+    """The simulation's settings and calibration, flattened (``paper_tables.flatten``)."""
+    import json
+
+    from paper_tables import flatten
+
+    rows = flatten(sim.settings, "sim") + flatten(
+        {k: v for k, v in sim.fits.items() if not k.startswith("_")}, "fits")
+    calibration = sim.folder / "calibration.json"
+    if calibration.exists():
+        rows += flatten(json.loads(calibration.read_text()), "calibration")
+    return pd.DataFrame(rows, columns=["key", "value"])
+
+
+def timing(sim: Simulation) -> pd.DataFrame:
+    """Per synthetic PUMA, the seconds each fit took (NaN where it is missing)."""
+    from pmedm_vb.rake import rake_name
+
+    rows = []
+    name = {p: rx.fit_name(sim.fits, p, sim.alpha) for p in sim.sim_pumas()}
+    for puma in sim.sim_pumas():
+        row = dict(puma=puma, kind=next(k for k in sim.kinds() if puma in
+                                        [sim.sim_puma(k, i) for i in
+                                         range(1, sim.settings["truths"][k] + 1)]),
+                   truth_id=int(puma[-2:]))
+        paths = {"ipf": (sim.fits_folder / puma / "ipf"
+                         / f"{rake_name(puma, 'ipf', sim.fits['model'].get('rollup'))}.npz",
+                         ["seconds"]),
+                 "vb": (sim.fits_folder / puma / "vb_gaussian" / f"{name[puma]}.npz",
+                        ["seconds", "map_seconds"]),
+                 "hmc": (sim.fits_folder / puma / "hmc_short" / f"{name[puma]}_trace.npz",
+                         ["seconds", "warmup_seconds"])}
+        for method, (path, keys) in paths.items():
+            values = {}
+            if path.exists():
+                with np.load(path) as saved:
+                    values = {k: float(saved[k]) for k in keys if k in saved.files}
+            for k in keys:
+                row[f"{method}_{k}"] = values.get(k, np.nan)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 # -- tables ---------------------------------------------------------------------
 
 
@@ -208,7 +257,11 @@ def main() -> None:
     source = PMEDMInputs.load(sim.source_inputs())
     tab = Tabulator(source, HeldOut.load(sim.source_inputs()))
     columns = constraint_columns(sim, source)
-    cell_frame(tab, source, columns, sim).to_parquet(out / "cells.parquet", index=False)
+    cells = cell_frame(tab, source, columns, sim)
+    cells.to_parquet(out / "cells.parquet", index=False)
+    cells.to_csv(out / "cells.csv", index=False)
+    settings(sim).to_csv(out / "settings.csv", index=False)
+    timing(sim).to_csv(out / "timing.csv", index=False)
     key = keys(tab, source)
     tenure = table_leaves(source.bg_constraints, "B25003")
     households = ~source.units["is_group_quarters"].to_numpy(bool)

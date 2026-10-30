@@ -35,6 +35,11 @@ With ``--experiments`` (a folder of experiment JSONs), a separate table of each
 experiment's parameters per PUMA: the solver's coordinates and, in
 parentheses, how many of them the allocation identifies.
 
+Also ``<out>/study_area.csv``: per PUMA and in total, the tracts and block
+groups, the PUMS weighting units (``records``: households and group-quarters
+persons), and their weights summed, households and group-quarters persons
+apart (``N`` is both).
+
 Writes ``<out>/table_inventory.md``, ``.tex`` (booktabs) and ``.csv``, the
 cell counts by table as ``<out>/table_cells.*`` and by PUMA as
 ``<out>/puma_cells.*``, and the parameters as ``<out>/parameters.*``, and last
@@ -345,6 +350,23 @@ def parameters(area: StudyArea, pumas: list[str], folder: Path) -> pd.DataFrame:
     return frame.rename(columns={c: f"{c}: coordinates (identified)" for c in columns})
 
 
+def study_area(area: StudyArea, pumas: list[str]) -> pd.DataFrame:
+    """``study_area.csv``: per PUMA and in total, the areas, the PUMS units and
+    their weights."""
+    rows = []
+    for puma in pumas:
+        inputs = PMEDMInputs.load(processed_dir() / "inputs" / area.slug / puma)
+        gq = inputs.units["is_group_quarters"].to_numpy(bool)
+        weight = inputs.units["weight"].to_numpy(float)
+        rows.append(dict(puma=puma, tracts=inputs.Y_T.shape[0], block_groups=inputs.Y_B.shape[0],
+                         records=inputs.n_units, households=weight[~gq].sum(),
+                         gq_persons=weight[gq].sum(), N=float(inputs.N)))
+    frame = pd.DataFrame(rows)
+    total = frame.drop(columns="puma").sum().to_dict()
+    frame = pd.concat([frame, pd.DataFrame([dict(puma="Total", **total)])], ignore_index=True)
+    return frame.astype({"tracts": int, "block_groups": int, "records": int})
+
+
 def simple_markdown(frame: pd.DataFrame) -> str:
     lines = ["| " + " | ".join(frame.columns) + " |", "|" + "---|" * len(frame.columns)]
     lines += ["| " + " | ".join(map(str, r)) + " |" for r in frame.itertuples(index=False)]
@@ -381,6 +403,7 @@ def main() -> None:
     cells.to_csv(args.out / "table_cells.csv", index=False)
     (args.out / "table_cells.md").write_text(simple_markdown(cells))
     (args.out / "table_cells.tex").write_text(simple_latex(cells))
+    study_area(area, args.puma).to_csv(args.out / "study_area.csv", index=False)
     by_puma = puma_counts(counts, str(rollup))
     by_puma.to_csv(args.out / "puma_cells.csv", index=False)
     (args.out / "puma_cells.md").write_text(simple_markdown(by_puma))

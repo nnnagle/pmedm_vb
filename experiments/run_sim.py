@@ -138,7 +138,8 @@ def score_stale(sim: Simulation) -> str | None:
 
 
 def zip_roots(sim: Simulation) -> dict[str, Path]:
-    return {"scores": outputs(sim)["score"].parent, "sim": sim.folder}
+    return {"scores": outputs(sim)["score"].parent, "sim": sim.folder,
+            "output": outputs(sim)["collect"].parent}
 
 
 def zip_stale(sim: Simulation) -> str | None:

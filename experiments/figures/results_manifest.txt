@@ -15,11 +15,14 @@ repo    experiments/figures/fig_agreement.R     Figure E
 repo    experiments/figures/fig_cost.R          Figure C
 repo    experiments/figures/fig_draws.R         Figure B
 repo    experiments/figures/fig_examples.R      Figure A
+repo    experiments/figures/numbers.R           the numbers in the text (source("results/numbers.R"))
 tables  table[0-9]*.csv                         the paper tables, CSV (Figures C, D, E read them)
 tables  table[0-9]*.tex                         the paper tables, LaTeX
 tables  tables.md                               the paper tables, Markdown
 tables  draws_sample.csv                        Figure B
 tables  draw_examples.csv                       Figure A (experiments/draw_examples.py)
+tables  settings.csv                            the experiments' settings, flattened (numbers.R)
+tables  study_area.csv                          tracts, block groups, records and households per PUMA (numbers.R)
 tables  table_inventory.md                      the census tables used (experiments/table_inventory.py)
 tables  table_inventory.tex                     the census tables used, LaTeX
 tables  table_inventory.csv                     the census tables used, CSV

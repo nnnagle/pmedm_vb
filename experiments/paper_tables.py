@@ -8,7 +8,9 @@ Tables 2, 3 and 4, and two tables by ACS table (6 and 7), each as LaTeX (a bare 
 ``table<key>_<experiment>.tex``, for a document to caption and label), CSV
 (long: one row per experiment, alpha, method and statistic, unrounded, with
 ``n`` the cells, draws or PUMAs behind it) and Markdown (all in ``tables.md``,
-with the notes); and ``draws_sample.csv``, up
+with the notes); ``settings.csv``, the settings behind the numbers the paper
+quotes (each experiment's recorded spec, flattened to ``<experiment>.<path>``
+keys, its scoring's draws, and these tables' options); and ``draws_sample.csv``, up
 to 1,000 random draws of each (experiment, method, alpha, PUMA) with their
 block-group D/H and n_eff and largest cell, for the figures of the draws::
 
@@ -655,6 +657,41 @@ def word_notes(pumas: list[str]) -> None:
         RAKING_NOTES[key] = note.replace("its four draws, one per PUMA", draws)
 
 
+def flatten(value, prefix: str) -> list[tuple[str, str]]:
+    """``(dotted key, text)`` of every leaf of a JSON value; lists as ``a;b``."""
+    if isinstance(value, dict):
+        return [row for key, v in value.items() for row in flatten(v, f"{prefix}.{key}")]
+    if isinstance(value, list) and not any(isinstance(v, (dict, list)) for v in value):
+        return [(prefix, ";".join(str(v) for v in value))]
+    if isinstance(value, list):
+        return [row for i, v in enumerate(value) for row in flatten(v, f"{prefix}.{i}")]
+    return [(prefix, "" if value is None else str(value))]
+
+
+def settings(args, experiments: list[tuple[str, str]]) -> pd.DataFrame:
+    """``settings.csv``: what the paper quotes as settings rather than results."""
+    from run_experiment import FITS_SLURM
+
+    from pmedm_vb.data.variance import N_REPLICATES
+
+    rows = [("tag", args.tag), ("wall", args.wall), ("dh_floor", args.dh_floor),
+            ("neff_floor", args.neff_floor), ("hh_z", args.hh_z),
+            ("n_replicates", N_REPLICATES),
+            ("fit_cpus", next(o.split("=")[1] for o in FITS_SLURM if "cpus-per-task" in o))]
+    source = (Path(__file__).resolve().parent / "compare_methods.py").read_text()
+    hh_min = re.search(r'"--hh-min", type=float, default=([0-9.]+)', source)
+    rows.append(("hh_min", hh_min.group(1) if hh_min else ""))
+    for name, label in experiments:
+        rows.append((f"{name}.label", label))
+        record = args.root / name / "experiment.json"
+        if record.exists():
+            rows += flatten(json.loads(record.read_text()), name)
+        scoring = args.root / name / "scores" / args.tag / "scoring.json"
+        if scoring.exists():
+            rows.append((f"{name}.scoring.draws", json.loads(scoring.read_text())["draws"]))
+    return pd.DataFrame(rows, columns=["key", "value"])
+
+
 def keep(frame: pd.DataFrame, args) -> pd.DataFrame:
     """The rows of the PUMAs and alphas asked for."""
     if args.pumas is not None:
@@ -728,6 +765,7 @@ def main() -> None:
                       else markdown(one, table, [experiment], experiment[0]))
     (args.out / "tables.md").write_text("\n".join(md))
     pd.concat(samples, ignore_index=True).to_csv(args.out / "draws_sample.csv", index=False)
+    settings(args, experiments).to_csv(args.out / "settings.csv", index=False)
     # Last, so that a run cut short leaves the folder unstamped (run_paper.py).
     write_stamp(args.out / "tables.md", TABLES_SCRIPTS, tag=args.tag, experiments=args.experiments)
     print(f"wrote {args.out}")
