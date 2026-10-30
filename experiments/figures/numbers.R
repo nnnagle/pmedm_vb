@@ -268,6 +268,13 @@ sim_lines <- function(level, role = "constraint") {
   sum(t$level == level & t$role == role)
 }
 
+# The tables of a role at a level (cells.csv, sim_collect.py's roles): "heldout"
+# and "other_table" are scored together as held out (sim_score.py).
+sim_tables <- function(roles = c("heldout", "other_table"), level = "block group") {
+  t <- num_read("sim", "cells.csv")
+  unique(t$table[t$level == level & t$role %in% roles])
+}
+
 # A sampling fraction as "1/8".
 fraction_text <- function(f) paste0("1/", round(1 / f))
 

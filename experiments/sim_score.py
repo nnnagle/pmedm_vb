@@ -30,7 +30,10 @@ the last three as integer populations, ``vb_gaussian_int``,
 
 ``cells.parquet``
     Every cell's scores, one row per (kind, truth_id, level, geoid, table,
-    line), with its role.
+    line), with its role: ``constraint`` (fitted), ``heldout`` (the held-out
+    tables and the constraint tables the simulation does not fit, pooled) or
+    ``dropped_line`` (the fitted tables' left-out lines); ``line_role`` keeps
+    cells.parquet's own, which tells the two kinds of held-out table apart.
 ``summary.csv``, ``summary.md``
     By truth kind, level, role (``--by-table``: and ACS table) and whether the
     truth is zero (``truth_zero``: a sampled method's draws, N p, are never
@@ -209,11 +212,12 @@ def usability(draws: pd.DataFrame, floor: float) -> pd.DataFrame:
         lambda v: order.get(v, 99)) if s.name == "method" else s)
 
 
-#: The supplement tables' rows, columns and labels. Their rows are fitted cells
-#: and held-out cells, the held-out tables and the constraint tables the
-#: simulation does not fit (``other_table``) together; the constraint tables'
-#: lines it leaves out (``dropped_line``) are not shown.
-TABLE_ROLES = {"constraint": "constraint", "heldout": "heldout", "other_table": "heldout"}
+#: Cells are scored as fitted (``constraint``), held out (``heldout``: the
+#: held-out tables and the constraint tables the simulation does not fit,
+#: ``other_table`` in cells.parquet, together) or as the fitted tables' left-out
+#: lines (``dropped_line``); ``line_role`` keeps cells.parquet's own.
+POOLED_ROLES = {"other_table": "heldout"}
+#: The supplement tables' rows, columns and labels (not the left-out lines).
 ROLES = {"constraint": "Fitted", "heldout": "Held out"}
 MEASURES = {"abs_error_p50": "Median $|$error$|$", "crps": "CRPS", "interval": "Interval score",
             "covered": "Coverage"}
@@ -297,6 +301,8 @@ def main() -> None:
                         on=["level", "table", "line"], how="left")
     if not args.subtotals:
         cells = cells[~cells.subtotal]
+    cells["line_role"] = cells["role"]
+    cells["role"] = cells["role"].replace(POOLED_ROLES)
     cells["truth_zero"] = cells["truth"] == 0
     cells.to_parquet(out / "cells.parquet", index=False)
 
@@ -307,9 +313,7 @@ def main() -> None:
     ranks.to_csv(out / "ranks.csv", index=False)
     use = usability(pd.read_parquet(args.output / "draws.parquet"), args.dh_floor)
     use.to_csv(out / "usability.csv", index=False)
-    table_cells = cells[cells.role.isin(TABLE_ROLES)]
-    base = summarise(table_cells.assign(role=table_cells.role.map(TABLE_ROLES)),
-                     ["kind", "level", "role", "truth_zero"], m)
+    base = summarise(cells[cells.role.isin(ROLES)], ["kind", "level", "role", "truth_zero"], m)
     long_table(base).to_csv(out / "table_sim.csv", index=False)
     for kind in base.kind.unique():
         (out / f"table_sim_{kind}.tex").write_text(tabular(base, kind))

@@ -3,7 +3,8 @@
 # Truths are populations of one PUMA drawn from the baseline's reference HMC
 # and from its IPF multinomial draws; each was surveyed (1 in 8, Bernoulli,
 # within block groups) and refitted to a smaller constraint set. Held-out
-# tables, one level (block group by default). Every method's draws are integer
+# cells -- the held-out tables and the constraint tables the simulation does
+# not fit, pooled by sim_score.py -- at one level (block group by default). Every method's draws are integer
 # populations, as the truths are (VB's and HMC's made so by one multinomial
 # draw each: sim_collect.py's *_int):
 #   top     the truth's rank among each method's 16 draws, as the share of
