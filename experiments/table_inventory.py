@@ -1,8 +1,7 @@
 """The census tables the study uses, as a table for the article.
 
 One row per ACS table: its code and published title, its role (constraint or
-held out, and for held-out tables how related it is to the constraints), the
-number of cells the model uses and how many of them are leaves (the finest
+held out), the number of cells the model uses and how many of them are leaves (the finest
 published categories; the rest are totals and subtotals, which only the
 all-cell set has, so for a collapsed set the two agree), the levels it enters
 at, and its largest and smallest leaf categories by count summed over the
@@ -66,7 +65,6 @@ from design_cells import (LEVELS as TREE_LEVELS, ROLLUP_UNIVERSE, Tally, count_a
                           count_rollup)
 
 from pmedm_vb.assemble.allcells import all_tables, is_subtotal, table_set, trees
-from pmedm_vb.assemble.constraints import HELDOUT_RELATION
 from pmedm_vb.assemble.heldout import HeldOut
 from pmedm_vb.assemble.inputs import PMEDMInputs
 from pmedm_vb.assemble.rollup import RollupSpec
@@ -144,8 +142,6 @@ def inventory(cells: pd.DataFrame, titles: pd.Series, seed: int) -> pd.DataFrame
     rows = []
     for (role, table), group in cells.groupby(["role", "table"], sort=False):
         group = group.sort_values("category")  # so the tie-break does not depend on load order
-        if role == "held out":
-            role = f"held out ({HELDOUT_RELATION[table].replace('_', ' ')})"
         levels = [lvl for lvl, have in (("BG", group.bg.any()), ("tract", group.tract.any())) if have]
         # Examples from the leaves: a total or subtotal is always the largest.
         leaves = group[~group.category.map(is_subtotal)]
