@@ -36,11 +36,14 @@ suppressPackageStartupMessages({
   library(patchwork)
 })
 
-# Display labels, in drawing order; colours as in Figure C, IPF's fit in grey.
+# Display labels, in drawing order; colours as in Figure C (truncated VB its purple),
+# IPF's fit in grey.
 SIM_METHODS <- c(ipf = "IPF", ipf_multinomial = "IPF, multinomial",
-                 vb_gaussian_int = "VB Gaussian", hmc_short_int = "HMC short")
+                 vb_gaussian_int = "VB Gaussian", vb_gaussian_trunc_int = "VB Gaussian, truncated",
+                 hmc_short_int = "HMC short")
 SIM_METHOD_COLOURS <- c(IPF = "#5b5b5b", `IPF, multinomial` = "#2a78d6",
-                        `VB Gaussian` = "#1baf7a", `HMC short` = "#e87ba4")
+                        `VB Gaussian` = "#1baf7a", `VB Gaussian, truncated` = "#6250d6",
+                        `HMC short` = "#e87ba4")
 SIM_KINDS <- c(hmc_ref = "HMC-reference truth", ipf_multinomial = "IPF-multinomial truth")
 SIM_KIND_COLOURS <- c(`HMC-reference truth` = "#008300", `IPF-multinomial truth` = "#eb6834")
 SIM_MEASURES <- c(abs_error_p50 = "Median |error| / SE", crps = "Mean CRPS / SE")
@@ -106,7 +109,7 @@ plot_sim <- function(data, level = "block group") {
     theme(panel.grid.minor = element_blank(), panel.grid.major.y = element_blank(),
           panel.grid.major.x = element_line(colour = "grey90", linewidth = 0.3),
           strip.background = element_blank(), strip.text = element_text(face = "bold"),
-          legend.position = "bottom")
+          panel.spacing.x = unit(5, "mm"), legend.position = "bottom")
 
   top / bottom + plot_layout(heights = c(2, 1))
 }
