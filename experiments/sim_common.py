@@ -89,6 +89,16 @@ class Simulation:
 # -- the constraint set --------------------------------------------------------
 
 
+def truncation_rule(sim: "Simulation") -> dict:
+    """The truncated VB's rejection rule, the source spec's (``vb_trunc_share``,
+    ``vb_trunc_distinct``): sim_collect.py draws by it, and its stamp records it."""
+    missing = [k for k in ("vb_trunc_share", "vb_trunc_distinct") if k not in sim.source]
+    if missing:
+        raise SystemExit(f"the source spec sets no {', '.join(missing)}: the truncated VB's rule")
+    return {"share": float(sim.source["vb_trunc_share"]),
+            "distinct": float(sim.source["vb_trunc_distinct"])}
+
+
 def depths(entry: dict) -> list[int]:
     """Each line's depth in a published tree (the total 0)."""
     parents, out = entry["parents"], []

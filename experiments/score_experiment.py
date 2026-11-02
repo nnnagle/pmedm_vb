@@ -28,7 +28,9 @@ alpha cell, against that cell's reference), and any simulated populations from
 them (``rake_draws``, e.g. ``ipf_multinomial``). An experiment with
 ``vb_truncated: false`` scores no truncated VB variants, and a list
 (``["gaussian"]``) only those families'; ``vb_trunc_share`` and
-``vb_trunc_distinct`` set their rejection rule (compare_methods.py's
+``vb_trunc_distinct`` set their rejection rule (recorded in ``scoring.json``:
+when the spec's changes, ``--resume`` drops the truncated scores and scores
+them again, and nothing else; compare_methods.py's
 ``--trunc-share`` and ``--trunc-distinct``). Every call names the
 cell's reference; the HMC calls also name the VB fit that whitened them
 (``hmc.whiten``, skewed by default). Then
@@ -178,6 +180,38 @@ def truncated_families(spec: dict) -> list[str]:
     return list(spec["vb_families"]) if chosen else []
 
 
+#: The spec keys of the truncated VB's rejection rule.
+TRUNC_KEYS = ("vb_trunc_share", "vb_trunc_distinct")
+
+
+def truncation_rule(spec: dict) -> dict:
+    """The truncated VB's rejection rule, as ``scoring.json`` records it."""
+    return {key: spec.get(key) for key in TRUNC_KEYS}
+
+
+def truncation_stale(record: dict, spec: dict) -> bool:
+    """Whether the truncated scores were made under another rule than the spec's
+    (or under one not recorded, as before the record kept it)."""
+    return bool(truncated_families(spec)) and record.get("truncation") != truncation_rule(spec)
+
+
+def drop_truncated(out: Path, cells) -> None:
+    """Remove the truncated VB's scores from ``cells``, so that they are scored
+    again: its rows of each cell's CSVs (appended to, so never rewritten in
+    place by compare_methods.py) and its detail files."""
+    import pandas as pd
+
+    for cell in cells:
+        for path in (out / "per_cell" / f"{cell}.csv", out / "per_cell" / f"{cell}_tables.csv"):
+            if path.exists():
+                frame = pd.read_csv(path, dtype={"puma": str})
+                keep = ~frame["method"].astype(str).str.endswith("_trunc")
+                if not keep.all():
+                    frame[keep].to_csv(path, index=False)
+        for path in (out / "detail" / cell).glob("vb_*_trunc_*.parquet"):
+            path.unlink()
+
+
 def truncation_args(spec: dict) -> list[str]:
     """The truncated VB's rejection rule, where the spec sets it."""
     out = []
@@ -249,9 +283,12 @@ def scoring_state(exp: Path, tag: str, pumas=None, alphas=None) -> dict:
     record = json.loads(record_path.read_text())
     spec = narrow(json.loads((exp / "experiment.json").read_text()), pumas, alphas)
     cells, _ = plan(spec, exp, out, record["draws"])
+    stale = truncation_stale(record, spec)
     calls = {}
     for cell, lines in cells.items():
         done = scored_methods(out, cell)
+        if stale:  # scored under another rule: to be scored again
+            done = {m for m in done if not m.endswith("_trunc")}
         left = [line for line in lines if method_of(line) not in done]
         if left:
             calls[cell] = left
@@ -296,8 +333,19 @@ def submit(args: argparse.Namespace) -> None:
         record = {"tag": args.tag, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                   "commit": git_commit(), "draws": args.draws, "experiment": str(exp),
                   "level": spec.get("_level"), "missing": missing, "jobs": {},
-                  "combine_job": None}
+                  "combine_job": None, "truncation": truncation_rule(spec)}
     live = live_jobs(record["jobs"].values())
+    if truncation_stale(record, spec):
+        busy = [cell for cell in cells if record["jobs"].get(cell) in live]
+        if busy:
+            print(f"the truncation rule changed; waiting on {len(busy)} live job(s) first")
+            return
+        print(f"the truncation rule changed to {truncation_rule(spec)}: "
+              f"{'would drop' if args.dry_run else 'dropping'} the truncated VB's scores")
+        if not args.dry_run:
+            drop_truncated(out, cells)
+            record["truncation"] = truncation_rule(spec)
+            write_record(out, record)
     todo = {}
     for cell, calls in cells.items():
         if record["jobs"].get(cell) in live:

@@ -50,7 +50,7 @@ import provenance as pv  # noqa: E402
 import run_experiment as rx  # noqa: E402
 from run_paper import (ATTENTION, DONE, NOTIFY, WAITING, Attention, Jobs, Lock,  # noqa: E402
                        exp_attempts, guard, key_done)
-from sim_common import Simulation  # noqa: E402
+from sim_common import Simulation, truncation_rule  # noqa: E402
 
 FOLDER = "run_sim"
 MANIFEST = Path(__file__).resolve().parent / "figures" / "sim_manifest.txt"
@@ -121,7 +121,8 @@ def newer_than(stamped: Path, inputs: list[Path]) -> Path | None:
 
 def collect_stale(sim: Simulation) -> str | None:
     out = outputs(sim)["collect"]
-    why = pv.stale(out, pv.SIM_COLLECT_SCRIPTS, sim=sim.settings["name"], hh_min=HH_MIN)
+    why = pv.stale(out, pv.SIM_COLLECT_SCRIPTS, sim=sim.settings["name"], hh_min=HH_MIN,
+                   truncation=truncation_rule(sim))
     if why:
         return why
     newer = newer_than(out, fit_files(sim))

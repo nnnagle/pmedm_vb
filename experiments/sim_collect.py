@@ -64,7 +64,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import run_experiment as rx  # noqa: E402
 from provenance import SIM_COLLECT_SCRIPTS, write_stamp  # noqa: E402
-from sim_common import Simulation, Tabulator, constraint_columns  # noqa: E402
+from sim_common import Simulation, Tabulator, constraint_columns, truncation_rule  # noqa: E402
 
 METHODS = ("ipf_multinomial", "vb_gaussian", "vb_gaussian_trunc", "hmc_short", "vb_gaussian_int",
            "vb_gaussian_trunc_int", "hmc_short_int")
@@ -119,14 +119,11 @@ TRUNC_MAX_FACTOR = 20
 
 
 def truncation(sim: Simulation, hh_min: float) -> argparse.Namespace:
-    """The truncated VB's rejection rule, the source spec's (``vb_trunc_share``,
-    ``vb_trunc_distinct``), as compare_methods.py takes it."""
-    missing = [k for k in ("vb_trunc_share", "vb_trunc_distinct") if k not in sim.source]
-    if missing:
-        raise SystemExit(f"the source spec sets no {', '.join(missing)}: the truncated VB's rule")
+    """The truncated VB's rejection rule (``sim_common.truncation_rule``), as
+    compare_methods.py takes it."""
+    rule = truncation_rule(sim)
     return argparse.Namespace(draws=sim.draws, hh_min=hh_min, trunc_max_factor=TRUNC_MAX_FACTOR,
-                              trunc_share=float(sim.source["vb_trunc_share"]),
-                              trunc_distinct=float(sim.source["vb_trunc_distinct"]))
+                              trunc_share=rule["share"], trunc_distinct=rule["distinct"])
 
 
 def vb_draws(sim: Simulation, puma: str, inputs, rng, trunc_rng,
@@ -370,7 +367,7 @@ def main() -> None:
     elif args.pumas is None:
         # Last, and only when complete, so that run_sim.py takes it as current.
         write_stamp(out / "draws.parquet", SIM_COLLECT_SCRIPTS, sim=sim.settings["name"],
-                    hh_min=args.hh_min)
+                    hh_min=args.hh_min, truncation=truncation_rule(sim))
     print(f"wrote {out}")
 
 
