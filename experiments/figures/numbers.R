@@ -245,12 +245,21 @@ sim_outer_pct <- function(kinds, method, ...) {
   range_text(100 * vapply(kinds, function(k) sim_rank_share(k, method, ...), 0), 0)
 }
 
-# A column of summary.csv (e.g. "hmc_short_int_crps"), nonzero truths by default.
+# The share of cells whose truth lies outside the range of a method's draws, as a
+# percentage over ``kinds``: 1 - coverage (summary.csv), as the supplement tables
+# give it. A truth equal to the smallest or largest draw is inside.
+sim_miss_pct <- function(kinds, method, ...) {
+  range_text(100 * (1 - vapply(kinds, function(k)
+    sim_stat(k, paste0(method, "_covered"), ...), 0)), 0)
+}
+
+# A column of summary.csv (e.g. "hmc_short_int_crps"), over every cell by default
+# ("all"; TRUE or FALSE for the zero or nonzero truths alone).
 sim_stat <- function(kind, column, level = "block group", role = "heldout",
-                     truth_zero = FALSE) {
+                     truth_zero = "all") {
   t <- num_read("sim", "summary.csv")
   rows <- t$kind == kind & t$level == level & t$role == role &
-    toupper(as.character(t$truth_zero)) == toupper(as.character(truth_zero))
+    tolower(as.character(t$truth_zero)) == tolower(as.character(truth_zero))
   value <- t[[column]][rows]
   if (length(value) != 1) stop("numbers.R: sim ", column, " for ", kind, ": ", length(value))
   value

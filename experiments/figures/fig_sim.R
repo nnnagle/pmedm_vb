@@ -14,7 +14,8 @@
 #           ranks even of a calibrated method. Flat at 1/17 (dashed) if the
 #           draws and the truth come from one distribution; a U, too narrow; a
 #           slope, biased. One row per kind of truth, one column per method;
-#   bottom  accuracy on the nonzero truths: the median |estimate - truth|
+#   bottom  accuracy over every held-out cell, zero truths too, as in the
+#           supplement tables: the median |estimate - truth|
 #           (IPF's fit; the other methods' draws' mean) and the mean CRPS of
 #           the draws (for IPF, its absolute error), in units of the cell's
 #           SE; lower is better. Colour is the kind of truth.
@@ -44,8 +45,6 @@ SIM_KINDS <- c(hmc_ref = "HMC-reference truth", ipf_multinomial = "IPF-multinomi
 SIM_KIND_COLOURS <- c(`HMC-reference truth` = "#008300", `IPF-multinomial truth` = "#eb6834")
 SIM_MEASURES <- c(abs_error_p50 = "Median |error| / SE", crps = "Mean CRPS / SE")
 
-nonzero <- function(x) as.character(x) %in% c("FALSE", "False", "false")
-
 sim_data <- function(scores_dir, role = "heldout") {
   ranks <- read.csv(file.path(scores_dir, "ranks.csv"))
   ranks <- ranks[ranks$role == role & ranks$truth_zero == "all" &
@@ -60,7 +59,7 @@ sim_data <- function(scores_dir, role = "heldout") {
                              scores_dir, ": rerun sim_score.py")
   ranks$share[is.na(ranks$share)] <- 0
   summary <- read.csv(file.path(scores_dir, "summary.csv"))
-  summary <- summary[summary$role == role & nonzero(summary$truth_zero), ]
+  summary <- summary[summary$role == role & summary$truth_zero == "all", ]
   scores <- do.call(rbind, lapply(names(SIM_MEASURES), function(measure) {
     do.call(rbind, lapply(names(SIM_METHODS), function(method) {
       column <- paste0(method, "_", measure)

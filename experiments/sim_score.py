@@ -36,8 +36,8 @@ the last three as integer populations, ``vb_gaussian_int``,
     cells.parquet's own, which tells the two kinds of held-out table apart.
 ``summary.csv``, ``summary.md``
     By truth kind, level, role (``--by-table``: and ACS table) and whether the
-    truth is zero (``truth_zero``: a sampled method's draws, N p, are never
-    exactly zero, so a zero truth is never inside them): cells; per
+    truth is zero (``truth_zero`` ``True``/``False``, and ``all`` for every cell,
+    which the text, tables and figure use): cells; per
     method the median and 90th percentile of |error|, mean CRPS, mean interval
     score, coverage and
     the share of ranks in the two outer bins (nominally ``2 / (m + 1)``).
@@ -47,8 +47,8 @@ the last three as integer populations, ``vb_gaussian_int``,
     selecting cells by their truth skews a rank histogram even for a calibrated
     method, so calibration is read from ``all``, with the integer draws.
 ``table_sim_<kind>.tex``, ``table_sim.csv``
-    The supplement's tables: per truth kind, a bare booktabs ``tabular`` of the
-    nonzero truths, a row per level (block group, then tract), cells (fitted;
+    The supplement's tables: per truth kind, a bare booktabs ``tabular`` of
+    every cell (``truth_zero`` ``all``), a row per level (block group, then tract), cells (fitted;
     held out: the held-out tables and the constraint tables not fitted,
     together; not the left-out lines of fitted tables) and method (IPF, IPF
     multinomial, VB Gaussian, VB Gaussian truncated and HMC short, the last
@@ -173,6 +173,17 @@ def summarise(cells: pd.DataFrame, by: list[str], m: int) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def summarise_all(cells: pd.DataFrame, by: list[str], m: int) -> pd.DataFrame:
+    """:func:`summarise` split by ``truth_zero`` and over all cells (``"all"``),
+    the text's and tables' cells: selecting cells by their truth would skew
+    coverage and accuracy as it skews ranks."""
+    split = summarise(cells, by, m)
+    pooled = summarise(cells, [b for b in by if b != "truth_zero"], m).assign(truth_zero="all")
+    out = pd.concat([split, pooled[split.columns]], ignore_index=True)
+    out["truth_zero"] = out["truth_zero"].astype(str)
+    return out
+
+
 def rank_histograms(cells: pd.DataFrame, m: int) -> pd.DataFrame:
     frames = []
     for method in SAMPLED:
@@ -241,9 +252,9 @@ def long_table(summary: pd.DataFrame) -> pd.DataFrame:
 
 
 def tabular(summary: pd.DataFrame, kind: str) -> str:
-    """The nonzero truths of ``kind`` as a bare booktabs ``tabular``: a row per
-    (level, fitted or held out, method), a column per measure."""
-    part = summary[(summary.kind == kind) & ~summary.truth_zero.astype(bool)]
+    """Every cell of ``kind``, zero truths too, as a bare booktabs ``tabular``: a
+    row per (level, fitted or held out, method), a column per measure."""
+    part = summary[(summary.kind == kind) & (summary.truth_zero == "all")]
     lines = ["\\begin{tabular}{ll" + "r" * len(MEASURES) + "}", "\\toprule",
              "Cells & Method & " + " & ".join(MEASURES.values()) + " \\\\", "\\midrule"]
     for i, level in enumerate(("block group", "tract")):
@@ -307,13 +318,13 @@ def main() -> None:
     cells.to_parquet(out / "cells.parquet", index=False)
 
     by = ["kind", "level", "role"] + (["table"] if args.by_table else []) + ["truth_zero"]
-    summary = summarise(cells, by, m)
+    summary = summarise_all(cells, by, m)
     summary.to_csv(out / "summary.csv", index=False)
     ranks = rank_histograms(cells, m)
     ranks.to_csv(out / "ranks.csv", index=False)
     use = usability(pd.read_parquet(args.output / "draws.parquet"), args.dh_floor)
     use.to_csv(out / "usability.csv", index=False)
-    base = summarise(cells[cells.role.isin(ROLES)], ["kind", "level", "role", "truth_zero"], m)
+    base = summarise_all(cells[cells.role.isin(ROLES)], ["kind", "level", "role", "truth_zero"], m)
     long_table(base).to_csv(out / "table_sim.csv", index=False)
     for kind in base.kind.unique():
         (out / f"table_sim_{kind}.tex").write_text(tabular(base, kind))
