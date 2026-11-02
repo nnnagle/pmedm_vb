@@ -134,7 +134,8 @@ alphas <- function(experiment = "exp01_baseline") {
   as.numeric(strsplit(setting(paste0(experiment, ".alphas"), numeric = FALSE), ";")[[1]])
 }
 
-# A roll-up's thresholds, "25h10n": persons 25, households 10.
+# A roll-up's thresholds from its spec identifier, "25h10n" (persons 25, households
+# 10, nested; the tables print it "25p10h").
 rollup_threshold <- function(which = c("person", "household"), experiment = "exp03_rollup") {
   which <- match.arg(which)
   spec <- setting(paste0(experiment, ".model.rollup"), numeric = FALSE)

@@ -95,6 +95,15 @@ class RollupSpec:
         return (f"{self.person:g}" + ("" if self.household == self.person else f"h{self.household:g}")
                 + ("n" if self.nested else ""))
 
+    @property
+    def label(self) -> str:
+        """The thresholds as the article's tables print them, ``"25p10h"`` for
+        25 persons and 10 households; :meth:`__str__` is the identifier the
+        result names carry, ``"25h10n"``, and is not changed."""
+        if self.pruned:
+            return str(self)
+        return f"{self.person:g}p{self.household:g}h"
+
     def threshold(self, universe: str) -> float:
         if universe == "person":
             return self.person
