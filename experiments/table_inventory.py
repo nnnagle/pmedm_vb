@@ -4,7 +4,8 @@ One row per ACS table: its code and published title, its role (constraint or
 held out), the number of cells the model uses and how many of them are leaves (the finest
 published categories; the rest are totals and subtotals, which only the
 all-cell set has, so for a collapsed set the two agree), the levels it enters
-at, and its largest and smallest leaf categories by count summed over the
+at, and its largest and smallest leaf categories, in the ACS's own line titles
+(the replicate files' ``TITLE``, joined down the table's tree), by count summed over the
 study area's PUMAs, to show what the table is about. Ties are broken at random
 (``--seed``).
 
@@ -101,6 +102,69 @@ def tidy(category: str) -> str:
     return " ".join(TOKENS.get(t, t) for t in category.split("_"))
 
 
+def published_titles(area: StudyArea, tables: list[str]) -> dict[str, dict[int, str]]:
+    """Each table's published line titles by ``ORDER``, from its tract replicate
+    file (the same for every area)."""
+    from pmedm_vb.data.variance import fetch_replicates
+
+    out = {}
+    for table in tables:
+        lines = fetch_replicates(area, [table], geography="tract")[["order", "title"]]
+        lines = lines.dropna().drop_duplicates("order")
+        out[table] = {int(o): str(t) for o, t in zip(lines["order"], lines["title"])}
+    return out
+
+
+def clean_title(title: str) -> str:
+    return title.strip().rstrip(":").strip()
+
+
+def category_labels(tables, titles: dict[str, dict[int, str]]) -> dict[tuple[str, str], str]:
+    """``(table, category)`` to the category in the ACS's words: the published
+    titles of its line and of the lines above it, below the table's total,
+    joined by ": " ("Male: 25 to 29 years"). A title that already carries its
+    path (``"Estimate!!Total:!!Male:!!..."``) is used as it is, less the
+    estimate and the total. Only the all-cell tables have one category per
+    published line; a collapsed category is left out (and printed as its name)."""
+    from pmedm_vb.assemble.allcells import TREES
+
+    out = {}
+    for table in tables:
+        if table.table not in TREES or table.table not in titles:
+            continue
+        parent = {line.name: line.parent for line in TREES[table.table]}
+        order = {c.name: int(c.published[0].rsplit("_", 1)[1])
+                 for c in table.categories if len(c.published) == 1}
+        title = titles[table.table]
+        for name in order:
+            chain = [name]
+            while parent.get(chain[-1]) is not None:
+                chain.append(parent[chain[-1]])
+            chain = chain[::-1][1:]  # below the table's total
+            if not chain:
+                out[(table.table, name)] = "Total"
+                continue
+            leaf = title.get(order[name], "")
+            if "!!" in leaf:
+                parts = [clean_title(t) for t in leaf.split("!!")]
+                parts = [t for t in parts if t and t.lower() not in ("estimate", "total")]
+            else:
+                parts = [clean_title(title.get(order[n], "")) for n in chain if n in order]
+                # A title that repeats the one above it stands for both.
+                parts = [t for i, t in enumerate(parts)
+                         if t and not (i + 1 < len(parts) and parts[i + 1].lower().startswith(t.lower()))]
+            if parts:
+                out[(table.table, name)] = ": ".join(parts)
+    return out
+
+
+def all_cell_tables(area: StudyArea) -> list:
+    """The all-cell constraint and held-out tables, one category per published line."""
+    from pmedm_vb.assemble.allcells import all_heldout_tables
+
+    return all_tables(area) + all_heldout_tables(area, "tract")
+
+
 def collect(area: StudyArea, pumas: list[str]) -> pd.DataFrame:
     """One row per (table, category): role, levels present, count summed over PUMAs."""
     records = {}
@@ -130,14 +194,17 @@ def collect(area: StudyArea, pumas: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def pick(group: pd.DataFrame, largest: bool, rng: np.random.Generator) -> str:
+def pick(group: pd.DataFrame, largest: bool, rng: np.random.Generator,
+         labels: dict | None = None) -> str:
     target = group["count"].max() if largest else group["count"].min()
     tied = group[np.isclose(group["count"], target)]
     row = tied.iloc[rng.integers(len(tied))]
-    return f"{tidy(row.category)} ({row['count']:,.0f})"
+    label = (labels or {}).get((row.table, row.category), tidy(row.category))
+    return f"{label} ({row['count']:,.0f})"
 
 
-def inventory(cells: pd.DataFrame, titles: pd.Series, seed: int) -> pd.DataFrame:
+def inventory(cells: pd.DataFrame, titles: pd.Series, seed: int,
+              labels: dict | None = None) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     rows = []
     for (role, table), group in cells.groupby(["role", "table"], sort=False):
@@ -148,7 +215,7 @@ def inventory(cells: pd.DataFrame, titles: pd.Series, seed: int) -> pd.DataFrame
         rows.append(dict(
             table=table, title=titles.get(table, ""), role=role, cells=len(group),
             leaves=len(leaves), levels=", ".join(levels + ["PUMA (sum)"]),
-            largest=pick(leaves, True, rng), smallest=pick(leaves, False, rng),
+            largest=pick(leaves, True, rng, labels), smallest=pick(leaves, False, rng, labels),
         ))
     frame = pd.DataFrame(rows)
     frame["_order"] = frame.role.str.startswith("held").astype(int)
@@ -388,7 +455,10 @@ def main() -> None:
     area = StudyArea(name=args.name, state=args.state, year=args.year,
                      counties=tuple(args.county), span=args.span)
     titles = table_list(area).set_index("TBLID")["TITLE"]
-    frame = inventory(collect(area, args.puma), titles, args.seed)
+    cells = collect(area, args.puma)
+    tables = all_cell_tables(area)
+    lines = published_titles(area, sorted({t.table for t in tables} & set(cells.table)))
+    frame = inventory(cells, titles, args.seed, category_labels(tables, lines))
     args.out.mkdir(parents=True, exist_ok=True)
     frame.to_csv(args.out / "table_inventory.csv", index=False)
     (args.out / "table_inventory.md").write_text(markdown(frame))
