@@ -18,9 +18,11 @@ Separate steps, because ISAAC's compute nodes cannot reach census.gov::
 skipped; ``--rebuild`` rebuilds it, which is needed after changing the
 constraint tables or the assembly code. ``--tables all`` assembles (and builds
 held-out tables from) every published cell, totals and subtotals included
-(:mod:`pmedm_vb.assemble.allcells`), in place of the collapsed default set; give
-such a study area its own ``--name``, since the name is what separates the two
-sets' inputs on disk.
+(:mod:`pmedm_vb.assemble.allcells`), in place of the collapsed default set;
+``--tables B01001,B25003,...`` narrows the default set to those tables, at
+every level it constrains them. Give every set but the default its own
+``--name``, since the name is what separates the sets' inputs on disk.
+``--county all`` is the whole state.
 
 **solve** and **vb** run every (PUMA, taper, alpha) combination in a process
 pool. ``vb`` fits the MAP solution first, in the same worker, and starts from
@@ -48,7 +50,8 @@ penalties use ``--variance-floor``.
 **One fit per job.** ``--puma`` restricts any step to the PUMAs named, so a
 grid can be submitted as one job per (PUMA, alpha) for clean timing. ``vb``
 rows record ``map_seconds``, the MAP solve each VB fit starts from, so that
-``seconds - map_seconds`` is VB's own time; ``--seed`` seeds VB's draws.
+``seconds - map_seconds`` is VB's own time; ``--seed`` seeds VB's draws and
+``--device cuda`` runs the VB fit on a GPU (the MAP stays on the CPU).
 
 **Statewide support.** ``--epsilon E`` (all steps but prefetch) builds and
 solves the problems whose support is every record in the state, the PUMA's own
@@ -102,7 +105,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state", default="47", help="state FIPS")
     parser.add_argument(
         "--county", action="append", default=None,
-        help="county FIPS; repeatable (default: 093, Knox)",
+        help="county FIPS; repeatable (default: 093, Knox); 'all' for the whole state",
     )
     parser.add_argument("--year", type=int, default=2024)
     parser.add_argument("--span", type=int, default=5)
@@ -145,6 +148,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--draws", type=int, default=8, help="vb: Monte Carlo draws per step")
     parser.add_argument("--learning-rate", type=float, default=0.02, help="vb: Adam step")
     parser.add_argument("--seed", type=int, default=0, help="vb: seed for the Monte Carlo draws")
+    parser.add_argument("--device", default="cpu",
+                        help="vb: torch device for the fit, e.g. 'cuda' (default: cpu)")
     parser.add_argument("--method", choices=["ipf", "sinkhorn"], default="ipf",
                         help="rake: hard IPF to block group margins and the tract-only tables, or KL-penalised Sinkhorn")
     parser.add_argument("--tol", type=float, default=None,
@@ -152,10 +157,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-sweeps", type=int, default=None,
                         help="rake: sweep cap (default: 1000 ipf, 5000 sinkhorn)")
     parser.add_argument(
-        "--tables", choices=["default", "all"], default="default",
-        help="prefetch, assemble, heldout: the collapsed default tables, or every published "
-             "cell (pmedm_vb.assemble.allcells). Use a separate --name for 'all'",
+        "--tables", type=tables_spec, default="default",
+        help="prefetch, assemble, heldout: the collapsed default tables ('default'), every "
+             "published cell ('all'; pmedm_vb.assemble.allcells), or table IDs joined by "
+             "commas (e.g. B01001,B25003), the default set narrowed to those tables. Give "
+             "every set but the default its own --name",
     )
+    parser.add_argument("--no-heldout", action="store_true",
+                        help="prefetch: skip the held-out tables (for an area that will not "
+                             "run the heldout step)")
     parser.add_argument(
         "--epsilon", type=float, default=None,
         help="assemble, solve, vb: statewide support with this prior share off the "
@@ -205,6 +215,16 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def tables_spec(text: str) -> str:
+    """``--tables``: a named set, or table IDs joined by commas (sorted here)."""
+    from pmedm_vb.assemble.allcells import tables_arg
+
+    try:
+        return tables_arg(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from None
+
+
 def floor_spec(text: str) -> str | float | None:
     """``--variance-floor``: ``none``, ``zero`` or a positive number."""
     if text == "none":
@@ -219,7 +239,7 @@ def study_area(args: argparse.Namespace) -> StudyArea:
         name=args.name,
         state=args.state,
         year=args.year,
-        counties=tuple(args.county or ("093",)),
+        counties=() if args.county == ["all"] else tuple(args.county or ("093",)),
         span=args.span,
     )
 
@@ -267,11 +287,12 @@ def pool(workers: int, threads: int) -> ProcessPoolExecutor:
 # -- prefetch ----------------------------------------------------------------
 
 
-def run_prefetch(area: StudyArea, tables: str = "default") -> None:
+def run_prefetch(area: StudyArea, tables: str = "default", heldout: bool = True) -> None:
     from pmedm_vb.assemble.allcells import constraint_tables, heldout_set
     from pmedm_vb.data.prefetch import prefetch
 
-    heldout = [*heldout_set(area, "tract", tables), *heldout_set(area, "block group", tables)]
+    heldout = ([*heldout_set(area, "tract", tables), *heldout_set(area, "block group", tables)]
+               if heldout else [])
     constraints = constraint_tables(area, tables)
     # The constraint tables' national files too, so table_trees.py runs offline.
     prefetch(area, [*constraints, *heldout], national=[t.table for t in constraints])
@@ -703,7 +724,7 @@ def main() -> None:
     area = study_area(args)
     cores = available_cores(args.cores)
     if args.step == "prefetch":
-        run_prefetch(area, args.tables)
+        run_prefetch(area, args.tables, heldout=not args.no_heldout)
     elif args.step == "assemble":
         run_assemble(args, area, cores, args.rebuild, args.epsilon)
     elif args.step == "heldout":
@@ -713,7 +734,8 @@ def main() -> None:
                    "learning_rate": args.learning_rate, "variance_floor": args.variance_floor,
                    "epsilon": args.epsilon,
                    **({"hierarchy": args.hierarchy} if args.step in ("solve", "vb") else {}),
-                   **({"family": args.family, "seed": args.seed} if args.step == "vb" else {}),
+                   **({"family": args.family, "seed": args.seed, "device": args.device}
+                      if args.step == "vb" else {}),
                    **({"method": args.method, "tol": args.tol, "max_sweeps": args.max_sweeps,
                        "rollup": args.rollup}
                       if args.step == "rake" else {})}

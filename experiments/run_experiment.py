@@ -44,6 +44,27 @@ JSON that differs (other than in ``description``) is refused, so one folder
 always holds one experiment. Every job is given ``PMEDM_VB_DATA`` from the
 JSON's ``data_dir`` (``$USER`` expanded) and refuses to start unless that
 directory holds the assembled inputs (and, under a roll-up, the table trees).
+Every job is also given ``PMEDM_VB_REPO`` and ``PMEDM_VB_ENV``: the clone this
+script runs from and the Python environment running it, so that a job runs
+the code and environment that submitted it, whichever project folder they are in.
+
+Optional keys of the JSON:
+
+- ``area.counties: []`` is the whole state; ``area.tables`` is a table set
+  (``"default"``, ``"all"``) or a list of table IDs
+  (:func:`pmedm_vb.assemble.allcells.table_subset`).
+- ``pumas: "all"`` is every PUMA assembled for the area, so assemble them all
+  before the first call: the list is fixed in the folder's record then.
+- ``heldout: false``: the PUMAs need no held-out tables (nothing is scored).
+- ``vb_device``: the torch device for the VB fits (``"cuda"`` on a GPU node).
+- ``slurm``: ``account`` for every job; ``fits`` and ``hmc``, lists of
+  ``sbatch`` options replacing the stage's defaults; ``gpu_partition``, where
+  GPU jobs are counted against ``--max-gpu-jobs`` (default ``campus-gpu``);
+  ``max_gpu_jobs``, that limit's default for this experiment. With
+  ``vb_device`` other than ``cpu`` the fits jobs count as GPU jobs too.
+
+``--slurm-override`` replaces options of every job a call submits, e.g. to
+send a smoke test to a debug partition without editing the JSON.
 """
 
 from __future__ import annotations
@@ -58,7 +79,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 EXPERIMENTS = REPO / "experiments"
-DEFAULT_ROOT = Path("/lustre/isaac24/proj/UTK0496/pmedm_vb_runs/paper")
+#: Next to the clone: ``/lustre/isaac24/proj/UTK0496/pmedm_vb_runs/paper`` for
+#: the UTK0496 clone, and the same place in another project's folder for its clone.
+DEFAULT_ROOT = REPO.parent / "pmedm_vb_runs" / "paper"
 
 #: Slurm options per stage, on top of each script's header.
 RAKE_SLURM = ["--partition=short", "--qos=short", "--time=01:00:00", "--cpus-per-task=4"]
@@ -75,7 +98,8 @@ GPU_PARTITION = "campus-gpu"
 #: the scoring-only choices (which VB families are also scored truncated, and
 #: the truncation's rule), which leave every fit as it is, and the fits job's
 #: Slurm request (fits_slurm).
-FREE_KEYS = {"description", "vb_truncated", "vb_trunc_share", "vb_trunc_distinct", "fits_slurm"}
+FREE_KEYS = {"description", "vb_truncated", "vb_trunc_share", "vb_trunc_distinct", "fits_slurm",
+             "slurm", "vb_device", "heldout"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -90,8 +114,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--status", action="store_true", help="report what is done; submit nothing")
     parser.add_argument("--dry-run", action="store_true",
                         help="print what would be submitted; write nothing")
-    parser.add_argument("--max-gpu-jobs", type=int, default=6,
-                        help="the user's campus-gpu jobs (queued or running) allowed at once")
+    parser.add_argument("--max-gpu-jobs", type=int, default=None,
+                        help="the user's jobs (queued or running) in the GPU partition allowed "
+                             "at once (default: the JSON's slurm.max_gpu_jobs, else 6)")
+    parser.add_argument("--puma", nargs="+", default=None,
+                        help="only these PUMAs in this call (e.g. one PUMA as a smoke test); "
+                             "the experiment and its seeds are unchanged")
+    parser.add_argument("--slurm-override", default="",
+                        help="sbatch options replacing those of every job this call submits, "
+                             "e.g. '--partition=ai-tenn-debug --qos=ai-tenn-debug --time=01:00:00'")
     return parser.parse_args()
 
 
@@ -117,6 +148,11 @@ def load_experiment(path: Path) -> dict:
     if spec["hmc"] and whiten != "laplace" and whiten not in spec["vb_families"]:
         raise SystemExit(f"{path}: HMC is whitened by the {whiten} VB fit (hmc.whiten); "
                          f"add '{whiten}' to vb_families")
+    if spec["pumas"] == "all":
+        spec["pumas"] = assembled_pumas(spec)
+        if not spec["pumas"]:
+            raise SystemExit(f"{path}: pumas is 'all', but no PUMA is assembled under "
+                             f"{inputs_dir(spec)}; run the assemble step first")
     spec["_grid"] = {"pumas": list(spec["pumas"]), "alphas": list(spec["alphas"])}
     subset = spec.get("subset") or {}
     for key in ("pumas", "alphas"):
@@ -158,6 +194,25 @@ def study_area(area: dict):
     return StudyArea(name=area["name"], state=area.get("state", "47"),
                      counties=tuple(area.get("counties", ["093"])), year=area["year"],
                      span=area["span"])
+
+
+def county_args(area: dict) -> list[str]:
+    """run_map.py's ``--county`` options: ``--county all`` for the whole state."""
+    counties = area.get("counties", ["093"])
+    if not counties:
+        return ["--county", "all"]
+    return [arg for county in counties for arg in ("--county", county)]
+
+
+def inputs_dir(spec: dict) -> Path:
+    """Where the area's assembled PUMAs are."""
+    return data_dir(spec) / "processed" / "inputs" / area_slug(spec["area"])
+
+
+def assembled_pumas(spec: dict) -> list[str]:
+    """Every PUMA assembled for the experiment's area, sorted."""
+    root = inputs_dir(spec)
+    return sorted(d.name for d in root.glob("*") if (d / "manifest.json").exists())
 
 
 def area_slug(area: dict) -> str:
@@ -215,12 +270,13 @@ def model_args(spec: dict) -> list[str]:
 def area_args(spec: dict) -> list[str]:
     """run_map.py's study-area options."""
     area = spec["area"]
+    from pmedm_vb.assemble.allcells import tables_arg
+
     args = ["--name", area["name"], "--state", area.get("state", "47"),
-            "--year", str(area["year"]), "--span", str(area["span"])]
-    for county in area.get("counties", ["093"]):
-        args += ["--county", county]
-    if area.get("tables", "default") != "default":
-        args += ["--tables", area["tables"]]
+            "--year", str(area["year"]), "--span", str(area["span"]), *county_args(area)]
+    tables = tables_arg(area.get("tables", "default"))
+    if tables != "default":
+        args += ["--tables", tables]
     return args
 
 
@@ -267,10 +323,15 @@ def active_jobs(job_ids: list[str]) -> dict[str, str]:
     return dict(line.split() for line in out.splitlines() if line.strip())
 
 
-def gpu_jobs_in_queue() -> int:
+def gpu_partition(spec: dict) -> str:
+    """Where the experiment's GPU jobs run, for counting them (``slurm.gpu_partition``)."""
+    return (spec.get("slurm") or {}).get("gpu_partition", GPU_PARTITION)
+
+
+def gpu_jobs_in_queue(partition: str = GPU_PARTITION) -> int:
     try:
         out = subprocess.run(["squeue", "-h", "-u", os.environ.get("USER", ""), "-p",
-                              GPU_PARTITION], capture_output=True, text=True, timeout=60).stdout
+                              partition], capture_output=True, text=True, timeout=60).stdout
     except (OSError, subprocess.SubprocessError):
         return 0
     return sum(1 for line in out.splitlines() if line.strip())
@@ -288,17 +349,37 @@ def latest_jobs(jobs: list[dict]) -> dict[tuple, dict]:
     return {(job["stage"], job["puma"], job.get("method")): job for job in jobs}
 
 
+def slurm_options(spec: dict, stage: str, default: list[str]) -> list[str]:
+    """The ``sbatch`` options for a stage: the JSON's ``slurm.<stage>`` (or, for the
+    fits, its older ``fits_slurm``) in place of ``default``."""
+    slurm = spec.get("slurm") or {}
+    if stage == "fits" and spec.get("fits_slurm"):
+        default = spec["fits_slurm"]
+    return list(slurm.get(stage) or default)
+
+
+def override(options: list[str], replacements: list[str]) -> list[str]:
+    """``options`` with each ``--key=value`` of ``replacements`` in place of the same key."""
+    keys = {r.split("=", 1)[0] for r in replacements}
+    return [o for o in options if o.split("=", 1)[0] not in keys] + list(replacements)
+
+
 class Submitter:
-    def __init__(self, exp: Path, spec: dict, dry_run: bool):
+    def __init__(self, exp: Path, spec: dict, dry_run: bool, overrides: list[str] | None = None):
         self.exp, self.spec, self.dry_run = exp, spec, dry_run
+        self.overrides = list(overrides or [])
         self.commit = git_commit()
         self.count = 0
 
     def submit(self, stage: str, puma: str, script: str, args: list[str], *,
                slurm: list[str], env: dict[str, str] | None = None,
                after: str | None = None, method: str | None = None) -> str:
-        exports = {"PMEDM_VB_DATA": str(data_dir(self.spec)), **(env or {})}
+        # The jobs run the clone and environment that submit them.
+        exports = {"PMEDM_VB_DATA": str(data_dir(self.spec)), "PMEDM_VB_REPO": str(REPO),
+                   "PMEDM_VB_ENV": sys.prefix, **(env or {})}
         export = "ALL," + ",".join(f"{key}={value}" for key, value in exports.items())
+        account = (self.spec.get("slurm") or {}).get("account")
+        slurm = override([*([f"--account={account}"] if account else []), *slurm], self.overrides)
         command = ["sbatch", "--parsable", f"--export={export}",
                    f"--job-name={self.spec['name']}-{stage}-{puma}" + (f"-{method}" if method else ""),
                    f"--output={self.exp / 'logs' / 'slurm-%j.log'}", *slurm]
@@ -333,20 +414,25 @@ def check_inputs(spec: dict) -> list[str]:
     from pmedm_vb.assemble.allcells import table_set
     from pmedm_vb.assemble.inputs import TREES_FILE
 
-    root = data_dir(spec) / "processed" / "inputs" / area_slug(spec["area"])
+    from pmedm_vb.assemble.allcells import built_tables, table_subset
+
+    root = inputs_dir(spec)
     wanted = spec["area"].get("tables", "default")
+    subset = table_subset(wanted)
     problems = []
     for puma in spec["pumas"]:
         folder = root / puma
         if not (folder / "manifest.json").exists():
             problems.append(f"{folder}: not assembled (run_map.sbatch assemble)")
             continue
-        built = table_set(json.loads((folder / "manifest.json").read_text())["tract_constraints"])
-        if built != wanted:
+        manifest = json.loads((folder / "manifest.json").read_text())
+        names = manifest["tract_constraints"] + manifest["bg_constraints"]
+        built = built_tables(names) if subset is not None else table_set(names)
+        if built != (subset if subset is not None else wanted):
             problems.append(f"{folder}: assembled with the {built!r} tables, the experiment "
                             f"asks for {wanted!r} -- give that set its own area name")
             continue
-        if not (folder / "heldout").exists():
+        if spec.get("heldout", True) and not (folder / "heldout").exists():
             problems.append(f"{folder}/heldout: missing (run_map.sbatch heldout)")
         if spec["model"].get("rollup") and not (folder / TREES_FILE).exists():
             problems.append(f"{folder}/{TREES_FILE}: missing (table_trees.py --write-inputs)")
@@ -397,23 +483,31 @@ def stage_rake(sub: Submitter, spec: dict, exp: Path, puma: str, active: dict) -
         sub.submit("rake", puma, "run_map.sbatch", args, slurm=RAKE_SLURM, method=method)
 
 
-def stage_fits(sub: Submitter, spec: dict, exp: Path, puma: str, active: dict) -> str | None:
+def stage_fits(sub: Submitter, spec: dict, exp: Path, puma: str, active: dict,
+               slots: list[int]) -> str | None:
     """Submit the PUMA's fits unless done or queued; the fits job id when one is live."""
     job = active.get(("fits", puma, None))
     if job:
         return job["job_id"]
     if all(path.exists() for path in fit_outputs(spec, exp, puma)):
         return None
+    on_gpu = bool(spec["vb_families"]) and spec.get("vb_device", "cpu") != "cpu"
+    if on_gpu and slots[0] <= 0:
+        print(f"  fits {puma}: not submitted -- {gpu_partition(spec)} is full; call again later")
+        return None
     args = [spec["area"]["name"], puma, "--state", spec["area"].get("state", "47"),
             "--year", str(spec["area"]["year"]), "--span", str(spec["area"]["span"]),
-            "--alpha", *[f"{alpha:g}" for alpha in spec["alphas"]], *model_args(spec)]
-    for county in spec["area"].get("counties", ["093"]):
-        args += ["--county", county]
-    env = {"OUT_DIR": str(exp / puma), "FAMILIES": " ".join(spec["vb_families"])}
-    # A spec may set its own request (fits_slurm): a small problem need not wait
-    # for a whole campus node.
-    slurm = spec.get("fits_slurm") or (FITS_SLURM if spec["vb_families"] else MAP_SLURM)
-    return sub.submit("fits", puma, "run_map_bundle.sbatch", args, slurm=slurm, env=env)
+            "--alpha", *[f"{alpha:g}" for alpha in spec["alphas"]], *model_args(spec),
+            *county_args(spec["area"])]
+    env = {"OUT_DIR": str(exp / puma), "FAMILIES": " ".join(spec["vb_families"]),
+           "VB_DEVICE": spec.get("vb_device", "cpu")}
+    # A spec may set its own request (slurm.fits, or fits_slurm): a small problem
+    # need not wait for a whole campus node.
+    slurm = slurm_options(spec, "fits", FITS_SLURM if spec["vb_families"] else MAP_SLURM)
+    job = sub.submit("fits", puma, "run_map_bundle.sbatch", args, slurm=slurm, env=env)
+    if on_gpu:
+        slots[0] -= 1
+    return job
 
 
 #: Optional per-kind HMC settings and the run_mcmc.py options they become.
@@ -474,7 +568,7 @@ def stage_hmc(sub: Submitter, spec: dict, exp: Path, puma: str, active: dict,
               "fits job is live")
         return
     if slots[0] <= 0:
-        print(f"  hmc {puma}: not submitted -- {GPU_PARTITION} is full; call again later")
+        print(f"  hmc {puma}: not submitted -- {gpu_partition(spec)} is full; call again later")
         return
     spec_file = exp / puma / "hmc_spec.txt"
     lines = hmc_spec_lines(spec, exp, puma)
@@ -484,8 +578,8 @@ def stage_hmc(sub: Submitter, spec: dict, exp: Path, puma: str, active: dict,
     else:
         spec_file.parent.mkdir(parents=True, exist_ok=True)
         spec_file.write_text("\n".join(lines) + "\n")
-    sub.submit("hmc", puma, "run_mcmc_bundle.sbatch", [str(spec_file)], slurm=HMC_SLURM,
-               after=fits_job)
+    sub.submit("hmc", puma, "run_mcmc_bundle.sbatch", [str(spec_file)],
+               slurm=slurm_options(spec, "hmc", HMC_SLURM), after=fits_job)
     slots[0] -= 1
 
 
@@ -539,8 +633,9 @@ def is_complete(spec: dict, exp: Path) -> bool:
     return True
 
 
-def advance(spec: dict, root: Path, stages=("rake", "fits", "hmc"), max_gpu_jobs: int = 6,
-            dry_run: bool = False) -> int:
+def advance(spec: dict, root: Path, stages=("rake", "fits", "hmc"),
+            max_gpu_jobs: int | None = None, dry_run: bool = False,
+            overrides: list[str] | None = None) -> int:
     """Submit, for every PUMA, whatever is neither finished nor queued or running; the
     number of jobs submitted. A refused ``sbatch`` (a queue limit) ends the call
     early, keeping what was submitted: the next call goes on from there."""
@@ -552,14 +647,16 @@ def advance(spec: dict, root: Path, stages=("rake", "fits", "hmc"), max_gpu_jobs
         if not dry_run:
             return 0
     prepare(exp, spec, dry_run)
-    sub = Submitter(exp, spec, dry_run)
-    slots = [max_gpu_jobs - gpu_jobs_in_queue()]
+    sub = Submitter(exp, spec, dry_run, overrides)
+    if max_gpu_jobs is None:
+        max_gpu_jobs = (spec.get("slurm") or {}).get("max_gpu_jobs", 6)
+    slots = [max_gpu_jobs - gpu_jobs_in_queue(gpu_partition(spec))]
     try:
         for puma in spec["pumas"]:
             print(f"{puma}:")
             if "rake" in stages:
                 stage_rake(sub, spec, exp, puma, active)
-            fits_job = (stage_fits(sub, spec, exp, puma, active) if "fits" in stages
+            fits_job = (stage_fits(sub, spec, exp, puma, active, slots) if "fits" in stages
                         else (active.get(("fits", puma, None)) or {}).get("job_id"))
             if "hmc" in stages and spec["hmc"]:
                 stage_hmc(sub, spec, exp, puma, active, fits_job, slots)
@@ -571,6 +668,11 @@ def advance(spec: dict, root: Path, stages=("rake", "fits", "hmc"), max_gpu_jobs
 def main() -> None:
     args = parse_args()
     spec = load_experiment(args.experiment)
+    if args.puma:
+        unknown = sorted(set(args.puma) - set(spec["pumas"]))
+        if unknown:
+            raise SystemExit(f"--puma {unknown}: not among the experiment's PUMAs")
+        spec["pumas"] = [p for p in spec["pumas"] if p in set(args.puma)]
     exp = args.root / spec["name"]
     if args.status:
         status(spec, exp, active_for(exp))
@@ -578,7 +680,8 @@ def main() -> None:
     if check_inputs(spec) and not args.dry_run:
         print("the data directory is not ready:\n  " + "\n  ".join(check_inputs(spec)))
         raise SystemExit(1)
-    count = advance(spec, args.root, args.stage, args.max_gpu_jobs, args.dry_run)
+    count = advance(spec, args.root, args.stage, args.max_gpu_jobs, args.dry_run,
+                    args.slurm_override.split())
     print(f"{count} job(s) {'would be ' if args.dry_run else ''}submitted; see --status")
 
 

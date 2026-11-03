@@ -71,7 +71,9 @@ from pmedm_vb.assemble.constraints import (
 from pmedm_vb.config import StudyArea
 from pmedm_vb.data.pums import variable_labels
 
-#: The table sets a study area can be assembled with.
+#: The named table sets a study area can be assembled with. A comma-separated
+#: list of table IDs (``"B01001,B25003"``) is also accepted: the default set
+#: narrowed to those tables (:func:`table_subset`).
 TABLE_SETS = ("default", "all")
 
 #: A subtotal's name ends in this, as its published title does.
@@ -97,6 +99,34 @@ def table_set(names: list[str]) -> str:
     """Which :data:`TABLE_SETS` member built these constraint names: only the
     all-cell set has subtotals."""
     return "all" if any(is_subtotal(n) for n in names) else "default"
+
+
+def table_subset(tables) -> tuple[str, ...] | None:
+    """The table IDs of a subset spec, or ``None`` for a named set.
+
+    ``tables`` is a :data:`TABLE_SETS` name, a comma-separated string of table
+    IDs (``"B01001,B25003"``, as ``run_map.py --tables`` takes it) or a list of
+    them (as an experiment JSON may give it). IDs come back sorted.
+    """
+    if isinstance(tables, str):
+        if tables in TABLE_SETS:
+            return None
+        tables = tables.split(",")
+    ids = tuple(sorted({t.strip() for t in tables if t.strip()}))
+    if not ids:
+        raise ValueError("an empty table subset")
+    return ids
+
+
+def tables_arg(tables) -> str:
+    """``tables`` as ``run_map.py --tables`` takes it: a set name, or IDs joined by commas."""
+    ids = table_subset(tables)
+    return tables if ids is None else ",".join(ids)
+
+
+def built_tables(names: list[str]) -> tuple[str, ...]:
+    """The table IDs behind constraint names (``"{table}.{category}"``), sorted."""
+    return tuple(sorted({name.split(".", 1)[0] for name in names}))
 
 
 @dataclass(frozen=True)
@@ -776,20 +806,31 @@ def all_heldout_tables(area: StudyArea, geography: str) -> list[ConstraintTable]
 # -- choosing a set ------------------------------------------------------------
 
 
-def constraint_tables(area: StudyArea, tables: str = "default") -> list[ConstraintTable]:
-    """The constraint set named by ``tables`` (:data:`TABLE_SETS`)."""
-    from pmedm_vb.assemble.constraints import default_tables
+def constraint_tables(area: StudyArea, tables="default") -> list[ConstraintTable]:
+    """The constraint set named by ``tables``: a :data:`TABLE_SETS` member, or
+    table IDs (:func:`table_subset`) picking those tables from the default set,
+    at every level the default set constrains them."""
+    from pmedm_vb.assemble.constraints import default_table_ids, default_tables
 
+    ids = table_subset(tables)
+    if ids is not None:
+        missing = sorted(set(ids) - set(default_table_ids()))
+        if missing:
+            raise ValueError(f"tables {missing} are not in the default set")
+        return default_tables(area, only=ids)
     if tables not in TABLE_SETS:
-        raise ValueError(f"tables must be one of {TABLE_SETS}, got {tables!r}")
+        raise ValueError(f"tables must be one of {TABLE_SETS} or table IDs, got {tables!r}")
     return default_tables(area) if tables == "default" else all_tables(area)
 
 
-def heldout_set(area: StudyArea, geography: str, tables: str = "default") -> list[ConstraintTable]:
-    """The held-out set named by ``tables`` at one geography."""
+def heldout_set(area: StudyArea, geography: str, tables="default") -> list[ConstraintTable]:
+    """The held-out set for ``tables`` at one geography: a subset of the
+    default set is held out against the default held-out tables."""
     from pmedm_vb.assemble.constraints import heldout_tables
 
+    if table_subset(tables) is not None:
+        tables = "default"
     if tables not in TABLE_SETS:
-        raise ValueError(f"tables must be one of {TABLE_SETS}, got {tables!r}")
+        raise ValueError(f"tables must be one of {TABLE_SETS} or table IDs, got {tables!r}")
     return heldout_tables(area, geography) if tables == "default" else all_heldout_tables(
         area, geography)

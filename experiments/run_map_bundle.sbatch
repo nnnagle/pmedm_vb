@@ -30,21 +30,25 @@
 # the end if any step did. --draws defaults to 64 here, as in the grid.
 # FAMILIES (environment) picks the VB families, default "gaussian skewed
 # sumdiff"; e.g. sbatch --export=ALL,FAMILIES="gaussian skewed" ... (sumdiff
-# does not run under --collapse).
+# does not run under --collapse). VB_DEVICE (environment, default cpu) is the
+# torch device for the VB fits, e.g. VB_DEVICE=cuda on a GPU node; the MAP
+# solves stay on the CPU.
 
 set -eo pipefail
 NAME=${1:?usage: sbatch run_map_bundle.sbatch NAME PUMA [options]}
 PUMA=${2:?usage: sbatch run_map_bundle.sbatch NAME PUMA [options]}
 shift 2
 
-REPO=/lustre/isaac24/proj/UTK0496/pmedm_vb
-RUNS=/lustre/isaac24/proj/UTK0496/pmedm_vb_runs
+# PMEDM_VB_REPO, PMEDM_VB_RUNS and PMEDM_VB_ENV (environment) replace the UTK0496 defaults.
+REPO=${PMEDM_VB_REPO:-/lustre/isaac24/proj/UTK0496/pmedm_vb}
+RUNS=${PMEDM_VB_RUNS:-/lustre/isaac24/proj/UTK0496/pmedm_vb_runs}
 # OUT_DIR (environment) replaces the default results directory.
 OUT=${OUT_DIR:-$RUNS/${SLURM_JOB_ID}}
 
 module purge
+unset PYTHONPATH  # a login profile's PYTHONPATH would shadow the environment's packages
 source /sw/isaac/applications/anaconda3/2024.06/rhel8_cascadelake_binary/anaconda3-2024.06/etc/profile.d/conda.sh
-conda activate /lustre/isaac24/proj/UTK0496/envs/pmedm_vb
+conda activate "${PMEDM_VB_ENV:-/lustre/isaac24/proj/UTK0496/envs/pmedm_vb}"
 set -u
 # A caller (experiments/run_experiment.py) may point the job at another data directory.
 export PMEDM_VB_DATA=${PMEDM_VB_DATA:-/lustre/isaac24/scratch/$USER/pmedm_vb_data}
@@ -66,9 +70,14 @@ cd "$REPO"
 CORES=${SLURM_CPUS_PER_TASK}
 # FAMILIES unset: the default families; set but empty: the MAP alone.
 read -r -a FAMS <<< "${FAMILIES-gaussian skewed sumdiff}"
+DEVICE=${VB_DEVICE:-cpu}
 PER=$((CORES / (${#FAMS[@]} > 0 ? ${#FAMS[@]} : 1)))
 echo "node $(hostname), $CORES cores ($PER per VB family: ${FAMS[*]}), commit $(git rev-parse --short HEAD), $(date)"
-echo "name $NAME, puma $PUMA, options: $*"
+echo "name $NAME, puma $PUMA, VB device $DEVICE, options: $*"
+if [ "$DEVICE" != cpu ]; then
+    nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+    $PY -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)"
+fi
 
 failed=0
 if $PY -u experiments/run_map.py solve --name "$NAME" --puma "$PUMA" --cores "$CORES" \
@@ -81,7 +90,7 @@ fi
 pids=()
 for family in "${FAMS[@]}"; do
     $PY -u experiments/run_map.py vb --name "$NAME" --puma "$PUMA" --cores "$PER" \
-        --family "$family" --draws 64 --out "$OUT/vb_$family" "$@" \
+        --family "$family" --draws 64 --device "$DEVICE" --out "$OUT/vb_$family" "$@" \
         > "$OUT/vb_$family.log" 2>&1 &
     pids+=($!)
 done

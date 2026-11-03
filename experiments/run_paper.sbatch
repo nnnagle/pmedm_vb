@@ -20,11 +20,13 @@
 # A pass that needs attention exits non-zero, which mails the failure.
 
 set -eo pipefail
-REPO=/lustre/isaac24/proj/UTK0496/pmedm_vb
+# PMEDM_VB_REPO, PMEDM_VB_RUNS and PMEDM_VB_ENV (environment) replace the UTK0496 defaults.
+REPO=${PMEDM_VB_REPO:-/lustre/isaac24/proj/UTK0496/pmedm_vb}
 
 module purge
+unset PYTHONPATH  # a login profile's PYTHONPATH would shadow the environment's packages
 source /sw/isaac/applications/anaconda3/2024.06/rhel8_cascadelake_binary/anaconda3-2024.06/etc/profile.d/conda.sh
-conda activate /lustre/isaac24/proj/UTK0496/envs/pmedm_vb
+conda activate "${PMEDM_VB_ENV:-/lustre/isaac24/proj/UTK0496/envs/pmedm_vb}"
 set -u
 export PMEDM_VB_OFFLINE=1
 

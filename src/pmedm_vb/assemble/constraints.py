@@ -989,19 +989,42 @@ def employment_status(
     )
 
 
-def core_tables(area: StudyArea, geography: str) -> list[ConstraintTable]:
-    """The six tables published at both tract and block group."""
-    return [
-        age_sex(geography=geography),
-        race_ethnicity(geography=geography),
-        means_of_transportation(geography=geography),
-        household_income(geography=geography),
-        tenure(geography=geography),
-        sex_by_occupation(area, geography=geography),
+def core_tables(area: StudyArea, geography: str, only=None) -> list[ConstraintTable]:
+    """The six tables published at both tract and block group; with ``only``
+    (table IDs), just those of them, the others not built."""
+    builders = [
+        ("B01001", lambda: age_sex(geography=geography)),
+        ("B03002", lambda: race_ethnicity(geography=geography)),
+        ("B08301", lambda: means_of_transportation(geography=geography)),
+        ("B19001", lambda: household_income(geography=geography)),
+        ("B25003", lambda: tenure(geography=geography)),
+        ("C24010", lambda: sex_by_occupation(area, geography=geography)),
     ]
+    return _build(builders, only)
 
 
-def default_tables(area: StudyArea) -> list[ConstraintTable]:
+#: The tract-only tables of the default set, by table ID.
+TRACT_ONLY_TABLES = ("B26001", "B17024", "B23001")
+
+
+def _build(builders, only) -> list[ConstraintTable]:
+    """Build each ``(table ID, builder)`` whose ID is in ``only`` (all when ``None``)."""
+    tables = []
+    for table_id, build in builders:
+        if only is None or table_id in only:
+            table = build()
+            assert table.table == table_id, (table.table, table_id)
+            tables.append(table)
+    return tables
+
+
+def default_table_ids() -> tuple[str, ...]:
+    """Every table ID of :func:`default_tables`, without building any."""
+    core = ("B01001", "B03002", "B08301", "B19001", "B25003", "C24010")
+    return core + TRACT_ONLY_TABLES
+
+
+def default_tables(area: StudyArea, only=None) -> list[ConstraintTable]:
     """The settled constraint set: core six at both levels, plus tract-only.
 
     The core tables are constrained at both levels with the same categories.
@@ -1018,13 +1041,21 @@ def default_tables(area: StudyArea) -> list[ConstraintTable]:
     The three tract-only tables add what block group cannot carry at all:
     group quarters population, income depth below the household income bands,
     and employment status alongside occupation.
+
+    With ``only`` (table IDs), just those tables, at every level this set
+    constrains them; the others are not built (``sex_by_occupation`` reads the
+    PUMS data dictionary).
     """
+    tract_only = [
+        ("B26001", lambda: group_quarters(geography="tract")),
+        ("B17024", lambda: poverty_by_age(geography="tract")),
+        ("B23001", lambda: employment_status(geography="tract")),
+    ]
+    assert tuple(t for t, _ in tract_only) == TRACT_ONLY_TABLES
     return [
-        *core_tables(area, "block group"),
-        *core_tables(area, "tract"),
-        group_quarters(geography="tract"),
-        poverty_by_age(geography="tract"),
-        employment_status(geography="tract"),
+        *core_tables(area, "block group", only),
+        *core_tables(area, "tract", only),
+        *_build(tract_only, only),
     ]
 
 

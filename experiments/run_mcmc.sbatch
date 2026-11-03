@@ -35,8 +35,9 @@
 # -u only after conda activates; see run_map.sbatch.
 set -eo pipefail
 
-REPO=/lustre/isaac24/proj/UTK0496/pmedm_vb
-RUNS=/lustre/isaac24/proj/UTK0496/pmedm_vb_runs
+# PMEDM_VB_REPO, PMEDM_VB_RUNS and PMEDM_VB_ENV (environment) replace the UTK0496 defaults.
+REPO=${PMEDM_VB_REPO:-/lustre/isaac24/proj/UTK0496/pmedm_vb}
+RUNS=${PMEDM_VB_RUNS:-/lustre/isaac24/proj/UTK0496/pmedm_vb_runs}
 # An --out among the arguments (resuming an earlier job) replaces the default.
 OUT=""
 args=("$@")
@@ -49,8 +50,9 @@ if [ -z "$OUT" ]; then
 fi
 
 module purge
+unset PYTHONPATH  # a login profile's PYTHONPATH would shadow the environment's packages
 source /sw/isaac/applications/anaconda3/2024.06/rhel8_cascadelake_binary/anaconda3-2024.06/etc/profile.d/conda.sh
-conda activate /lustre/isaac24/proj/UTK0496/envs/pmedm_vb
+conda activate "${PMEDM_VB_ENV:-/lustre/isaac24/proj/UTK0496/envs/pmedm_vb}"
 set -u
 export PMEDM_VB_DATA=${PMEDM_VB_DATA:-/lustre/isaac24/scratch/$USER/pmedm_vb_data}
 export PMEDM_VB_OFFLINE=1

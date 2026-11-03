@@ -1,0 +1,52 @@
+{
+  "name": "tn01_gpu",
+  "description": "Tennessee, every PUMA, five tables; VB Gaussian on an ai-tenn GPU, then a short HMC whitened by it. Alpha 0.01, PUMA rows, untapered Sigma, zero-count variance floor.",
+  "area": {
+    "name": "tennessee-5t",
+    "state": "47",
+    "counties": [],
+    "year": 2024,
+    "span": 5,
+    "tables": ["B01001", "B03002", "B19001", "B25003", "B26001"]
+  },
+  "pumas": "all",
+  "alphas": [
+    0.01
+  ],
+  "data_dir": "/lustre/isaac24/scratch/$USER/pmedm_vb_paper_data",
+  "heldout": false,
+  "model": {
+    "taper": "none",
+    "variance_floor": "zero",
+    "hierarchy": "puma",
+    "rollup": null,
+    "share_cap": null,
+    "cap_strength": null
+  },
+  "rake": [],
+  "vb_families": [
+    "gaussian"
+  ],
+  "vb_device": "cuda",
+  "hmc": {
+    "whiten": "gaussian",
+    "kinds": ["short"],
+    "trajectory": 3.0,
+    "chains": 32,
+    "short": {
+      "warmup": 200,
+      "samples": 1000,
+      "thin": 10,
+      "seed": 2000
+    }
+  },
+  "slurm": {
+    "account": "isaac-utk0533",
+    "gpu_partition": "ai-tenn",
+    "max_gpu_jobs": 50,
+    "fits": ["--partition=ai-tenn", "--qos=ai-tenn", "--gpus=1", "--cpus-per-task=16",
+             "--mem=64G", "--time=06:00:00"],
+    "hmc": ["--partition=ai-tenn", "--qos=ai-tenn", "--gpus=1", "--cpus-per-task=4",
+            "--mem=32G", "--time=06:00:00"]
+  }
+}
