@@ -63,6 +63,13 @@ Optional keys of the JSON:
   ``max_gpu_jobs``, that limit's default for this experiment. With
   ``vb_device`` other than ``cpu`` the fits jobs count as GPU jobs too.
 
+- ``bundle``: ``{"jobs": k}`` runs the unfinished PUMAs in ``k`` jobs of
+  ``run_puma_bundle.sbatch`` in place of a fits job and an HMC job per PUMA:
+  each job fits and samples its PUMAs one per GPU at a time
+  (``experiments/run_puma_bundle.py``), with ``slurm.bundle``'s ``sbatch``
+  options (``--gpus=4`` for a whole node). A PUMA in a live bundle job is
+  not submitted again; one whose bundle ended unfinished is, by the next call.
+
 ``--slurm-override`` replaces options of every job a call submits, e.g. to
 send a smoke test to a debug partition without editing the JSON.
 """
@@ -99,7 +106,7 @@ GPU_PARTITION = "campus-gpu"
 #: the truncation's rule), which leave every fit as it is, and the fits job's
 #: Slurm request (fits_slurm).
 FREE_KEYS = {"description", "vb_truncated", "vb_trunc_share", "vb_trunc_distinct", "fits_slurm",
-             "slurm", "vb_device", "heldout"}
+             "slurm", "vb_device", "heldout", "bundle"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -110,7 +117,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT,
                         help=f"folder holding the experiment folders (default {DEFAULT_ROOT})")
     parser.add_argument("--stage", nargs="+", choices=["rake", "fits", "hmc"],
-                        default=["rake", "fits", "hmc"])
+                        default=["rake", "fits", "hmc"],
+                        help="with a bundle block, fits and hmc are run together as bundles")
     parser.add_argument("--status", action="store_true", help="report what is done; submit nothing")
     parser.add_argument("--dry-run", action="store_true",
                         help="print what would be submitted; write nothing")
@@ -373,7 +381,8 @@ class Submitter:
 
     def submit(self, stage: str, puma: str, script: str, args: list[str], *,
                slurm: list[str], env: dict[str, str] | None = None,
-               after: str | None = None, method: str | None = None) -> str:
+               after: str | None = None, method: str | None = None,
+               extra: dict | None = None) -> str:
         # The jobs run the clone and environment that submit them.
         exports = {"PMEDM_VB_DATA": str(data_dir(self.spec)), "PMEDM_VB_REPO": str(REPO),
                    "PMEDM_VB_ENV": sys.prefix, **(env or {})}
@@ -398,7 +407,7 @@ class Submitter:
         job_id = result.stdout.strip().split(";")[0]
         record = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "job_id": job_id,
                   "stage": stage, "puma": puma, "method": method, "after": after,
-                  "commit": self.commit, "command": command}
+                  "commit": self.commit, "command": command, **(extra or {})}
         with open(self.exp / "jobs.jsonl", "a") as handle:
             handle.write(json.dumps(record) + "\n")
         print(f"  submitted {job_id}: {stage} {puma}" + (f" {method}" if method else "")
@@ -483,6 +492,14 @@ def stage_rake(sub: Submitter, spec: dict, exp: Path, puma: str, active: dict) -
         sub.submit("rake", puma, "run_map.sbatch", args, slurm=RAKE_SLURM, method=method)
 
 
+def fits_args(spec: dict) -> list[str]:
+    """run_map.py's options for a PUMA's fits, after its name and PUMA."""
+    return ["--state", spec["area"].get("state", "47"), "--year", str(spec["area"]["year"]),
+            "--span", str(spec["area"]["span"]),
+            "--alpha", *[f"{alpha:g}" for alpha in spec["alphas"]], *model_args(spec),
+            *county_args(spec["area"])]
+
+
 def stage_fits(sub: Submitter, spec: dict, exp: Path, puma: str, active: dict,
                slots: list[int]) -> str | None:
     """Submit the PUMA's fits unless done or queued; the fits job id when one is live."""
@@ -495,10 +512,7 @@ def stage_fits(sub: Submitter, spec: dict, exp: Path, puma: str, active: dict,
     if on_gpu and slots[0] <= 0:
         print(f"  fits {puma}: not submitted -- {gpu_partition(spec)} is full; call again later")
         return None
-    args = [spec["area"]["name"], puma, "--state", spec["area"].get("state", "47"),
-            "--year", str(spec["area"]["year"]), "--span", str(spec["area"]["span"]),
-            "--alpha", *[f"{alpha:g}" for alpha in spec["alphas"]], *model_args(spec),
-            *county_args(spec["area"])]
+    args = [spec["area"]["name"], puma, *fits_args(spec)]
     env = {"OUT_DIR": str(exp / puma), "FAMILIES": " ".join(spec["vb_families"]),
            "VB_DEVICE": spec.get("vb_device", "cpu")}
     # A spec may set its own request (slurm.fits, or fits_slurm): a small problem
@@ -528,11 +542,16 @@ def whitening_folder(spec: dict) -> str:
 
 
 def hmc_spec_lines(spec: dict, exp: Path, puma: str) -> list[str]:
-    """One run_mcmc_bundle.sbatch line per HMC run. Each kind's settings may set
+    """One run_mcmc_bundle.sbatch line per HMC run."""
+    return [" ".join([str(out), *args]) for out, args in hmc_run_args(spec, exp, puma)]
+
+
+def hmc_run_args(spec: dict, exp: Path, puma: str) -> list[tuple[Path, list[str]]]:
+    """``(out, run_mcmc.py options)`` per HMC run. Each kind's settings may set
     its own ``chains`` and any of :data:`HMC_OPTIONS`; ``adapt_diag: true``
     learns the diagonal in warmup."""
     hmc = spec["hmc"]
-    lines = []
+    runs = []
     for kind, alpha, out in hmc_runs(spec, exp, puma):
         settings = hmc[kind]
         full = grid(spec)
@@ -551,8 +570,8 @@ def hmc_spec_lines(spec: dict, exp: Path, puma: str) -> list[str]:
                          else str(settings[key])]
         if settings.get("adapt_diag"):
             args.append("--adapt-diag")
-        lines.append(" ".join([str(out), *args]))
-    return lines
+        runs.append((out, args))
+    return runs
 
 
 def stage_hmc(sub: Submitter, spec: dict, exp: Path, puma: str, active: dict,
@@ -583,13 +602,74 @@ def stage_hmc(sub: Submitter, spec: dict, exp: Path, puma: str, active: dict,
     slots[0] -= 1
 
 
+def puma_complete(spec: dict, exp: Path, puma: str) -> bool:
+    """Whether the PUMA's fits and HMC reports all exist."""
+    paths = fit_outputs(spec, exp, puma) + (hmc_outputs(spec, exp, puma) if spec["hmc"] else [])
+    return all(path.exists() for path in paths)
+
+
+def bundled(active: dict) -> dict[str, dict]:
+    """``{puma: job}`` for every PUMA in a live bundle job."""
+    return {puma: job for key, job in active.items() if key[0] == "bundle"
+            for puma in job.get("pumas", [])}
+
+
+def stage_bundle(sub: Submitter, spec: dict, exp: Path, active: dict, slots: list[int]) -> None:
+    """Submit the unfinished PUMAs that no live bundle job holds, split over
+    ``bundle.jobs`` jobs of run_puma_bundle.sbatch."""
+    live = bundled(active)
+    todo = [p for p in spec["pumas"] if p not in live and not puma_complete(spec, exp, p)]
+    if live:
+        print(f"bundles: {len(live)} PUMA(s) in live job(s) "
+              f"{', '.join(sorted({job['job_id'] for job in live.values()}))}")
+    if not todo:
+        print("bundles: nothing to submit")
+        return
+    jobs = max(1, min(int(spec["bundle"].get("jobs", 1)), len(todo)))
+    groups = [todo[k::jobs] for k in range(jobs)]
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for k, group in enumerate(groups):
+        if slots[0] <= 0:
+            print(f"bundles: {gpu_partition(spec)} is full; {len(groups) - k} job(s) wait "
+                  "for a later call")
+            return
+        items = []
+        for puma in group:
+            items.append({
+                "puma": puma, "out": str(exp / puma),
+                "fit_outputs": [str(path) for path in fit_outputs(spec, exp, puma)],
+                "hmc": [{"out": str(out), "args": args, "report": str(report)}
+                        for (out, args), report in zip(hmc_run_args(spec, exp, puma),
+                                                       hmc_outputs(spec, exp, puma))]
+                       if spec["hmc"] else [],
+            })
+        bundle = {"name": spec["area"]["name"], "fits_args": fits_args(spec),
+                  "families": spec["vb_families"], "draws": 64,
+                  "device": spec.get("vb_device", "cpu"), "pumas": items}
+        path = exp / "bundles" / f"bundle-{stamp}-{k + 1}.json"
+        print(f"bundle {k + 1}/{jobs}: {len(group)} PUMA(s) {' '.join(group)}")
+        if sub.dry_run:
+            print(f"  would write {path}")
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(bundle, indent=2) + "\n")
+        sub.submit("bundle", f"{stamp}-{k + 1}", "run_puma_bundle.sbatch", [str(path)],
+                   slurm=slurm_options(spec, "bundle", FITS_SLURM), extra={"pumas": group})
+        slots[0] -= 1
+
+
 # -- status -------------------------------------------------------------------
 
 
 def status(spec: dict, exp: Path, active: dict) -> None:
     print(f"{exp}  (level {level(spec)})")
+    live = bundled(active)
+    if spec.get("bundle"):
+        done = sum(puma_complete(spec, exp, p) for p in spec["pumas"])
+        print(f"  {done} of {len(spec['pumas'])} PUMA(s) complete; {len(live)} in live bundle job(s)")
     for puma in spec["pumas"]:
-        print(f"  {puma}")
+        print(f"  {puma}" + (f"  (bundle job {live[puma]['job_id']} {live[puma]['state'].lower()})"
+                             if puma in live else ""))
         for method in spec["rake"]:
             done = rake_output(spec, exp, puma, method).exists()
             print(f"    {method:<12} {'done' if done else live(active, ('rake', puma, method))}")
@@ -652,6 +732,13 @@ def advance(spec: dict, root: Path, stages=("rake", "fits", "hmc"),
         max_gpu_jobs = (spec.get("slurm") or {}).get("max_gpu_jobs", 6)
     slots = [max_gpu_jobs - gpu_jobs_in_queue(gpu_partition(spec))]
     try:
+        if spec.get("bundle"):
+            if "rake" in stages and spec["rake"]:
+                for puma in spec["pumas"]:
+                    stage_rake(sub, spec, exp, puma, active)
+            if "fits" in stages or "hmc" in stages:
+                stage_bundle(sub, spec, exp, active, slots)
+            return sub.count
         for puma in spec["pumas"]:
             print(f"{puma}:")
             if "rake" in stages:
