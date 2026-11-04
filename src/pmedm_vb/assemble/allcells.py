@@ -61,6 +61,7 @@ from pmedm_vb.assemble.constraints import (
     INDP_TO_C24030_CELL,
     NOT_HISPANIC,
     OCCP_TO_MAJOR_GROUP,
+    RACE_POVERTY_TABLES,
     RAC1P_TO_RACE,
     SEX_CODES,
     TEN_TO_TENURE,
@@ -790,7 +791,8 @@ def heating_fuel(geography: str = "block group") -> ConstraintTable:
 
 
 def all_heldout_tables(area: StudyArea, geography: str) -> list[ConstraintTable]:
-    """The held-out tables at one geography, every cell (:data:`HELDOUT_RELATION`)."""
+    """The held-out tables at one geography, every cell (:data:`HELDOUT_RELATION`,
+    less the race-iterated ``B17010`` tables a table subset adds at tract)."""
     tables = [
         tenure_by_vehicles(geography),
         poverty_ratio(geography),
@@ -799,7 +801,7 @@ def all_heldout_tables(area: StudyArea, geography: str) -> list[ConstraintTable]
         educational_attainment(geography),
         heating_fuel(geography),
     ]
-    assert {t.table for t in tables} == set(HELDOUT_RELATION)
+    assert {t.table for t in tables} == set(HELDOUT_RELATION) - set(RACE_POVERTY_TABLES)
     return tables
 
 
@@ -825,11 +827,17 @@ def constraint_tables(area: StudyArea, tables="default") -> list[ConstraintTable
 
 def heldout_set(area: StudyArea, geography: str, tables="default") -> list[ConstraintTable]:
     """The held-out set for ``tables`` at one geography: a subset of the
-    default set is held out against the default held-out tables."""
-    from pmedm_vb.assemble.constraints import heldout_tables
+    default set is held out against the default held-out tables, and at tract
+    also against ``B17010A``-``I``, families below and at or above poverty by
+    race and Hispanic origin of the householder
+    (:func:`~pmedm_vb.assemble.constraints.race_poverty_tables`), which score
+    the race by poverty joint no fitted table carries. They are published with
+    replicates at tract only. The named sets' held-out tables are unchanged."""
+    from pmedm_vb.assemble.constraints import heldout_tables, race_poverty_tables
 
     if table_subset(tables) is not None:
-        tables = "default"
+        extra = race_poverty_tables(area, geography) if geography == "tract" else []
+        return [*heldout_tables(area, geography), *extra]
     if tables not in TABLE_SETS:
         raise ValueError(f"tables must be one of {TABLE_SETS} or table IDs, got {tables!r}")
     return heldout_tables(area, geography) if tables == "default" else all_heldout_tables(

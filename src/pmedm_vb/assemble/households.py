@@ -34,6 +34,9 @@ import numpy as np
 import pandas as pd
 
 from pmedm_vb.assemble.constraints import (
+    HOUSEHOLDER_PREFIX,
+    REFERENCE_PERSON,
+    RELATIONSHIP,
     ConstraintTable,
     TYPEHUGQ_GROUP_QUARTERS,
     required_variables,
@@ -58,8 +61,10 @@ class Units:
     ----------
     units:
         One row per unit, indexed by ``SERIALNO``, carrying ``weight`` (from
-        ``WGTP`` or ``PWGTP`` as appropriate), ``is_group_quarters``, and every
-        household-universe variable the constraints declared.
+        ``WGTP`` or ``PWGTP`` as appropriate), ``is_group_quarters``, every
+        household-universe variable the constraints declared, and the
+        householder's person variables any of them declared
+        (``householder_<VAR>``; null for group quarters).
     persons:
         Person records for those units only, with ``SERIALNO`` to aggregate on.
         Includes the single occupant of each GQ unit, so person-level
@@ -194,11 +199,46 @@ def build_units(
         pd.to_numeric(units[WEIGHT_PREFIXES["housing"]], errors="coerce").to_numpy(),
     )
 
+    carried = sorted({v for table in tables for v in table.householder})
+    if carried:
+        attach_householder(units, persons, carried, label)
+
     frame = Units(
         units=units, persons=persons, puma="state" if puma is None else str(puma), dropped_persons=dropped
     )
     frame.validate()
     return frame
+
+
+def attach_householder(
+    units: pd.DataFrame, persons: pd.DataFrame, variables: Sequence[str], label: str
+) -> None:
+    """Copy the householder's ``variables`` onto ``units`` as ``householder_<VAR>``.
+
+    The householder is the person record with ``RELSHIPP`` equal to
+    :data:`~pmedm_vb.assemble.constraints.REFERENCE_PERSON`. Every occupied
+    housing unit must have exactly one, which is checked; a group-quarters
+    unit has none (its occupant's ``RELSHIPP`` is a group-quarters code), and
+    its columns are null.
+
+    Raises
+    ------
+    ValueError
+        If an occupied housing unit has no householder record, or more than one.
+    """
+    relation = pd.to_numeric(persons[RELATIONSHIP], errors="coerce")
+    heads = persons[relation == REFERENCE_PERSON]
+    housing = units.index[~units["is_group_quarters"].to_numpy()]
+    count = heads.groupby("SERIALNO").size().reindex(housing, fill_value=0)
+    if not (count == 1).all():
+        raise ValueError(
+            f"{int((count == 0).sum())} occupied housing unit(s) in {label} have no "
+            f"householder record ({RELATIONSHIP} == {REFERENCE_PERSON}) and "
+            f"{int((count > 1).sum())} have more than one"
+        )
+    heads = heads[heads["SERIALNO"].isin(set(housing))].set_index("SERIALNO")
+    for variable in variables:
+        units[f"{HOUSEHOLDER_PREFIX}{variable}"] = heads[variable].reindex(units.index)
 
 
 def person_counts(

@@ -35,13 +35,15 @@ and a ``b`` code means the published field is blank, so it is tested with
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
+import numpy as np
 import pandas as pd
 
 from pmedm_vb.config import StudyArea
 from pmedm_vb.data.pums import variable_labels
 from pmedm_vb.data.summary import cell_labels
+from pmedm_vb.data.variance import REPLICATE_COLUMNS, fetch_replicates
 
 #: Universes a constraint table can be defined over, and which frame its
 #: selector is applied to.
@@ -92,11 +94,22 @@ class ConstraintTable:
     #: are distinguishable. A table total is the usual entry: including it
     #: alongside its parts makes ``X`` rank-deficient.
     waived: tuple[str, ...] = ()
+    #: Person variables of the unit's *householder* that the selectors of a
+    #: household-universe table read. They come from the person file and are
+    #: carried onto the unit frame as ``householder_<VAR>`` columns
+    #: (:data:`HOUSEHOLDER_PREFIX`, by
+    #: :func:`pmedm_vb.assemble.households.build_units`), null for a
+    #: group-quarters unit, which has no householder.
+    householder: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.universe not in UNIVERSES:
             raise ValueError(
                 f"universe must be one of {UNIVERSES}, got {self.universe!r}"
+            )
+        if self.householder and self.universe != "household":
+            raise ValueError(
+                f"{self.table}: householder variables need the household universe"
             )
 
     @property
@@ -1064,11 +1077,14 @@ def required_variables(tables: Sequence[ConstraintTable]) -> dict[str, tuple[str
 
     What :mod:`pmedm_vb.assemble.households` loads. Person-universe tables read
     the person file, unit-universe tables the housing file, and a column needed
-    by both is loaded from both.
+    by both is loaded from both. A table's ``householder`` variables, and
+    :data:`RELATIONSHIP` to find the householder, are read from the person file.
     """
     needed: dict[str, set[str]] = {universe: set() for universe in UNIVERSES}
     for table in tables:
         needed[table.universe].update(table.variables)
+        if table.householder:
+            needed["person"].update((*table.householder, RELATIONSHIP))
     return {universe: tuple(sorted(columns)) for universe, columns in needed.items()}
 
 
@@ -1401,7 +1417,201 @@ def heating_fuel(geography: str = "block group") -> ConstraintTable:
     )
 
 
-#: Held-out tables by how closely they relate to the constrained variables.
+# --------------------------------------------------------------------------
+# Race-iterated family poverty: B17010A-I, held out at tract only
+#
+# Held out for a table *subset* (see allcells.heldout_set), to score the race
+# by poverty joint structure that none of the fitted tables carries. Not in
+# the default held-out set, nor in anything the paper pipeline builds.
+# --------------------------------------------------------------------------
+
+#: ``RELSHIPP`` (2019 and later PUMS), relationship to the reference person,
+#: and its code for the reference person -- the householder, whose record
+#: carries the attributes a family is classified by. Compared as a number, so
+#: the test holds whether the data dictionary declares the column character
+#: or numeric.
+RELATIONSHIP = "RELSHIPP"
+REFERENCE_PERSON = 20
+
+#: Prefix of the householder's person variables on the unit frame.
+HOUSEHOLDER_PREFIX = "householder_"
+
+#: ``HHT`` codes of a family household: married couple (1), other family with
+#: a male (2) or female (3) householder and no spouse present. 4-7 are
+#: nonfamily households; blank is group quarters or vacant. Compared as
+#: numbers, for the reason given on :data:`RELATIONSHIP`.
+HHT_FAMILY = (1, 2, 3)
+
+#: ``B17010``'s race iterations: table suffix to ``(label, RAC1P codes,
+#: Hispanic)`` for the householder. ``None`` codes mean any race; Hispanic is
+#: ``None`` for either origin, ``False`` for not Hispanic (``HISP == "01"``),
+#: ``True`` for Hispanic. The race codes are :data:`RAC1P_TO_RACE`'s and the
+#: origin :data:`NOT_HISPANIC`, as in :func:`race_ethnicity`, so "AIAN alone"
+#: is again the three ``RAC1P`` codes 3-5.
+B17010_ITERATIONS = {
+    "A": ("white", RAC1P_TO_RACE["white"], None),
+    "B": ("black", RAC1P_TO_RACE["black"], None),
+    "C": ("aian", RAC1P_TO_RACE["aian"], None),
+    "D": ("asian", RAC1P_TO_RACE["asian"], None),
+    "E": ("nhpi", RAC1P_TO_RACE["nhpi"], None),
+    "F": ("other_race", RAC1P_TO_RACE["other_race"], None),
+    "G": ("two_or_more", RAC1P_TO_RACE["two_or_more"], None),
+    "H": ("nh_white", RAC1P_TO_RACE["white"], False),
+    "I": ("hispanic", None, True),
+}
+
+#: The race-iterated tables' IDs, ``B17010A`` .. ``B17010I``.
+RACE_POVERTY_TABLES = tuple(f"B17010{suffix}" for suffix in B17010_ITERATIONS)
+
+#: The two published lines each table is collapsed to, found by title: a
+#: regular expression on the normalised title (lower case, whitespace
+#: collapsed, trailing colon dropped). And the total they must add up to.
+B17010_SUBTOTAL_TITLES = {
+    "below_poverty": r"\bbelow poverty level$",
+    "at_or_above_poverty": r"\bat or above poverty level$",
+}
+B17010_TOTAL_TITLE = r"^total$"
+
+
+def householder_mask(units: pd.DataFrame, codes, hispanic) -> pd.Series:
+    """Units whose householder has a ``RAC1P`` in ``codes`` and the given origin.
+
+    ``codes=None`` is any race, ``hispanic`` as in :data:`B17010_ITERATIONS`.
+    A unit without a householder (group quarters) has null columns and fails.
+    """
+    race = units[f"{HOUSEHOLDER_PREFIX}RAC1P"]
+    hisp = units[f"{HOUSEHOLDER_PREFIX}HISP"]
+    mask = race.notna() & hisp.notna()
+    if codes is not None:
+        mask &= race.isin(codes)
+    if hispanic is True:
+        mask &= hisp != NOT_HISPANIC
+    elif hispanic is False:
+        mask &= hisp == NOT_HISPANIC
+    return mask
+
+
+def poverty_subtotal_cells(
+    area: StudyArea, table: str, geography: str = "tract"
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    """The cells of ``table`` titled "... below poverty level" and "... at or
+    above poverty level", read from its published replicate file, and every
+    cell the file has.
+
+    Read from the titles rather than written down as ``ORDER`` numbers that
+    could not be checked when this was written. The pair is checked as well as
+    found: in every area, for the estimate and each of the 80 replicates, the
+    two must add up to the line titled "Total", so they are the table's
+    top-level split and not two lines further down it.
+
+    The statewide file is read (``counties`` dropped): neither the titles nor
+    the check depend on the study area, and a county subset could be empty.
+
+    Raises
+    ------
+    ValueError
+        If either title, or the total, matches no line or more than one, or the
+        pair does not add up to the total. The message lists the table's
+        published lines, which is the structure to read the mapping from.
+    """
+    frame = fetch_replicates(replace(area, counties=()), [table], geography=geography)
+    lines = frame[["order", "title"]].groupby(level="cell").first().sort_values("order")
+    normal = (lines["title"].astype(str).str.strip().str.rstrip(":").str.strip()
+              .str.replace(r"\s+", " ", regex=True).str.lower())
+    listing = "\n".join(f"    {cell}  {title}" for cell, title in lines["title"].items())
+
+    found: dict[str, str] = {}
+    for name, pattern in {**B17010_SUBTOTAL_TITLES, "total": B17010_TOTAL_TITLE}.items():
+        hits = list(normal.index[normal.str.contains(pattern, regex=True)])
+        if len(hits) != 1:
+            raise ValueError(
+                f"{table} at {geography}: expected exactly one line whose title "
+                f"matches {pattern!r} ({name}), found {hits}. Its published "
+                f"lines are:\n{listing}"
+            )
+        found[name] = hits[0]
+
+    columns = ["estimate", *REPLICATE_COLUMNS]
+    value = {name: frame.xs(cell, level="cell")[columns].astype(float)
+             for name, cell in found.items()}
+    parts = value["below_poverty"] + value["at_or_above_poverty"]
+    gap = (parts - value["total"]).abs().to_numpy()
+    if not parts.index.equals(value["total"].index) or not (gap <= 0.5).all():
+        raise ValueError(
+            f"{table} at {geography}: {found['below_poverty']} + "
+            f"{found['at_or_above_poverty']} is not {found['total']} in every "
+            f"area and replicate (largest gap {np.nanmax(gap, initial=0.0):g}). "
+            f"Its published lines are:\n{listing}"
+        )
+    return {name: found[name] for name in B17010_SUBTOTAL_TITLES}, tuple(lines.index)
+
+
+def race_poverty(area: StudyArea, suffix: str, geography: str = "tract") -> ConstraintTable:
+    """``B17010<suffix>``: families below, and at or above, poverty, for one
+    race or Hispanic origin of the householder. Two categories.
+
+    *Universe*: families -- family households, ``HHT`` in :data:`HHT_FAMILY`
+    on the housing record. A blank ``HHT`` (group quarters, vacant) and the
+    nonfamily codes are outside it. One family per family household, so this
+    is a household-universe table counting units.
+
+    *Iteration*: the race and Hispanic origin of the householder, the person
+    record with ``RELSHIPP == 20`` (reference person), by its ``RAC1P`` and
+    ``HISP`` with the codes of :func:`race_ethnicity`
+    (:data:`B17010_ITERATIONS`).
+
+    *Poverty*: the householder's ``POVPIP``, the income-to-poverty ratio in
+    percent (0-500, 501 for 501 and over), read as :func:`poverty_by_age` and
+    :func:`poverty_ratio` read it: below poverty is ``POVPIP < 100`` (the
+    published "Under .50" to ".75 to .99" bands of ``B17024``), at or above is
+    ``POVPIP >= 100``. Family members share the family's income and poverty
+    threshold, so the householder's ratio is the family's. A family whose
+    householder has a blank ``POVPIP`` (poverty status not determined) falls in
+    neither category. That every family householder has ``POVPIP``, and the
+    ``HHT`` and ``RELSHIPP`` codes, were taken from the data dictionary's
+    documented meaning and **not** checked against the files;
+    ``tools/check_mapping.py --race-poverty`` compares the weighted PUMS counts
+    with the published ones.
+
+    *Cells*: found by title (:func:`poverty_subtotal_cells`), so building this
+    reads the table's replicate file; every other line is waived. Published
+    with replicates at tract and not block group.
+    """
+    _, codes, hispanic = B17010_ITERATIONS[suffix]
+    table = f"B17010{suffix}"
+    cells, every = poverty_subtotal_cells(area, table, geography)
+
+    def select(units, below):
+        family = pd.to_numeric(units["HHT"], errors="coerce").isin(HHT_FAMILY)
+        ratio = pd.to_numeric(units[f"{HOUSEHOLDER_PREFIX}POVPIP"], errors="coerce")
+        poor = (ratio < 100) if below else (ratio >= 100)
+        return family & householder_mask(units, codes, hispanic) & poor
+
+    return ConstraintTable(
+        table=table,
+        universe="household",
+        geography=geography,
+        variables=("HHT",),
+        householder=("RAC1P", "HISP", "POVPIP"),
+        categories=(
+            Category(name="below_poverty", select=lambda u: select(u, below=True),
+                     published=(cells["below_poverty"],)),
+            Category(name="at_or_above_poverty", select=lambda u: select(u, below=False),
+                     published=(cells["at_or_above_poverty"],)),
+        ),
+        waived=tuple(cell for cell in every if cell not in cells.values()),
+    )
+
+
+def race_poverty_tables(area: StudyArea, geography: str = "tract") -> list[ConstraintTable]:
+    """``B17010A`` .. ``B17010I`` (:func:`race_poverty`); tract only."""
+    return [race_poverty(area, suffix, geography) for suffix in B17010_ITERATIONS]
+
+
+#: Held-out tables by how closely they relate to the constrained variables:
+#: "related" where a table crosses constrained variables or close correlates of
+#: them (tenure, income, occupation, age and sex), "less related" where it
+#: does not (heating fuel).
 HELDOUT_RELATION = {
     "B25044": "related",
     "C17002": "related",
@@ -1409,8 +1619,11 @@ HELDOUT_RELATION = {
     "B12001": "related",
     "B15002": "related",
     "B25040": "less_related",
+    # Race by family poverty: related, as C17002 is. Race is constrained
+    # (B03002) and poverty is income against a threshold, with income
+    # constrained (B19001); what the fit never sees is the two jointly.
+    **{table: "related" for table in RACE_POVERTY_TABLES},
 }
-
 
 def heldout_tables(area: StudyArea, geography: str) -> list[ConstraintTable]:
     """The held-out tables at one geography; see :data:`HELDOUT_RELATION`."""

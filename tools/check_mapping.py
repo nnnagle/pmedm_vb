@@ -36,11 +36,13 @@ screen for finding a broken mapping, not a hypothesis test.
 
 Usage::
 
-    $CONDA_PREFIX/bin/python tools/check_mapping.py [--heldout] [PUMA] [STATE] [COUNTY]
+    $CONDA_PREFIX/bin/python tools/check_mapping.py [--heldout | --race-poverty] [PUMA] [STATE] [COUNTY]
 
 ``--heldout`` checks the held-out tables (``heldout_tables``) instead of the
 constraints, after validating each one's cell claims against the published
-cell list.
+cell list. ``--race-poverty`` does the same for ``B17010A``-``I``
+(``race_poverty_tables``), held out at tract for a table subset: the check of
+their ``HHT`` family universe, ``RELSHIPP`` householder and ``POVPIP`` reading.
 """
 
 from __future__ import annotations
@@ -50,7 +52,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-from pmedm_vb.assemble.constraints import default_tables, heldout_tables
+from pmedm_vb.assemble.constraints import default_tables, heldout_tables, race_poverty_tables
 from pmedm_vb.assemble.households import build_units, person_counts
 from pmedm_vb.assemble.targets import build_targets
 from pmedm_vb.config import StudyArea
@@ -59,10 +61,12 @@ from pmedm_vb.data.variance import SDR_FACTOR
 
 
 def check(
-    area: StudyArea, puma: str, geography: str = "tract", heldout: bool = False
+    area: StudyArea, puma: str, geography: str = "tract", heldout: bool = False,
+    race_poverty: bool = False,
 ) -> pd.DataFrame:
     """Per-constraint PUMS total, published total, standard error and ``z``."""
-    tables = heldout_tables(area, geography) if heldout else default_tables(area)
+    tables = (race_poverty_tables(area, geography) if race_poverty
+              else heldout_tables(area, geography) if heldout else default_tables(area))
     at_level = [t for t in tables if t.geography == geography]
 
     units = build_units(area, puma, tables)
@@ -100,17 +104,19 @@ def check(
 
 def main() -> int:
     heldout = "--heldout" in sys.argv
-    argv = [a for a in sys.argv if a != "--heldout"]
+    race_poverty = "--race-poverty" in sys.argv
+    argv = [a for a in sys.argv if a not in ("--heldout", "--race-poverty")]
     puma = argv[1] if len(argv) > 1 else "4701501"
     state = argv[2] if len(argv) > 2 else "47"
     county = argv[3] if len(argv) > 3 else "093"
     area = StudyArea(name="check", state=state, year=2024, counties=(county,))
 
-    if heldout:
-        for table in heldout_tables(area, "tract"):
+    if heldout or race_poverty:
+        tables = race_poverty_tables(area) if race_poverty else heldout_tables(area, "tract")
+        for table in tables:
             table.validate(area)
         print("held-out tables: every published cell claimed or waived exactly once\n")
-    frame = check(area, puma, heldout=heldout)
+    frame = check(area, puma, heldout=heldout, race_poverty=race_poverty)
     worst = frame.reindex(frame["z"].abs().sort_values(ascending=False).index)
     print(f"PUMA {puma}: largest standardised gaps\n")
     print(
