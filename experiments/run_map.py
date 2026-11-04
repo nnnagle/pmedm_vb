@@ -537,6 +537,10 @@ def vb_one(path: Path, taper: str | None, alpha: float, out: Path, options: dict
             gaussian_elbo_se=fit.gaussian_elbo_se,
             gain=fit.elbo - fit.laplace_elbo,
             seed=vb_options["seed"],
+            n_units=inputs.n_units,
+            # Peak GPU memory of this worker, in GiB (NaN on the CPU).
+            peak_gpu_gb=(torch.cuda.max_memory_allocated() / 2**30
+                         if str(vb_options.get("device", "cpu")).startswith("cuda") else float("nan")),
             map_seconds=map_seconds,
             seconds=time.perf_counter() - start,
             error="",

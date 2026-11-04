@@ -531,9 +531,13 @@ def sample(args: argparse.Namespace) -> None:
             warmup=args.warmup, thin=args.thin, n_zones=inputs.n_zones, n_units=inputs.n_units,
             seconds=earlier_seconds + time.perf_counter() - started,
             warmup_seconds=warmup_seconds, metric=metric_name(args),
-            scale=sampler.scale.cpu().numpy(),
+            scale=sampler.scale.cpu().numpy(), peak_gpu_gb=peak_gpu_gb(),
             **(draw_arrays(np.asarray(draws), hierarchy) if draws else {}),
         )
+
+    def peak_gpu_gb() -> float:
+        """This process's peak GPU memory so far, in GiB (NaN on the CPU)."""
+        return torch.cuda.max_memory_allocated() / 2**30 if device.startswith("cuda") else float("nan")
 
     while sampler.iteration < total:
         warming = sampler.iteration < args.warmup
@@ -584,8 +588,8 @@ def sample(args: argparse.Namespace) -> None:
             )
         if sampler.iteration % args.checkpoint == 0 or sampler.iteration == total:
             save()
-    logger.info("HMC %s done: %.0fs this job; results in %s", name,
-                time.perf_counter() - started, args.out)
+    logger.info("HMC %s done: %.0fs this job, peak GPU memory %.1f GiB; results in %s", name,
+                time.perf_counter() - started, peak_gpu_gb(), args.out)
 
 
 #: The quantities nested R-hat and the ESS check monitor in a --superchains run.

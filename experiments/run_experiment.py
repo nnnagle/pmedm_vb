@@ -56,6 +56,8 @@ Optional keys of the JSON:
 - ``pumas: "all"`` is every PUMA assembled for the area, so assemble them all
   before the first call: the list is fixed in the folder's record then.
 - ``heldout: false``: the PUMAs need no held-out tables (nothing is scored).
+- ``model.epsilon``: the statewide support (``run_map.py --epsilon``): the fits
+  and HMC runs use the inputs assembled with it, ``<area>-state-e<epsilon>``.
 - ``vb_device``: the torch device for the VB fits (``"cuda"`` on a GPU node).
 - ``slurm``: ``account`` for every job; ``fits`` and ``hmc``, lists of
   ``sbatch`` options replacing the stage's defaults; ``gpu_partition``, where
@@ -212,9 +214,17 @@ def county_args(area: dict) -> list[str]:
     return [arg for county in counties for arg in ("--county", county)]
 
 
+def inputs_name(spec: dict) -> str:
+    """The assembled-inputs folder name: the area's, or its statewide support's
+    (``<area>-state-e<epsilon>``, as run_map.py names it)."""
+    epsilon = spec["model"].get("epsilon")
+    slug = area_slug(spec["area"])
+    return slug if epsilon is None else f"{slug}-state-e{epsilon:g}"
+
+
 def inputs_dir(spec: dict) -> Path:
     """Where the area's assembled PUMAs are."""
-    return data_dir(spec) / "processed" / "inputs" / area_slug(spec["area"])
+    return data_dir(spec) / "processed" / "inputs" / inputs_name(spec)
 
 
 def assembled_pumas(spec: dict) -> list[str]:
@@ -497,7 +507,9 @@ def fits_args(spec: dict) -> list[str]:
     return ["--state", spec["area"].get("state", "47"), "--year", str(spec["area"]["year"]),
             "--span", str(spec["area"]["span"]),
             "--alpha", *[f"{alpha:g}" for alpha in spec["alphas"]], *model_args(spec),
-            *county_args(spec["area"])]
+            *county_args(spec["area"]),
+            *(["--epsilon", f"{spec['model']['epsilon']:g}"]
+              if spec["model"].get("epsilon") is not None else [])]
 
 
 def stage_fits(sub: Submitter, spec: dict, exp: Path, puma: str, active: dict,
@@ -558,7 +570,7 @@ def hmc_run_args(spec: dict, exp: Path, puma: str) -> list[tuple[Path, list[str]
         seed = (settings["seed"] + 10 * full["pumas"].index(puma)
                 + full["alphas"].index(alpha))
         args = ["--puma", puma, "--alpha", f"{alpha:g}", *model_args(spec),
-                "--area", area_slug(spec["area"]),
+                "--area", inputs_name(spec),
                 "--map-run" if whitening_folder(spec) == "map" else "--vb-run",
                 str(exp / puma / whitening_folder(spec)),
                 "--trajectory", f"{hmc['trajectory']:g}",
