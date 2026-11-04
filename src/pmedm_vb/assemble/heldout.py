@@ -9,9 +9,12 @@ estimate and its standard error score the prediction: a truth that does not
 depend on any reference posterior.
 
 The rows of ``X_H`` follow the problem's own ``units`` order, which is checked
-rather than assumed. Only the PUMA-only problem is supported: a statewide
-support merges records into rows, and the held-out columns would have to be
-merged the same way.
+rather than assumed. A statewide support (``build_puma(..., epsilon=...)``)
+merges records with identical rows of the *constraint* ``X`` into one row,
+and those records may differ in the held-out columns. The posterior splits a
+merged row's weight over its records in proportion to their prior weights
+(they are tilted alike), so the row's held-out counts are its records'
+counts averaged with those weights: exact, not an approximation.
 """
 
 from __future__ import annotations
@@ -103,24 +106,38 @@ def build_heldout(
     *,
     policy: str = "model",
 ) -> HeldOut:
-    """Build the held-out tables for an assembled PUMA-only problem.
+    """Build the held-out tables for an assembled problem, PUMA-only or statewide.
 
-    ``tables`` holds every held-out specification, at both levels.
+    ``tables`` holds every held-out specification, at both levels. With a
+    statewide support each merged row's counts are its records' counts
+    averaged by their prior weights (see the module docstring).
 
     Raises
     ------
     ValueError
-        If the problem has a statewide support, or if the unit set rebuilt from
-        PUMS is not the problem's own.
+        If the unit set rebuilt from PUMS is not the problem's own.
     """
-    if inputs.unit_members is not None:
-        raise ValueError("held-out tables are only built for the PUMA-only problem")
-    units = build_units(area, inputs.puma, tables)
-    serials = inputs.units["SERIALNO"].to_numpy()
-    if set(units.units.index) != set(serials) or len(serials) != units.n_units:
+    statewide = inputs.unit_members is not None
+    units = build_units(area, None if statewide else inputs.puma, tables)
+    if statewide:
+        members = inputs.unit_members
+        members = members[members["row"] >= 0]
+        serials = members["SERIALNO"].to_numpy()
+        row = members["row"].to_numpy()
+        weight = members["weight"].to_numpy(dtype=float)
+        share = weight / np.bincount(row, weights=weight, minlength=inputs.n_units)[row]
+        # (n_units, n_records): row r averages its records by prior weight.
+        merge = sp.csr_matrix((share, (row, np.arange(row.size))),
+                              shape=(inputs.n_units, row.size))
+        expected = len(inputs.unit_members)
+    else:
+        serials = inputs.units["SERIALNO"].to_numpy()
+        merge = None
+        expected = len(serials)
+    if not set(serials) <= set(units.units.index) or units.n_units != expected:
         raise ValueError(
             f"PUMA {inputs.puma}: the units rebuilt for the held-out tables are not "
-            f"the problem's ({units.n_units:,} against {len(serials):,})"
+            f"the problem's ({units.n_units:,} against {expected:,})"
         )
 
     geoids = {
@@ -136,6 +153,8 @@ def build_heldout(
             raise ValueError(f"{level}: held-out targets are not in the problem's area order")
         counts = person_counts(units, level_tables).reindex(pd.Index(serials))
         matrix, labels = build_attribute_matrix(counts)
+        if merge is not None:
+            matrix = sp.csr_matrix(merge @ matrix)
         if labels != list(block.names):
             raise ValueError(f"{level}: held-out X and Y columns do not agree")
         X[level] = matrix

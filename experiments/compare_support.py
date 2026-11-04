@@ -20,6 +20,19 @@ and reports:
    from outside the PUMA, overall and per block group, against the prior's.
 4. **The largest cell of each draw**: its share of ``N``, and whether the alt
    posterior's sits on a borrowed record.
+5. **Held-out tables**, where both inputs folders have them (``run_map.py
+   heldout``, with ``--epsilon`` for the statewide one): each posterior's
+   prediction of every held-out tract and block group cell against the
+   published estimate and its standard error -- the error, the predictive
+   ``z = (mean - Y) / sqrt(SE^2 + sd^2)``, 90% predictive coverage and a
+   Gaussian log score -- by level and by relation to the fitted tables, and
+   how often the statewide posterior is closer.
+
+Section 1 also gives, for each race and ethnicity, the distribution of its
+persons over household income bands (shares within the race): under each
+posterior, the local PUMS and the state PUMS, with the total variation
+distance between them. For rare groups this is the right measure, since the
+tables, not the PUMS, set how many people the group has.
 
 The state PUMS comes from the alt prior itself: its weights are
 ``(1 - epsilon) local + epsilon state`` (:func:`pmedm_vb.assemble.design.support_weights`),
@@ -33,8 +46,8 @@ Usage, on a CPU node::
     sbatch experiments/run_python.sbatch compare_support.py --puma 4701502 \\
         --base-exp tn01_gpu --alt-exp tn02_state_e0.1
 
-Writes ``puma_totals.csv``, ``block_groups.csv``, ``borrowed.csv``,
-``largest_cells.csv`` and ``summary.txt`` to ``--out`` (default
+Writes ``puma_totals.csv``, ``income_within_race.csv``, ``block_groups.csv``,
+``borrowed.csv``, ``largest_cells.csv``, ``heldout_cells.csv`` and ``summary.txt`` to ``--out`` (default
 ``<root>/<alt-exp>/<puma>/compare_<base-exp>``).
 """
 
@@ -54,6 +67,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_experiment as rx  # noqa: E402
 
 from pmedm_vb import compare  # noqa: E402
+from pmedm_vb.assemble.heldout import HeldOut  # noqa: E402
 from pmedm_vb.assemble.inputs import PMEDMInputs  # noqa: E402
 from pmedm_vb.progress import record_run  # noqa: E402
 from pmedm_vb.solvers.base import ConstraintOperator  # noqa: E402
@@ -86,8 +100,10 @@ def load_run(root: Path, exp_name: str, puma: str, alpha: float | None, kind: st
     trace = root / exp_name / puma / f"hmc_{kind}" / f"{name}_trace.npz"
     with np.load(trace) as saved:
         kept = saved["lam"]  # (kept, chains, m): the multipliers the data see
-    inputs = PMEDMInputs.load(rx.inputs_dir(spec) / puma)
-    return spec, inputs, alpha, kept, trace
+    path = rx.inputs_dir(spec) / puma
+    inputs = PMEDMInputs.load(path)
+    heldout = HeldOut.load(path) if HeldOut.exists(path) else None
+    return spec, inputs, alpha, kept, trace, heldout
 
 
 def thinned(kept: np.ndarray, draws: int) -> np.ndarray:
@@ -112,10 +128,11 @@ def borrowed_fraction(inputs: PMEDMInputs) -> np.ndarray:
 
 
 def draw_summaries(inputs: PMEDMInputs, lam: np.ndarray, outcomes: sp.spmatrix,
-                   borrowed: np.ndarray) -> dict[str, np.ndarray]:
+                   borrowed: np.ndarray, heldout: HeldOut | None = None) -> dict[str, np.ndarray]:
     """Per draw (columns of ``lam``): outcome counts per zone ``(draws, zones, k)``,
-    borrowed weight per zone ``(draws, zones)``, and the largest cell's share of
-    ``N``, zone and row."""
+    borrowed weight per zone ``(draws, zones)``, the largest cell's share of
+    ``N``, zone and row, and with ``heldout`` its predicted cells per block
+    group and per tract."""
     op = ConstraintOperator(inputs)
     with np.errstate(divide="ignore"):
         log_q = np.log(inputs.q)
@@ -124,6 +141,11 @@ def draw_summaries(inputs: PMEDMInputs, lam: np.ndarray, outcomes: sp.spmatrix,
     out = {"outcomes": np.empty((d, inputs.n_zones, outcomes.shape[1]), dtype=np.float32),
            "borrowed": np.empty((d, inputs.n_zones)),
            "max_share": np.empty(d), "max_zone": np.empty(d, int), "max_row": np.empty(d, int)}
+    if heldout is not None:
+        h_b, h_t = (sp.csr_matrix(heldout.X[level]) for level in ("block group", "tract"))
+        A_T = sp.csr_matrix(inputs.A_T)
+        out["held_bg"] = np.empty((d, inputs.n_zones, h_b.shape[1]), dtype=np.float32)
+        out["held_tract"] = np.empty((d, A_T.shape[0], h_t.shape[1]), dtype=np.float32)
     for k in range(d):
         logits = log_q - op.adjoint(lam[:, k])
         log_z = logsumexp(logits)
@@ -133,7 +155,63 @@ def draw_summaries(inputs: PMEDMInputs, lam: np.ndarray, outcomes: sp.spmatrix,
         flat = int(np.argmax(logits))
         out["max_share"][k] = np.exp(logits.flat[flat] - log_z)
         out["max_zone"][k], out["max_row"][k] = divmod(flat, inputs.n_units)
+        if heldout is not None:
+            out["held_bg"][k] = (h_b.T @ W.T).T
+            out["held_tract"][k] = A_T @ (h_t.T @ W.T).T
     return out
+
+
+def score_cells(draws: np.ndarray, Y: np.ndarray, v: np.ndarray) -> dict[str, np.ndarray]:
+    """Per cell of ``(draws, areas, k)`` predictions against published ``Y`` and
+    variance ``v``: mean, sd, error, predictive z, 90% predictive coverage and a
+    Gaussian log score. Cells with no spread at all (zero variance and sd) are NaN."""
+    mean, sd = draws.mean(0).astype(float), draws.std(0, ddof=1).astype(float)
+    spread = np.sqrt(np.asarray(v, float) + sd**2)
+    ok = spread > 0
+    safe = np.where(ok, spread, 1.0)
+    pred_z = np.where(ok, (mean - Y) / safe, np.nan)
+    return {"mean": mean, "sd": sd, "error": mean - Y, "pred_z": pred_z,
+            "covers": np.where(ok, np.abs(pred_z) <= 1.645, np.nan),
+            "log_score": np.where(ok, -0.5 * np.log(2 * np.pi * safe**2) - 0.5 * pred_z**2, np.nan)}
+
+
+def income_within_race(totals: pd.DataFrame, base_draws: np.ndarray, alt_draws: np.ndarray
+                       ) -> pd.DataFrame:
+    """Shares of each race's persons over household income bands: posterior
+    means and 90% intervals under base and alt, and the local and state PUMS.
+    ``*_draws`` are ``(draws, k)`` PUMA totals in ``totals``' column order."""
+    cross = totals[totals["kind"] == "crosstab"]
+    parts = cross["outcome"].str.split(" x ", expand=True)
+    rows = []
+    for race, idx in cross.groupby(parts[0]).groups.items():
+        cols = [totals.index.get_loc(i) for i in idx]
+        bands = parts.loc[idx, 1].to_numpy()
+
+        def shares(x):
+            total = x.sum(-1, keepdims=True)
+            return np.divide(x, total, out=np.full_like(x, np.nan, dtype=float), where=total > 0)
+
+        b, a = shares(base_draws[:, cols].astype(float)), shares(alt_draws[:, cols].astype(float))
+        local = shares(totals.loc[idx, "local"].to_numpy(float))
+        state = shares(totals.loc[idx, "state"].to_numpy(float))
+        for j, band in enumerate(bands):
+            rows.append({
+                "race": race, "income": band, "local": local[j], "state": state[j],
+                "base_mean": np.nanmean(b[:, j]), "base_q05": np.nanquantile(b[:, j], 0.05),
+                "base_q95": np.nanquantile(b[:, j], 0.95),
+                "alt_mean": np.nanmean(a[:, j]), "alt_q05": np.nanquantile(a[:, j], 0.05),
+                "alt_q95": np.nanquantile(a[:, j], 0.95),
+                "base_persons": base_draws[:, cols].sum(1).mean(),
+                "alt_persons": alt_draws[:, cols].sum(1).mean(),
+            })
+    return pd.DataFrame(rows)
+
+
+def tvd(a: np.ndarray, b: np.ndarray) -> float:
+    """Total variation distance between two distributions (NaN if either is undefined)."""
+    if np.isnan(a).any() or np.isnan(b).any():
+        return float("nan")
+    return 0.5 * float(np.abs(a - b).sum())
 
 
 def interval(draws: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -144,10 +222,14 @@ def interval(draws: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.
 
 def main() -> None:
     args = parse_args()
-    base_spec, base, alpha, base_kept, base_trace = load_run(
+    base_spec, base, alpha, base_kept, base_trace, base_held = load_run(
         args.root, args.base_exp, args.puma, args.alpha, args.kind)
-    alt_spec, alt, alt_alpha, alt_kept, alt_trace = load_run(
+    alt_spec, alt, alt_alpha, alt_kept, alt_trace, alt_held = load_run(
         args.root, args.alt_exp, args.puma, alpha, args.kind)
+    if base_held is None or alt_held is None:
+        base_held = alt_held = None  # held-out scoring needs both
+    elif base_held.names != alt_held.names:
+        raise SystemExit("the two runs' held-out tables differ")
     if base.unit_members is not None or alt.unit_members is None:
         raise SystemExit("--base-exp must be fitted on the PUMA's own records and --alt-exp "
                          "on a statewide support (model.epsilon)")
@@ -162,9 +244,10 @@ def main() -> None:
     alt_X, alt_meta = compare.outcome_matrix(alt)
     assert list(meta["outcome"]) == list(alt_meta["outcome"])
     zones = list(base.zones["block_group_geoid"])
-    base_s = draw_summaries(base, thinned(base_kept, args.draws), base_X, np.zeros(base.n_units))
+    base_s = draw_summaries(base, thinned(base_kept, args.draws), base_X, np.zeros(base.n_units),
+                            base_held)
     frac = borrowed_fraction(alt)
-    alt_s = draw_summaries(alt, thinned(alt_kept, args.draws), alt_X, frac)
+    alt_s = draw_summaries(alt, thinned(alt_kept, args.draws), alt_X, frac, alt_held)
 
     # 1-2. PUMA totals: both posteriors, the local and state PUMS, the published counts.
     weights = lambda inputs: inputs.units["weight"].to_numpy(dtype=float)  # noqa: E731
@@ -188,6 +271,8 @@ def main() -> None:
         t_alt=np.where(usable, (a_mean - local) / np.where(usable, gap, 1), np.nan),
     )
     totals.to_csv(out / "puma_totals.csv", index=False)
+    within = income_within_race(totals, base_s["outcomes"].sum(1), alt_s["outcomes"].sum(1))
+    within.to_csv(out / "income_within_race.csv", index=False)
 
     # Per block group, alt against base (in base sds), with the published counts.
     by_bg = compare.compare_outcomes(compare.summarise(base_s["outcomes"], meta, zones),
@@ -259,8 +344,26 @@ def main() -> None:
         f"{100 * (bg_cross['mean_diff'].abs() > 2).mean():.1f}%; 90% interval width alt/base "
         f"median {bg_cross['width_ratio'].median():.2f}",
         "",
-        f"2. {args.focus}",
+        "1b. Income distribution within each race and ethnicity (persons in households, PUMA)",
+        "    TVD: total variation distance between income distributions (0 identical, 1 disjoint);",
+        "    pull = TVD(alt, local) / TVD(state, local): how far alt moved toward the state's shape",
     ]
+    race_rows = []
+    for race, g in within.groupby("race", sort=False):
+        loc, sta = g["local"].to_numpy(), g["state"].to_numpy()
+        bm, am = g["base_mean"].to_numpy(), g["alt_mean"].to_numpy()
+        d_ls = tvd(loc, sta)
+        race_rows.append({
+            "race": race.split(".", 1)[1], "persons_base": g["base_persons"].iloc[0],
+            "persons_alt": g["alt_persons"].iloc[0], "TVD_local_state": d_ls,
+            "TVD_base_local": tvd(bm, loc), "TVD_alt_local": tvd(am, loc),
+            "TVD_alt_state": tvd(am, sta), "TVD_alt_base": tvd(am, bm),
+            "pull": tvd(am, loc) / d_ls if d_ls and d_ls == d_ls else float("nan"),
+        })
+    lines += ["    " + line for line in pd.DataFrame(race_rows).round(3).to_string(index=False)
+              .splitlines()]
+    lines += ["    (shares per band with 90% intervals: income_within_race.csv)", "",
+              f"2. {args.focus}"]
     if args.focus in set(totals["outcome"]):
         k = list(base.bg_constraints).index(args.focus)
         row = totals[totals["outcome"] == args.focus].iloc[0]
@@ -301,6 +404,49 @@ def main() -> None:
                  f"{100 * ((cells['borrowed_fraction'] > 0) & (cells['borrowed_fraction'] < 1 - 1e-12)).mean():.1f}%")
     lines.append("   ten largest (largest_cells.csv):")
     lines += ["   " + line for line in top.head(10).round(4).to_string(index=False).splitlines()]
+
+    lines += ["", "5. Held-out tables (not fitted): each posterior's prediction against the published estimates"]
+    if base_held is None:
+        lines.append("   skipped: build them in both inputs folders first (run_map.py heldout, "
+                     "with --epsilon for the statewide one)")
+    else:
+        frames, summary = [], []
+        areas = {"block group": zones, "tract": list(base.tracts.iloc[:, 0].astype(str))}
+        for level, key in (("block group", "held_bg"), ("tract", "held_tract")):
+            Y, v = base_held.Y[level], base_held.v[level]
+            names, relation = base_held.names[level], base_held.relation(level)
+            scores = {tag: score_cells(s[key], Y, v) for tag, s in (("base", base_s), ("alt", alt_s))}
+            frame = pd.DataFrame({
+                "level": level, "area": np.repeat(areas[level], len(names)),
+                "cell": np.tile(names, len(areas[level])),
+                "relation": np.tile(relation, len(areas[level])),
+                "published": Y.ravel(), "se": np.sqrt(v).ravel(),
+                **{f"{tag}_{m}": vals.ravel() for tag, sc in scores.items() for m, vals in sc.items()},
+            })
+            frames.append(frame)
+            for rel, g in frame.groupby("relation"):
+                ok = g.dropna(subset=["base_pred_z", "alt_pred_z"])
+                summary.append({
+                    "level": level, "relation": rel, "cells": len(ok),
+                    "rmse_base": np.sqrt((ok["base_error"] ** 2).mean()),
+                    "rmse_alt": np.sqrt((ok["alt_error"] ** 2).mean()),
+                    "pred_z2_base": (ok["base_pred_z"] ** 2).mean(),
+                    "pred_z2_alt": (ok["alt_pred_z"] ** 2).mean(),
+                    "cover90_base": ok["base_covers"].mean(), "cover90_alt": ok["alt_covers"].mean(),
+                    "logscore_alt_minus_base": (ok["alt_log_score"] - ok["base_log_score"]).sum(),
+                    "alt_closer": (ok["alt_error"].abs() < ok["base_error"].abs()).mean(),
+                })
+        pd.concat(frames).to_csv(out / "heldout_cells.csv", index=False)
+        lines += [
+            "   rmse: root mean squared error of the posterior mean; pred_z2: mean squared predictive z",
+            "   (about 1 if calibrated); cover90: share of cells within the 90% predictive interval",
+            "   (about 0.9 if calibrated); logscore_alt_minus_base: summed Gaussian log score, alt minus",
+            "   base (positive favours the statewide support); alt_closer: share of cells where alt's",
+            "   mean is nearer the published estimate",
+        ]
+        lines += ["   " + line for line in pd.DataFrame(summary).round(3).to_string(index=False)
+                  .splitlines()]
+        lines.append("   (every cell: heldout_cells.csv)")
     text = "\n".join(lines) + "\n"
     (out / "summary.txt").write_text(text)
     print(text)

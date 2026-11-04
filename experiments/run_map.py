@@ -39,7 +39,8 @@ is recorded in ``summary.csv`` with its error and does not stop the others.
 **heldout** builds each assembled PUMA's held-out tables
 (:mod:`pmedm_vb.assemble.heldout`) into ``<inputs>/<puma>/heldout``, apart
 from the problem itself, so no solver sees them. Skipped where they exist
-unless ``--rebuild``. PUMA-only problems only.
+unless ``--rebuild``. With ``--epsilon`` it builds them for the statewide
+support's merged rows.
 
 **rake** fits the raking baselines (:mod:`pmedm_vb.rake`), ``--method ipf``
 (hard: block group margins and the tract-only tables) or ``sinkhorn`` (KL-penalised, both levels), one
@@ -168,7 +169,7 @@ def parse_args() -> argparse.Namespace:
                              "run the heldout step)")
     parser.add_argument(
         "--epsilon", type=float, default=None,
-        help="assemble, solve, vb: statewide support with this prior share off the "
+        help="assemble, heldout, solve, vb: statewide support with this prior share off the "
              "PUMA's own records (default: the PUMA's records only)",
     )
     parser.add_argument("--collapse", type=float, default=None,
@@ -397,7 +398,7 @@ def heldout_one(area: StudyArea, path: Path, table_set: str = "default") -> tupl
 def run_heldout(args: argparse.Namespace, area: StudyArea, cores: int) -> None:
     from pmedm_vb.assemble.heldout import HeldOut
 
-    root = inputs_root(area)
+    root = inputs_root(area, args.epsilon)
     record_run(root, args)
     pumas = assembled_pumas(root, args.puma)
     todo = [p for p in pumas if args.rebuild or not HeldOut.exists(p)]
