@@ -424,7 +424,12 @@ def main() -> None:
                 **{f"{tag}_{m}": vals.ravel() for tag, sc in scores.items() for m, vals in sc.items()},
             })
             frames.append(frame)
-            for rel, g in frame.groupby("relation"):
+            groups = list(frame.groupby("relation"))
+            # Race x poverty (B17010A-I) on its own too: the joint structure borrowing changes.
+            race_poverty = frame[frame["cell"].str.startswith("B17010")]
+            if len(race_poverty):
+                groups.append(("B17010 race x poverty", race_poverty))
+            for rel, g in groups:
                 ok = g.dropna(subset=["base_pred_z", "alt_pred_z"])
                 summary.append({
                     "level": level, "relation": rel, "cells": len(ok),
