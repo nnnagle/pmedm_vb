@@ -73,7 +73,9 @@ Optional keys of the JSON:
   not submitted again; one whose bundle ended unfinished is, by the next call.
 
 ``--slurm-override`` replaces options of every job a call submits, e.g. to
-send a smoke test to a debug partition without editing the JSON.
+send a smoke test to a debug partition without editing the JSON; a
+``--partition`` in it is also where that call counts GPU jobs against
+``--max-gpu-jobs``.
 """
 
 from __future__ import annotations
@@ -522,7 +524,7 @@ def stage_fits(sub: Submitter, spec: dict, exp: Path, puma: str, active: dict,
         return None
     on_gpu = bool(spec["vb_families"]) and spec.get("vb_device", "cpu") != "cpu"
     if on_gpu and slots[0] <= 0:
-        print(f"  fits {puma}: not submitted -- {gpu_partition(spec)} is full; call again later")
+        print(f"  fits {puma}: not submitted -- the GPU partition is full; call again later")
         return None
     args = [spec["area"]["name"], puma, *fits_args(spec)]
     env = {"OUT_DIR": str(exp / puma), "FAMILIES": " ".join(spec["vb_families"]),
@@ -599,7 +601,7 @@ def stage_hmc(sub: Submitter, spec: dict, exp: Path, puma: str, active: dict,
               "fits job is live")
         return
     if slots[0] <= 0:
-        print(f"  hmc {puma}: not submitted -- {gpu_partition(spec)} is full; call again later")
+        print(f"  hmc {puma}: not submitted -- the GPU partition is full; call again later")
         return
     spec_file = exp / puma / "hmc_spec.txt"
     lines = hmc_spec_lines(spec, exp, puma)
@@ -642,7 +644,7 @@ def stage_bundle(sub: Submitter, spec: dict, exp: Path, active: dict, slots: lis
     stamp = time.strftime("%Y%m%d-%H%M%S")
     for k, group in enumerate(groups):
         if slots[0] <= 0:
-            print(f"bundles: {gpu_partition(spec)} is full; {len(groups) - k} job(s) wait "
+            print(f"bundles: the GPU partition is full; {len(groups) - k} job(s) wait "
                   "for a later call")
             return
         items = []
@@ -743,7 +745,10 @@ def advance(spec: dict, root: Path, stages=("rake", "fits", "hmc"),
     sub = Submitter(exp, spec, dry_run, overrides)
     if max_gpu_jobs is None:
         max_gpu_jobs = (spec.get("slurm") or {}).get("max_gpu_jobs", 6)
-    slots = [max_gpu_jobs - gpu_jobs_in_queue(gpu_partition(spec))]
+    # An override's --partition decides where this call's jobs go, so count jobs there.
+    partition = next((o.split("=", 1)[1] for o in (overrides or [])
+                      if o.startswith("--partition=")), gpu_partition(spec))
+    slots = [max_gpu_jobs - gpu_jobs_in_queue(partition)]
     try:
         if spec.get("bundle"):
             if "rake" in stages and spec["rake"]:
