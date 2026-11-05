@@ -675,13 +675,14 @@ def stage_bundle(sub: Submitter, spec: dict, exp: Path, active: dict, slots: lis
 
 def status(spec: dict, exp: Path, active: dict) -> None:
     print(f"{exp}  (level {level(spec)})")
-    live = bundled(active)
+    in_bundle = bundled(active)
     if spec.get("bundle"):
         done = sum(puma_complete(spec, exp, p) for p in spec["pumas"])
-        print(f"  {done} of {len(spec['pumas'])} PUMA(s) complete; {len(live)} in live bundle job(s)")
+        print(f"  {done} of {len(spec['pumas'])} PUMA(s) complete; {len(in_bundle)} in live "
+              "bundle job(s)")
     for puma in spec["pumas"]:
-        print(f"  {puma}" + (f"  (bundle job {live[puma]['job_id']} {live[puma]['state'].lower()})"
-                             if puma in live else ""))
+        job = in_bundle.get(puma)
+        print(f"  {puma}" + (f"  (bundle job {job['job_id']} {job['state'].lower()})" if job else ""))
         for method in spec["rake"]:
             done = rake_output(spec, exp, puma, method).exists()
             print(f"    {method:<12} {'done' if done else live(active, ('rake', puma, method))}")
