@@ -1,0 +1,26 @@
+{
+  "name": "sim02",
+  "description": "Borrowing simulation: does a statewide support at epsilon 0.01 recover a known population of PUMA 4701502 (race x income, rare groups) better than a fit on the PUMA's own PUMS sample? Truths from tn01_gpu (local) and tn04_poola_e0.01 (borrowed, the PUMA's records plus pool A); a 1-in-8 survey of each and a simulated PUMS subsample of the survey; each fitted on its PUMS alone and on its PUMS plus pool B.",
+  "puma": "4701502",
+  "alpha": 0.01,
+  "epsilon": 0.01,
+  "statewide": "experiments/tn/tn03_state_e0.01.json",
+  "pools": {
+    "seed": 4201,
+    "areas": {"A": "tnpoola", "B": "tnpoolb"}
+  },
+  "truths": {
+    "local": {"spec": "experiments/tn/tn01_gpu.json", "count": 10, "letter": "l", "run": "short"},
+    "borrowed": {"spec": "experiments/tn/tn04_poola_e0.01.json", "count": 10, "letter": "b",
+                 "run": "short", "pool": "A"}
+  },
+  "sampling_fraction": 0.125,
+  "pums_size": null,
+  "fits": {
+    "local": "experiments/sim/sim02_fits_local.json",
+    "statewide": "experiments/sim/sim02_fits_state.json"
+  },
+  "rare_groups": ["nh_nhpi", "nh_aian", "nh_other_race"],
+  "draws": 400,
+  "seed": 4200
+}
