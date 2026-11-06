@@ -20,6 +20,13 @@
     "local": "experiments/sim/sim02_fits_local.json",
     "statewide": "experiments/sim/sim02_fits_state.json"
   },
+  "bootstrap": {
+    "truths": ["4701502l01", "4701502l02", "4701502l03", "4701502l04", "4701502l05",
+               "4701502b01", "4701502b02", "4701502b03", "4701502b04", "4701502b05"],
+    "replicates": 5,
+    "seed": 4300,
+    "fits": "experiments/sim/sim02_fits_boot.json"
+  },
   "rare_groups": ["nh_nhpi", "nh_aian", "nh_other_race"],
   "draws": 400,
   "seed": 4200

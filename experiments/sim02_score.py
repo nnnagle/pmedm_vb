@@ -31,6 +31,16 @@ against the truth's ``T``, cell by cell:
   records, prior and posterior (``compare_support.borrowed_fraction``); and,
   for the borrowed kind, the truth's own share on pool A's records.
 
+**Bootstrap fit** (``boot``; ``sim02.json``'s ``bootstrap`` block,
+``sim02_bootstrap.py``): for each truth in ``bootstrap.truths``, the ``R``
+replicates' short HMC (fits ``bootstrap.fits``) pooled, ``draws / R`` evenly
+spaced draws of each, each replicate's draws made populations with its own
+``q``: so the pooled draws sample, approximately, the posterior averaged over
+the Bayesian bootstrap's posterior for the prior (Rubin 1981). Scored with the
+same measures as the other two fits, and compared with each over the truths
+both have. A truth with a replicate's trace missing is left out and listed;
+without a ``bootstrap`` block or any bootstrap trace, nothing changes.
+
 Writes, under ``<root>/<name>/simulation/scores``:
 
 ``scores.csv``
@@ -48,6 +58,12 @@ Writes, under ``<root>/<name>/simulation/scores``:
     two fits over the truths both have (means, the paired difference statewide
     minus local: mean, sd, min and max over truths, and the truths where the
     statewide fit is lower); and that comparison as text.
+``paired_boot.csv``
+    With bootstrap fits: the same per kind and measure for ``boot`` against
+    ``local`` and against ``statewide`` (``comparison``; ``base`` is the
+    other fit's mean, the difference is boot minus it, ``boot_lower`` the
+    truths where boot is lower); in summary.txt after the kinds, with the
+    replicates pooled per truth.
 
 A fit whose HMC trace is missing is left out and listed::
 
@@ -215,28 +231,59 @@ def score_fit(truth: dict, draws: dict, names: dict, se: dict, rare: list[str],
     return rows, measures, cross, within, groups
 
 
-def paired(per_truth: pd.DataFrame) -> pd.DataFrame:
-    """Per kind and measure: the two fits over the truths both have."""
+def paired(per_truth: pd.DataFrame, base: str = "local",
+           other: str = "statewide") -> pd.DataFrame:
+    """Per kind and measure: two fits over the truths both have, the difference
+    ``other - base`` per truth."""
     keys = ["kind", "truth_id", "fit"]
     measures = [c for c in per_truth.columns if c not in keys]
     out = []
     for kind, group in per_truth.groupby("kind", sort=False):
         wide = group.pivot(index="truth_id", columns="fit", values=measures)
         for measure in measures:
-            if (measure, "local") not in wide or (measure, "statewide") not in wide:
+            if (measure, base) not in wide or (measure, other) not in wide:
                 continue
-            both = wide[[(measure, "local"), (measure, "statewide")]].dropna()
+            both = wide[[(measure, base), (measure, other)]].dropna()
             if both.empty:
                 continue
-            local, state = both.iloc[:, 0].to_numpy(), both.iloc[:, 1].to_numpy()
-            diff = state - local
+            a, b = both.iloc[:, 0].to_numpy(), both.iloc[:, 1].to_numpy()
+            diff = b - a
             out.append({"kind": kind, "measure": measure, "truths": len(diff),
-                        "local": local.mean(), "statewide": state.mean(),
+                        base: a.mean(), other: b.mean(),
                         "diff_mean": diff.mean(),
                         "diff_sd": diff.std(ddof=1) if len(diff) > 1 else np.nan,
                         "diff_min": diff.min(), "diff_max": diff.max(),
-                        "statewide_lower": int((diff < 0).sum())})
+                        f"{other}_lower": int((diff < 0).sum())})
     return pd.DataFrame(out)
+
+
+def paired_boot(per_truth: pd.DataFrame) -> pd.DataFrame:
+    """``boot`` against ``local`` and against ``statewide`` (:func:`paired`)."""
+    parts = []
+    for base in ("local", "statewide"):
+        part = paired(per_truth, base, "boot")
+        if len(part):
+            part = part.rename(columns={base: "base"})
+            part.insert(1, "comparison", f"boot - {base}")
+            parts.append(part)
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+
+def table_lines(part: pd.DataFrame, labels: list[tuple[str, str]], first: str, second: str,
+                lower: str, headers: tuple[str, str]) -> list[str]:
+    """A paired comparison (:func:`paired`, indexed by measure) as summary lines:
+    ``first``, ``second`` and ``lower`` are the columns of the two means and of
+    the count of lower truths, ``headers`` the means' column headings."""
+    lines = [f"   {'measure':<58} {headers[0]:>9} {headers[1]:>9} {'diff':>9} {'sd':>8} "
+             f"{'min':>9} {'max':>9} {'lower':>6}"]
+    for measure, label in labels:
+        if measure not in part.index:
+            continue
+        r = part.loc[measure]
+        lines.append(f"   {label:<58} {r[first]:>9.4g} {r[second]:>9.4g} "
+                     f"{r['diff_mean']:>9.3g} {r['diff_sd']:>8.3g} {r['diff_min']:>9.3g} "
+                     f"{r['diff_max']:>9.3g} {int(r[lower]):>3}/{int(r['truths'])}")
+    return lines
 
 
 #: The summary's measures, in order, with how to read them.
@@ -258,11 +305,102 @@ SUMMARY = [
 ]
 
 
+def load_fit(path: Path, trace: Path, draws: int, names: dict):
+    """One fit's inputs at ``path`` and ``draws`` draws of its ``trace``: the
+    cells, each draw's borrowed share, the prior's borrowed share, the cells'
+    ``se`` and the number of rows."""
+    from pmedm_vb.assemble.heldout import HeldOut
+    from pmedm_vb.assemble.inputs import PMEDMInputs
+
+    inputs, fit_held = PMEDMInputs.load(path), HeldOut.load(path)
+    with np.load(trace) as saved:
+        lam = thinned(saved["lam"], draws)
+    cells, borrowed = fit_cells(inputs, fit_held, lam)
+    fit_tab = Tabulator(inputs, fit_held)
+    _, fit_cross = crosstab(inputs)
+    if fit_cross != names["crosstab"] or list(inputs.bg_constraints) != names["bg"]:
+        raise SystemExit(f"{path}: its cells are not the source's")
+    se = {level: np.sqrt(fit_tab.v[level]) for level in ("block group", "tract")}
+    prior = float(inputs.units["weight"].to_numpy(float) @ borrowed_fraction(inputs) / inputs.N)
+    return cells, borrowed, prior, se, inputs.n_units
+
+
+def record_fit(tables: dict, base: dict, truth: dict, cells: dict, borrowed: np.ndarray,
+               prior: float, truth_borrowed: float, names: dict, se: dict, rare: list[str],
+               rng) -> dict:
+    """Score one fit of one truth into ``tables``; its per-truth measures."""
+    rows, measures, cross, within, groups = score_fit(truth, cells, names, se, rare, rng)
+    tables["scores"] += [{**base, **row} for row in rows]
+    tables["cross"] += [{**base, **row} for row in cross]
+    tables["within"] += [{**base, **row} for row in within]
+    tables["rare"] += [{**base, **row} for row in groups]
+    q05, q95 = np.quantile(borrowed, [0.05, 0.95])
+    tables["borrowed"].append({**base, "prior": prior, "mean": float(borrowed.mean()),
+                               "q05": float(q05), "q95": float(q95),
+                               "truth_borrowed": truth_borrowed})
+    tables["per_truth"].append({**base, **measures, "borrowed_posterior": float(borrowed.mean())})
+    return measures
+
+
+def boot_traces(sim: Sim02, puma: str) -> tuple[list[tuple[str, Path]], list[str]]:
+    """The truth's replicates with their traces, and the replicates without one."""
+    reps = [(rep, sim.fit_trace("boot", rep)) for rep in sim.replicate_pumas(puma)]
+    return reps, [rep for rep, trace in reps if not trace.exists()]
+
+
+def boot_summary(sim: Sim02, pairs: pd.DataFrame, within: pd.DataFrame,
+                 pooled: dict[str, list[int]], skipped: list[str], per_replicate: int,
+                 labels: list[tuple[str, str]]) -> list[str]:
+    """summary.txt's bootstrap section: boot against local and statewide per kind,
+    income within race over the bootstrap truths, and what was pooled."""
+    name, R = sim.fits["boot"]["name"], sim.replicates()
+    if not pooled:
+        lines = [f"== bootstrap fits ({name}): none scored"]
+        if skipped:
+            lines.append(f"   truths left out, replicates incomplete ({len(skipped)}): "
+                         + "; ".join(skipped))
+        else:
+            lines.append("   no replicate's HMC trace exists yet")
+        return lines + [""]
+    lines = [f"== bootstrap fits ({name}): boot pools {R} Bayesian-bootstrap replicates of the "
+             f"local fit's prior per truth, {per_replicate} draws each",
+             "   diff = boot - local (or boot - statewide), per truth; 'lower' counts truths "
+             "where boot is lower",
+             "   replicates pooled: " + ", ".join(
+                 f"{puma} {len(n)} x {n[0]}" if len(set(n)) == 1
+                 else f"{puma} {len(n)} ({'+'.join(map(str, n))} draws)"
+                 for puma, n in pooled.items())]
+    if skipped:
+        lines.append(f"   truths left out, replicates incomplete ({len(skipped)}): "
+                     + "; ".join(skipped))
+    lines.append("")
+    for kind in sim.kinds():
+        for base, heading in (("local", "local"), ("statewide", "state")):
+            part = pairs[(pairs["kind"] == kind) & (pairs["comparison"] == f"boot - {base}")]
+            if part.empty:
+                continue
+            part = part.set_index("measure")
+            lines.append(f"== {kind} truths, boot vs {base} ({int(part['truths'].max())} "
+                         "with both fits)")
+            lines += table_lines(part, labels, "base", "boot", "boot_lower", (heading, "boot"))
+            lines.append("")
+        ids = [sim.truth_index(puma)[1] for puma in pooled
+               if sim.truth_index(puma)[0] == sim.kinds().index(kind)]
+        rows = within[(within["kind"] == kind) & within["truth_id"].isin(ids)]
+        if len(rows):
+            table = rows.pivot_table(index="race", columns="fit", values="tvd", aggfunc="mean")
+            table = table[[f for f in ("local", "statewide", "boot") if f in table]]
+            lines.append(f"   {kind} truths, income within race, TVD from the truth (mean over "
+                         f"the {len(ids)} bootstrap truths):")
+            lines += ["   " + line for line in table.round(4).to_string().splitlines()]
+            lines.append("")
+    return lines
+
+
 def main() -> None:
     args = parse_args()
     sim = Sim02(args.sim, args.root)
     from pmedm_vb.assemble.heldout import HeldOut
-    from pmedm_vb.assemble.inputs import PMEDMInputs
 
     draws_wanted = args.draws or sim.draws
     out = args.out or sim.folder / "scores"
@@ -272,6 +410,15 @@ def main() -> None:
     rng = np.random.default_rng(0)
     tables = {k: [] for k in ("scores", "per_truth", "cross", "within", "rare", "borrowed")}
     missing = []
+    # The bootstrap fit is scored once some replicate has a trace; then each truth
+    # with a replicate missing is left out and listed.
+    R = sim.replicates()
+    started = any(len(boot_traces(sim, t)[1]) < R for t in sim.boot_truths())
+    boot = sim.boot_truths() if started else []
+    per_replicate = draws_wanted // R if boot else 0
+    if boot and per_replicate < 1:
+        raise SystemExit(f"--draws {draws_wanted}: fewer than one per bootstrap replicate ({R})")
+    boot_pooled, boot_skipped = {}, []
     for kind in sim.kinds():
         source, held, _ = truth_source(sim, kind, pool_names)
         src_tab, (src_cross, cross_names) = Tabulator(source, held), crosstab(source)
@@ -289,34 +436,35 @@ def main() -> None:
                 if not trace.exists():
                     missing.append(f"{puma} {fit}")
                     continue
-                path = sim.fit_inputs(fit, puma)
-                inputs, fit_held = PMEDMInputs.load(path), HeldOut.load(path)
-                with np.load(trace) as saved:
-                    lam = thinned(saved["lam"], draws_wanted)
-                cells, borrowed = fit_cells(inputs, fit_held, lam)
-                fit_tab = Tabulator(inputs, fit_held)
-                _, fit_cross = crosstab(inputs)
-                if fit_cross != cross_names or list(inputs.bg_constraints) != names["bg"]:
-                    raise SystemExit(f"{path}: its cells are not the source's")
-                se = {level: np.sqrt(fit_tab.v[level]) for level in ("block group", "tract")}
-                rows, measures, cross, within, groups = score_fit(truth, cells, names, se, rare,
-                                                                  rng)
-                base = {"kind": kind, "truth_id": i, "fit": fit}
-                tables["scores"] += [{**base, **row} for row in rows]
-                tables["cross"] += [{**base, **row} for row in cross]
-                tables["within"] += [{**base, **row} for row in within]
-                tables["rare"] += [{**base, **row} for row in groups]
-                prior = float(inputs.units["weight"].to_numpy(float) @ borrowed_fraction(inputs)
-                              / inputs.N)
-                q05, q95 = np.quantile(borrowed, [0.05, 0.95])
-                tables["borrowed"].append({**base, "prior": prior, "mean": float(borrowed.mean()),
-                                           "q05": float(q05), "q95": float(q95),
-                                           "truth_borrowed": truth_borrowed})
-                tables["per_truth"].append({**base, **measures,
-                                            "borrowed_posterior": float(borrowed.mean())})
-                print(f"{puma} {fit}: {lam.shape[1]} draws, {inputs.n_units:,} rows; race x "
+                cells, borrowed, prior, se, rows = load_fit(sim.fit_inputs(fit, puma), trace,
+                                                            draws_wanted, names)
+                measures = record_fit(tables, {"kind": kind, "truth_id": i, "fit": fit}, truth,
+                                      cells, borrowed, prior, truth_borrowed, names, se, rare,
+                                      rng)
+                print(f"{puma} {fit}: {borrowed.size} draws, {rows:,} rows; race x "
                       f"income CRPS {measures['block_group_crosstab_crps']:.3g}, TVD "
                       f"{measures['tvd_mean']:.3g}", flush=True)
+            if puma not in boot:
+                continue
+            reps, absent = boot_traces(sim, puma)
+            if absent:
+                boot_skipped.append(f"{puma} ({R - len(absent)} of {R}; missing "
+                                    f"{', '.join(absent)})")
+                continue
+            # Equal draws from each replicate, each made populations with its own q.
+            parts = [load_fit(sim.fit_inputs("boot", rep), trace, per_replicate, names)
+                     for rep, trace in reps]
+            cells = {k: np.concatenate([part[0][k] for part in parts]) for k in parts[0][0]}
+            borrowed = np.concatenate([part[1] for part in parts])
+            prior = float(np.mean([part[2] for part in parts]))
+            measures = record_fit(tables, {"kind": kind, "truth_id": i, "fit": "boot"}, truth,
+                                  cells, borrowed, prior, truth_borrowed, names, parts[0][3],
+                                  rare, rng)
+            boot_pooled[puma] = [part[1].size for part in parts]
+            print(f"{puma} boot: {borrowed.size} draws ({' + '.join(map(str, boot_pooled[puma]))} "
+                  f"from {R} replicates); race x income CRPS "
+                  f"{measures['block_group_crosstab_crps']:.3g}, TVD {measures['tvd_mean']:.3g}",
+                  flush=True)
     if not tables["per_truth"]:
         raise SystemExit(f"no fit to score; missing: {', '.join(missing)}")
     files = {"scores": "scores.csv", "cross": "puma_crosstab.csv",
@@ -327,6 +475,9 @@ def main() -> None:
         frames[key].to_csv(out / name, index=False)
     pairs = paired(frames["per_truth"])
     pairs.to_csv(out / "paired.csv", index=False)
+    boot_pairs = paired_boot(frames["per_truth"]) if boot_pooled else pd.DataFrame()
+    if boot_pooled:
+        boot_pairs.to_csv(out / "paired_boot.csv", index=False)
 
     lines = [f"{sim.name}: PUMA {sim.puma}, alpha {sim.alpha:g}, epsilon {sim.epsilon:g}; "
              f"{draws_wanted} HMC short draws per fit",
@@ -344,17 +495,11 @@ def main() -> None:
             lines += [f"== {kind} truths: no truth with both fits", ""]
             continue
         lines.append(f"== {kind} truths ({int(part['truths'].max())} with both fits)")
-        lines.append(f"   {'measure':<58} {'local':>9} {'state':>9} {'diff':>9} {'sd':>8} "
-                     f"{'min':>9} {'max':>9} {'lower':>6}")
-        for measure, label in SUMMARY + rare_measures + [
-                ("borrowed_posterior", "share of N on pool B records (posterior mean)")]:
-            if measure not in part.index:
-                continue
-            r = part.loc[measure]
-            lines.append(f"   {label:<58} {r['local']:>9.4g} {r['statewide']:>9.4g} "
-                         f"{r['diff_mean']:>9.3g} {r['diff_sd']:>8.3g} {r['diff_min']:>9.3g} "
-                         f"{r['diff_max']:>9.3g} {int(r['statewide_lower']):>3}/{int(r['truths'])}")
-        within = frames["within"][frames["within"]["kind"] == kind]
+        lines += table_lines(part, SUMMARY + rare_measures + [
+            ("borrowed_posterior", "share of N on pool B records (posterior mean)")],
+            "local", "statewide", "statewide_lower", ("local", "state"))
+        within = frames["within"][(frames["within"]["kind"] == kind)
+                                  & (frames["within"]["fit"] != "boot")]
         table = within.pivot_table(index="race", columns="fit", values="tvd", aggfunc="mean")
         persons = within.groupby("race")["truth_persons"].mean().rename("truth persons")
         lines += ["   income within race, TVD from the truth (mean over truths):"]
@@ -366,6 +511,9 @@ def main() -> None:
                          f"posterior {b['mean'].mean():.4f} (truth's own share on records from "
                          f"outside the PUMA: {b['truth_borrowed'].mean():.4f})")
         lines.append("")
+    if sim.bootstrap is not None:
+        lines += boot_summary(sim, boot_pairs, frames["within"], boot_pooled, boot_skipped,
+                              per_replicate, SUMMARY + rare_measures)
     text = "\n".join(lines) + "\n"
     (out / "summary.txt").write_text(text)
     print(text)
