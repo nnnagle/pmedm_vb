@@ -120,7 +120,7 @@ import pandas as pd
 
 from pmedm_vb.assemble.inputs import PMEDMInputs
 from pmedm_vb.config import processed_dir
-from pmedm_vb.progress import logger, record_run
+from pmedm_vb.progress import logger, record_run, save_npz, save_npz_files, write_text
 
 from laplace_diagnostic import constraint_table, load_vb
 
@@ -518,9 +518,8 @@ def sample(args: argparse.Namespace) -> None:
     start_iteration = sampler.iteration
 
     def save() -> None:
-        np.savez(state_path, **sampler.state_dict())
-        np.savez(
-            trace_path,
+        # Both written aside, then renamed into place: a kill leaves no torn checkpoint.
+        save_npz_files({state_path: sampler.state_dict(), trace_path: dict(
             **{key: np.asarray(value) for key, value in trace.items()},
             step_size=np.asarray(step_sizes), n_leapfrog=np.asarray(leapfrogs),
             retry_factor=args.retry_factor,
@@ -533,7 +532,7 @@ def sample(args: argparse.Namespace) -> None:
             warmup_seconds=warmup_seconds, metric=metric_name(args),
             scale=sampler.scale.cpu().numpy(), peak_gpu_gb=peak_gpu_gb(),
             **(draw_arrays(np.asarray(draws), hierarchy) if draws else {}),
-        )
+        )})
 
     def peak_gpu_gb() -> float:
         """This process's peak GPU memory so far, in GiB (NaN on the CPU)."""
@@ -734,7 +733,7 @@ def sample_nested(args: argparse.Namespace) -> None:
         for _ in range(per_chain):
             advance(adapt=False, keep=True)
 
-    np.savez(
+    save_npz(
         trace_path,
         **{key: np.asarray(value) for key, value in trace.items()},
         step_size=np.asarray(step_sizes), n_leapfrog=np.asarray(leapfrogs), retry_factor=0.0,
@@ -941,7 +940,7 @@ def report(args: argparse.Namespace) -> None:
 
     text = "\n".join(lines) + "\n"
     path = args.out / f"{name}_report.txt"
-    path.write_text(text)
+    write_text(path, text)
     print(text)
     logger.info("report written to %s", path)
 

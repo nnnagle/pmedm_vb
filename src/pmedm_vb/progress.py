@@ -100,3 +100,61 @@ def record_run(directory, args) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as handle:
         handle.write(json.dumps(record, default=str) + "\n")
+
+
+def _part_path(path):
+    """A temporary name next to ``path``: hidden, unique to this process, and not
+    ending in the final suffix, so a glob for finished results never sees it."""
+    import os
+    from pathlib import Path
+
+    path = Path(path)
+    return path.with_name(f".{path.name}.{os.getpid()}.part")
+
+
+def save_npz(path, **arrays) -> None:
+    """``np.savez(path, **arrays)``, appearing all at once.
+
+    The archive is written under a temporary name in the same directory and
+    renamed into place: a rename within a directory is atomic, so a job killed
+    mid-write leaves a ``.part`` file and no truncated ``.npz`` that a resumed
+    run would take for a finished one. Writing through an open handle keeps
+    numpy from appending ``.npz`` to the temporary name. The file's name and
+    contents are those ``np.savez(path, ...)`` writes.
+    """
+    save_npz_files({path: arrays})
+
+
+def save_npz_files(files: dict) -> None:
+    """:func:`save_npz` for several files, ``{path: arrays}``, that belong together
+    (a sampler's state and its trace): every one is written under its temporary
+    name first, then all are renamed, so a kill leaves them out of step only in
+    the moment between two renames, not for the length of a write."""
+    import os
+
+    import numpy as np
+
+    parts = {path: _part_path(path) for path in files}
+    try:
+        for path, arrays in files.items():
+            with open(parts[path], "wb") as handle:
+                np.savez(handle, **arrays)
+        for path, part in parts.items():
+            os.replace(part, path)
+    finally:
+        for part in parts.values():
+            if part.exists():
+                part.unlink()
+
+
+def write_text(path, text: str) -> None:
+    """``Path(path).write_text(text)``, appearing all at once (see :func:`save_npz`)."""
+    import os
+
+    part = _part_path(path)
+    try:
+        part.write_text(text)
+        os.replace(part, path)
+    finally:
+        if part.exists():
+            part.unlink()

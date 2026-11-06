@@ -8,12 +8,16 @@
 # Many PUMAs in one job, one per GPU at a time: MAP, the VB fits and their HMC
 # runs (experiments/run_puma_bundle.py). Submitted by run_experiment.py when the
 # experiment has a "bundle" block, with the account, partition, GPUs, cores,
-# memory and time from its slurm.bundle options:
+# memory and time from its slurm.bundle options -- or, for a pilot
+# (run_experiment.py --pilot), from slurm.pilot:
 #
 #   sbatch --account=... --partition=... --gpus=4 --cpus-per-task=64 ... \
-#       experiments/run_puma_bundle.sbatch BUNDLE.json
+#       --signal=B:USR1@600 experiments/run_puma_bundle.sbatch BUNDLE.json
 #
-# Resubmitting the same file finishes a bundle that ran out of time.
+# Resubmitting the same file finishes a bundle that ran out of time. The last
+# line exec-s Python, so that the batch shell's USR1 (--signal=B:...) and the
+# time limit's SIGTERM reach the driver itself, which then stops taking PUMAs
+# and releases its claims.
 
 set -eo pipefail
 BUNDLE=${1:?usage: sbatch run_puma_bundle.sbatch BUNDLE.json}
@@ -41,5 +45,4 @@ if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
     nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
     $PY -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)"
 fi
-$PY -u experiments/run_puma_bundle.py "$BUNDLE"
-echo "done $(date)"
+exec $PY -u experiments/run_puma_bundle.py "$BUNDLE"

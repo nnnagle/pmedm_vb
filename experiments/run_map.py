@@ -86,7 +86,7 @@ import numpy as np
 import pandas as pd
 
 from pmedm_vb.config import StudyArea, processed_dir
-from pmedm_vb.progress import logger, record_run
+from pmedm_vb.progress import logger, record_run, save_npz, write_text
 
 #: Environment variables that set BLAS/OpenMP thread counts in a fresh process.
 THREAD_VARIABLES = (
@@ -486,7 +486,7 @@ def solve_one(path: Path, taper: str | None, alpha: float, out: Path, options: d
             seconds=time.perf_counter() - start,
             error="",
         )
-        np.savez(
+        save_npz(
             out / f"{name}.npz",
             lam=result.lam,
             W=result.W,
@@ -546,7 +546,7 @@ def vb_one(path: Path, taper: str | None, alpha: float, out: Path, options: dict
             seconds=time.perf_counter() - start,
             error="",
         )
-        np.savez(
+        save_npz(
             out / f"{name}.npz",
             mean=fit.q.mean,
             W=fit.q.W,
@@ -594,7 +594,7 @@ def rake_one(path: Path, taper: str | None, alpha: float, out: Path, options: di
             seconds=time.perf_counter() - start,
             error="",
         )
-        np.savez(
+        save_npz(
             out / f"{name}.npz",
             W=result.W, residual=result.residual, trace=result.trace,
             infeasible=result.infeasible, theta=result.theta,
@@ -721,7 +721,7 @@ def write_summary(rows: list[dict], out: Path) -> None:
     frame = pd.DataFrame(rows)
     keys = [k for k in ("puma", "method", "taper", "alpha") if k in frame]
     frame = frame.sort_values(keys, ascending=[k != "alpha" for k in keys])
-    frame.to_csv(out / "summary.csv", index=False)
+    write_text(out / "summary.csv", frame.to_csv(index=False))
 
 
 def main() -> None:

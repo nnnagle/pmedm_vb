@@ -9,6 +9,9 @@ Everything it produces lives under ``<root>/<name>``::
       experiment.json          the JSON, plus the commit and data directory it was started with
       jobs.jsonl               one line per submitted job
       logs/                    the jobs' Slurm logs
+      bundles/                 bundle and pilot work files (run_puma_bundle.py)
+      claims/<puma>/           the claim of the job running the PUMA, if any
+      failures/<puma>.jsonl    the PUMA's failed attempts in bundle and pilot jobs
       <puma>/
         ipf/ sinkhorn/         raking   (run_map.py rake)
         map/ vb_<family>/      MAP and VB, every alpha   (run_map_bundle.sbatch)
@@ -19,6 +22,8 @@ Usage, from the repository root on a login node::
 
     $CONDA_PREFIX/bin/python experiments/run_experiment.py experiments/paper/exp01_baseline.json
     $CONDA_PREFIX/bin/python experiments/run_experiment.py experiments/paper/exp01_baseline.json --status
+    $CONDA_PREFIX/bin/python experiments/run_experiment.py experiments/tn/tn01_gpu.json --pilot
+    $CONDA_PREFIX/bin/python experiments/run_experiment.py experiments/tn/tn01_gpu.json --retry-failed
 
 Each call submits, for every PUMA, whatever is neither finished nor already
 queued or running:
@@ -71,6 +76,28 @@ Optional keys of the JSON:
   (``experiments/run_puma_bundle.py``), with ``slurm.bundle``'s ``sbatch``
   options (``--gpus=4`` for a whole node). A PUMA in a live bundle job is
   not submitted again; one whose bundle ended unfinished is, by the next call.
+  Nor is one that a running job has claimed, or one that has failed twice
+  (below).
+- ``slurm.pilot``: the ``sbatch`` options of ``--pilot`` (default
+  :data:`PILOT_SLURM`: a whole ai-tenn node for three days).
+
+**Several jobs on one experiment.** Bundle jobs and a pilot (``--pilot``) work
+side by side without doing a PUMA twice: a job runs a PUMA only while it holds
+its claim, ``<name>/claims/<puma>/``, and a PUMA that has failed twice
+(``<name>/failures/<puma>.jsonl``) is left alone until ``--retry-failed``
+clears it (``run_puma_bundle.py`` has the rules). A **pilot** is one long job
+with no list of PUMAs: whenever a stream is free it takes the unfinished,
+unclaimed PUMA estimated slowest, until none is left, so it can wait in a
+multi-day queue while short bundle jobs run, and exits within seconds if they
+have done everything by the time it starts. Only one pilot per experiment is
+submitted while one is queued or running, unless ``--force``; it is not
+counted against ``--max-gpu-jobs``. Bundle and pilot
+jobs get ``--signal=B:USR1@600`` (unless their options set ``--signal``): ten
+minutes before their time limit they start no new PUMA, and at the limit they
+release their claims.
+
+``--status`` also shows each PUMA's claim (job, host, heartbeat age, or why it
+is stale), its failures, and the live pilots.
 
 ``--slurm-override`` replaces options of every job a call submits, e.g. to
 send a smoke test to a debug partition without editing the JSON; a
@@ -88,6 +115,8 @@ import sys
 import time
 from pathlib import Path
 
+import run_puma_bundle as rpb
+
 REPO = Path(__file__).resolve().parents[1]
 EXPERIMENTS = REPO / "experiments"
 #: Next to the clone: ``/lustre/isaac24/proj/UTK0496/pmedm_vb_runs/paper`` for
@@ -104,6 +133,11 @@ MAP_SLURM = ["--partition=short", "--qos=short", "--time=01:00:00", "--cpus-per-
 #: Each PUMA's HMC bundle (short runs, then the long references) on campus-gpu.
 HMC_SLURM = ["--partition=campus-gpu", "--qos=campus-gpu", "--time=24:00:00"]
 GPU_PARTITION = "campus-gpu"
+#: The pilot (--pilot): a whole ai-tenn node, for the queue's three days.
+PILOT_SLURM = ["--partition=ai-tenn", "--qos=ai-tenn", "--gpus=4", "--cpus-per-task=64",
+               "--mem=512G", "--time=3-00:00:00"]
+#: Bundle and pilot jobs are told ten minutes before their time limit (run_puma_bundle.py).
+TIME_LIMIT_SIGNAL = "--signal=B:USR1@600"
 
 #: Keys whose difference does not make a different experiment: the description,
 #: the scoring-only choices (which VB families are also scored truncated, and
@@ -135,6 +169,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--slurm-override", default="",
                         help="sbatch options replacing those of every job this call submits, "
                              "e.g. '--partition=ai-tenn-debug --qos=ai-tenn-debug --time=01:00:00'")
+    parser.add_argument("--pilot", action="store_true",
+                        help="submit one pilot job (slurm.pilot options) that takes the "
+                             "unfinished, unclaimed PUMAs, slowest first; nothing else")
+    parser.add_argument("--force", action="store_true",
+                        help="with --pilot: submit even though a pilot is queued or running")
+    parser.add_argument("--retry-failed", nargs="*", metavar="PUMA", default=None,
+                        help="clear the failure records of these PUMAs (of every PUMA if none "
+                             "given), so jobs take them again; submit nothing")
     return parser.parse_args()
 
 
@@ -628,14 +670,60 @@ def bundled(active: dict) -> dict[str, dict]:
             for puma in job.get("pumas", [])}
 
 
+def bundle_header(spec: dict, exp: Path) -> dict:
+    """What a bundle or pilot file says about every PUMA (run_puma_bundle.py)."""
+    return {"name": spec["area"]["name"], "fits_args": fits_args(spec),
+            "families": spec["vb_families"], "draws": 64,
+            "device": spec.get("vb_device", "cpu"), "experiment": str(exp)}
+
+
+def bundle_item(spec: dict, exp: Path, puma: str) -> dict:
+    """One PUMA's entry in a bundle: its folder, its fits' outputs, and its HMC runs
+    (options and report). A pilot builds the same entry when it takes the PUMA."""
+    return {
+        "puma": puma, "out": str(exp / puma),
+        "fit_outputs": [str(path) for path in fit_outputs(spec, exp, puma)],
+        "hmc": [{"out": str(out), "args": args, "report": str(report)}
+                for (out, args), report in zip(hmc_run_args(spec, exp, puma),
+                                               hmc_outputs(spec, exp, puma))]
+               if spec["hmc"] else [],
+    }
+
+
+def with_signal(options: list[str]) -> list[str]:
+    """A bundle's or pilot's options, with the time-limit warning unless they set one."""
+    if any(o.split("=", 1)[0] == "--signal" for o in options):
+        return options
+    return [*options, TIME_LIMIT_SIGNAL]
+
+
+def held_elsewhere(spec: dict, exp: Path) -> tuple[dict[str, dict], list[str]]:
+    """The PUMAs no new job should take: ``{puma: claim}`` for those a live job has
+    claimed, and those that have failed :data:`run_puma_bundle.MAX_FAILURES` times."""
+    claims = {p: c for p, c in rpb.claim_states(exp).items()
+              if not c["stale"] and p in spec["pumas"]}
+    failed = [p for p in spec["pumas"] if rpb.is_failed(exp, p)]
+    return claims, failed
+
+
 def stage_bundle(sub: Submitter, spec: dict, exp: Path, active: dict, slots: list[int]) -> None:
-    """Submit the unfinished PUMAs that no live bundle job holds, split over
-    ``bundle.jobs`` jobs of run_puma_bundle.sbatch."""
+    """Submit the unfinished PUMAs that no live bundle job holds, no live job has
+    claimed and that have not failed, split over ``bundle.jobs`` jobs of
+    run_puma_bundle.sbatch."""
     live = bundled(active)
-    todo = [p for p in spec["pumas"] if p not in live and not puma_complete(spec, exp, p)]
+    claims, failed = held_elsewhere(spec, exp)
+    todo = [p for p in spec["pumas"] if p not in live and p not in claims and p not in failed
+            and not puma_complete(spec, exp, p)]
     if live:
         print(f"bundles: {len(live)} PUMA(s) in live job(s) "
               f"{', '.join(sorted({job['job_id'] for job in live.values()}))}")
+    if claims:
+        print(f"bundles: {len(claims)} PUMA(s) claimed by running job(s) "
+              f"{', '.join(sorted({str(c.get('job_id')) for c in claims.values()}))}: "
+              f"{' '.join(sorted(claims))}")
+    if failed:
+        print(f"bundles: {len(failed)} PUMA(s) failed {rpb.MAX_FAILURES} times, not submitted "
+              f"(see --status; --retry-failed): {' '.join(failed)}")
     if not todo:
         print("bundles: nothing to submit")
         return
@@ -647,19 +735,8 @@ def stage_bundle(sub: Submitter, spec: dict, exp: Path, active: dict, slots: lis
             print(f"bundles: the GPU partition is full; {len(groups) - k} job(s) wait "
                   "for a later call")
             return
-        items = []
-        for puma in group:
-            items.append({
-                "puma": puma, "out": str(exp / puma),
-                "fit_outputs": [str(path) for path in fit_outputs(spec, exp, puma)],
-                "hmc": [{"out": str(out), "args": args, "report": str(report)}
-                        for (out, args), report in zip(hmc_run_args(spec, exp, puma),
-                                                       hmc_outputs(spec, exp, puma))]
-                       if spec["hmc"] else [],
-            })
-        bundle = {"name": spec["area"]["name"], "fits_args": fits_args(spec),
-                  "families": spec["vb_families"], "draws": 64,
-                  "device": spec.get("vb_device", "cpu"), "pumas": items}
+        bundle = {**bundle_header(spec, exp),
+                  "pumas": [bundle_item(spec, exp, puma) for puma in group]}
         path = exp / "bundles" / f"bundle-{stamp}-{k + 1}.json"
         print(f"bundle {k + 1}/{jobs}: {len(group)} PUMA(s) {' '.join(group)}")
         if sub.dry_run:
@@ -668,23 +745,91 @@ def stage_bundle(sub: Submitter, spec: dict, exp: Path, active: dict, slots: lis
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(bundle, indent=2) + "\n")
         sub.submit("bundle", f"{stamp}-{k + 1}", "run_puma_bundle.sbatch", [str(path)],
-                   slurm=slurm_options(spec, "bundle", FITS_SLURM), extra={"pumas": group})
+                   slurm=with_signal(slurm_options(spec, "bundle", FITS_SLURM)),
+                   extra={"pumas": group})
         slots[0] -= 1
+
+
+def live_pilots(active: dict) -> list[dict]:
+    """The experiment's pilot jobs still queued or running."""
+    return [job for key, job in active.items()
+            if key[0] == "pilot" and job["state"] in rpb.LIVE_STATES]
+
+
+def stage_pilot(sub: Submitter, spec: dict, exp: Path, active: dict, force: bool) -> None:
+    """Submit one pilot: a run_puma_bundle.sbatch job whose work file holds the
+    experiment as loaded here (with any ``--puma``), from which the pilot picks
+    its PUMAs as it goes. Refused while another pilot is live, unless ``force``."""
+    pilots = live_pilots(active)
+    if pilots and not force:
+        print(f"pilot: job(s) {', '.join(job['job_id'] for job in pilots)} already "
+              "queued or running; not submitting another (--force to anyway)")
+        return
+    todo = [p for p in spec["pumas"] if not puma_complete(spec, exp, p)]
+    _, failed = held_elsewhere(spec, exp)
+    print(f"pilot: {len(todo)} of {len(spec['pumas'])} PUMA(s) unfinished"
+          + (f", {len(failed)} of them failed (--retry-failed)" if failed else ""))
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    path = exp / "bundles" / f"pilot-{stamp}.json"
+    if sub.dry_run:
+        print(f"  would write {path}")
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({**bundle_header(spec, exp), "spec": spec}, indent=2) + "\n")
+    sub.submit("pilot", stamp, "run_puma_bundle.sbatch", [str(path)],
+               slurm=with_signal(slurm_options(spec, "pilot", PILOT_SLURM)),
+               extra={"work": str(path)})
+
+
+def submit_pilot(spec: dict, root: Path, dry_run: bool = False,
+                 overrides: list[str] | None = None, force: bool = False) -> int:
+    """``--pilot``: record the experiment if new, then submit its pilot; the jobs submitted."""
+    exp = root / spec["name"]
+    if not spec.get("bundle"):
+        raise SystemExit("--pilot needs the experiment's bundle block: its per-PUMA fits and "
+                         "HMC jobs take no claims, so a pilot would duplicate them")
+    prepare(exp, spec, dry_run)
+    sub = Submitter(exp, spec, dry_run, overrides)
+    stage_pilot(sub, spec, exp, active_for(exp), force)
+    return sub.count
 
 
 # -- status -------------------------------------------------------------------
 
 
+def claim_line(claim: dict | None, failures: int) -> str:
+    """A PUMA's claim and failures, for --status."""
+    parts = []
+    if claim is not None:
+        held = (f"job {claim.get('job_id', '?')} on {claim.get('host', '?')}, "
+                f"heartbeat {rpb.age_text(claim['age'])} ago")
+        parts.append(f"STALE claim ({held}; {claim['stale']})" if claim["stale"]
+                     else f"claimed by {held}")
+    if failures >= rpb.MAX_FAILURES:
+        parts.append(f"FAILED ({failures} failures; --retry-failed)")
+    elif failures:
+        parts.append(f"{failures} failure(s)")
+    return "; ".join(parts)
+
+
 def status(spec: dict, exp: Path, active: dict) -> None:
     print(f"{exp}  (level {level(spec)})")
     in_bundle = bundled(active)
+    claims = rpb.claim_states(exp)
+    failures = {p: len(rpb.failure_records(exp, p)) for p in spec["pumas"]}
     if spec.get("bundle"):
         done = sum(puma_complete(spec, exp, p) for p in spec["pumas"])
+        held = sum(1 for p in spec["pumas"] if p in claims and not claims[p]["stale"])
+        failed = sum(1 for n in failures.values() if n >= rpb.MAX_FAILURES)
         print(f"  {done} of {len(spec['pumas'])} PUMA(s) complete; {len(in_bundle)} in live "
-              "bundle job(s)")
+              f"bundle job(s); {held} claimed by running job(s); {failed} failed")
+        for job in live_pilots(active):
+            print(f"  pilot job {job['job_id']} {job['state'].lower()} ({job.get('work', '')})")
     for puma in spec["pumas"]:
         job = in_bundle.get(puma)
-        print(f"  {puma}" + (f"  (bundle job {job['job_id']} {job['state'].lower()})" if job else ""))
+        extra = claim_line(claims.get(puma), failures[puma])
+        print(f"  {puma}" + (f"  (bundle job {job['job_id']} {job['state'].lower()})" if job else "")
+              + (f"  [{extra}]" if extra else ""))
         for method in spec["rake"]:
             done = rake_output(spec, exp, puma, method).exists()
             print(f"    {method:<12} {'done' if done else live(active, ('rake', puma, method))}")
@@ -782,11 +927,29 @@ def main() -> None:
     if args.status:
         status(spec, exp, active_for(exp))
         return
+    if args.retry_failed is not None:
+        wanted = args.retry_failed or None
+        unknown = sorted(set(wanted or []) - set(spec["pumas"]))
+        if unknown:
+            raise SystemExit(f"--retry-failed {unknown}: not among the experiment's PUMAs")
+        if args.dry_run:
+            cleared = sorted(path.stem for path in (exp / "failures").glob("*.jsonl")
+                             if wanted is None or path.stem in wanted)
+        else:
+            cleared = rpb.clear_failures(exp, wanted)
+        print(f"{'would clear' if args.dry_run else 'cleared'} the failure records of "
+              f"{len(cleared)} PUMA(s){': ' + ' '.join(cleared) if cleared else ''}; "
+              "call again to submit them")
+        return
     if check_inputs(spec) and not args.dry_run:
         print("the data directory is not ready:\n  " + "\n  ".join(check_inputs(spec)))
         raise SystemExit(1)
-    count = advance(spec, args.root, args.stage, args.max_gpu_jobs, args.dry_run,
-                    args.slurm_override.split())
+    if args.pilot:
+        count = submit_pilot(spec, args.root, args.dry_run, args.slurm_override.split(),
+                             args.force)
+    else:
+        count = advance(spec, args.root, args.stage, args.max_gpu_jobs, args.dry_run,
+                        args.slurm_override.split())
     print(f"{count} job(s) {'would be ' if args.dry_run else ''}submitted; see --status")
 
 
