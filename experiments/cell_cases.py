@@ -48,8 +48,15 @@ hierarchy's tract and block group rows; ``lambda_data`` adds ``lambda_P`` to
 tract rows), the PUMA part, and a **pinning ratio**
 ``(Sigma zeta)_i / (diag(Sigma)_i zeta_i)``: about 1 where the cell's own
 variance carries its multiplier, near 0 (or negative) where correlations with
-other cells cancel it -- a pinned direction. The ``--top`` largest ``|lambda|``
-cells get a heuristic cause (``pinned``: residual within 2 SE and pinning ratio
+other cells cancel it -- a pinned direction. At ``alpha = 0.01`` every direction
+outside the span of the 80 replicates (per taper group) has variance
+``alpha v``, so the ratio sits near ``alpha`` for most correlated cells; it is
+1 for cells without replicate spread (published zeros). A positive cell is
+**collapsed** when its MAP allocation is under 1% of its estimate: there the
+data side of the dual is flat too, and only ``Sigma``'s weak curvature holds
+the multiplier. The ``--top`` largest ``|zeta|`` cells (own multiplier; a PUMA
+multiplier repeated on every tract row is listed once, under the PUMA rows) get
+a heuristic cause (``pinned``: residual within 2 SE and pinning ratio
 under 0.5; ``puma``: a tract row whose ``lambda_P`` part is the larger; ``miss``:
 residual over 2 SE; else ``other``) and their **replicate-correlation
 clusters**: cosines of their replicate deviations (``sigma_l``, the
@@ -339,6 +346,9 @@ def shares(frame: pd.DataFrame, by: list[str]) -> pd.DataFrame:
     return table.astype({"cells": int, "zero": int, "nonzero": int})
 
 
+#: A positive cell's MAP allocation under this share of its estimate is "collapsed".
+COLLAPSED = 0.01
+
 MAP_COLUMNS = ("map_lam", "allocation", "resid_se", "resid_se_floored", "map_zeta",
                "map_lam_puma", "pinning")
 
@@ -437,7 +447,19 @@ def explain(args, root: Path, withl: pd.DataFrame, puma_frames: list, out: Path)
         lines += ["", "MAP residual (allocation - estimate) / SE, by k_hat (published SE; "
                       "pinning = (Sigma zeta)_i / (diag Sigma_i zeta_i)):"]
         lines += block(by.round(3))
-    top = withl.nlargest(args.top, "abs_lam").copy()
+        positive = has[has["estimate"] > 0].assign(
+            collapsed=lambda d: d["allocation"] < COLLAPSED * d["estimate"])
+        lines += ["", f"positive cells whose MAP allocation collapsed (under {COLLAPSED:.0%} of "
+                      f"the estimate): {int(positive['collapsed'].sum()):,} of {len(positive):,}; "
+                      "median |zeta| collapsed / not:"]
+        lines += block(positive.assign(abs_zeta=positive["map_zeta"].abs())
+                       .groupby(["k bin", "collapsed"])["abs_zeta"].agg(["size", "median"])
+                       .unstack("collapsed").reindex(LABELS).dropna(how="all").round(3))
+        lines += ["  by level and table (share collapsed):"]
+        lines += block(positive.groupby(["level", "table"])["collapsed"]
+                       .agg(["size", "sum", "mean"]).round(4))
+    withl = withl.assign(abs_own=withl["map_zeta"].abs().fillna(withl["abs_lam"]))
+    top = withl.nlargest(args.top, "abs_own").copy()
     top["cause"] = [cause(r) for _, r in top.iterrows()]
     summary_rows, pairs = [], []
     for puma, g in top.groupby("puma"):
@@ -458,7 +480,7 @@ def explain(args, root: Path, withl: pd.DataFrame, puma_frames: list, out: Path)
                "resid_se", "map_lam", "map_zeta", "map_lam_puma", "pinning", "support_units",
                "max_abs_r", "n_r95", "cause"]
     clustered = (top["n_r95"].fillna(0) > 0)
-    lines += ["", f"the {len(top)} largest |MAP multiplier|, with a heuristic cause "
+    lines += ["", f"the {len(top)} largest |own multiplier zeta|, with a heuristic cause "
                   "(pinned: |resid| <= 2 SE and pinning < 0.5; puma: a tract row whose "
                   "lambda_P part is larger; miss: |resid| > 2 SE):",
               "  causes: " + ", ".join(f"{k} {v}" for k, v in top["cause"].value_counts().items()),
@@ -491,12 +513,22 @@ def pullout_summary(pull: pd.DataFrame, thresholds: list[float]) -> list[str]:
 
 
 def no_support_summary(cells: pd.DataFrame) -> list[str]:
+    lines = []
+    positive = cells[cells["estimate"] > 0]
+    orphans = positive[positive["support_units"] == 0]
+    lines += ["", f"Positive cells whose category no support unit carries (cannot be fitted; "
+                  f"the multiplier only touches its own Gaussian term): {len(orphans):,} of "
+                  f"{len(positive):,} positive cells"]
+    if len(orphans):
+        lines += block(orphans.groupby(["level", "table", "category"])
+                       .agg(cells=("estimate", "size"), persons=("estimate", "sum"),
+                            pumas=("puma", "nunique")))
     zero = cells[cells["estimate"] == 0]
     if not len(zero):
-        return []
+        return lines
     none = zero[zero["support_units"] == 0]
-    lines = ["", f"Zero cells whose category no support unit carries (allocation exactly zero): "
-                 f"{len(none):,} of {len(zero):,} zero cells"]
+    lines += ["", f"Zero cells whose category no support unit carries (allocation exactly zero): "
+                  f"{len(none):,} of {len(zero):,} zero cells"]
     if len(none):
         table = (zero.assign(no_support=zero["support_units"] == 0)
                  .groupby(["level", "table"])["no_support"].agg(["size", "sum"])

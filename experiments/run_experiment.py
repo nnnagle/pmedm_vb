@@ -295,13 +295,15 @@ def level(spec: dict) -> str:
     from pmedm_vb.assemble.sharecap import cap_level
     from pmedm_vb.assemble.k0 import k0_level
     from pmedm_vb.assemble.tweedie import tweedie_level
+    from pmedm_vb.assemble.decorrelate import decor_level
 
     model = spec["model"]
-    return k0_level(tweedie_level(
+    return decor_level(k0_level(tweedie_level(
         prior_level(cap_level(level_name(model["hierarchy"], None, model.get("rollup")),
                               model.get("share_cap"), model.get("cap_strength")),
                     model.get("multiplier_prior_sd")),
-        model.get("tweedie_weight")), model.get("k0_weight"), model.get("k0_df", 0.0))
+        model.get("tweedie_weight")), model.get("k0_weight"), model.get("k0_df", 0.0)),
+        model.get("decorrelate_k"))
 
 
 def fit_name(spec: dict, puma: str, alpha: float) -> str:
@@ -326,6 +328,8 @@ def model_args(spec: dict) -> list[str]:
         args += ["--tweedie-weight", f"{model['tweedie_weight']:g}"]
     if model.get("k0_weight") is not None:
         args += ["--k0-weight", f"{model['k0_weight']:g}", "--k0-df", f"{model.get('k0_df', 0):g}"]
+    if model.get("decorrelate_k") is not None:
+        args += ["--decorrelate-k", f"{model['decorrelate_k']:g}"]
     return args
 
 

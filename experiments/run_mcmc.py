@@ -252,6 +252,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--k0-df", type=float, default=0.0,
                         help="with --k0-weight, the degrees of freedom k of its log det barrier, "
                              "e.g. 0.01")
+    parser.add_argument("--decorrelate-k", type=float, default=None,
+                        help="drop the replicate correlations of the rows with a positive estimate "
+                             "and k_hat = (estimate/SE)^2 below this (pmedm_vb.assemble.decorrelate), "
+                             "e.g. 2; the hierarchy level gains +decor<c>")
     args = parser.parse_args()
     if (getattr(args, "vb_run", None) is None) == (getattr(args, "map_run", None) is None):
         parser.error("give one of --vb-run and --map-run")
@@ -270,12 +274,14 @@ def parse_args() -> argparse.Namespace:
     from pmedm_vb.assemble.sharecap import cap_level
     from pmedm_vb.assemble.k0 import k0_level
     from pmedm_vb.assemble.tweedie import tweedie_level
+    from pmedm_vb.assemble.decorrelate import decor_level
 
     if getattr(args, "hierarchy", None) is not None:
         args.hierarchy = k0_level(tweedie_level(
             prior_level(cap_level(level_name(args.hierarchy, args.collapse, args.rollup),
                                   args.share_cap, args.cap_strength), args.prior_sd),
             args.tweedie_weight), args.k0_weight, args.k0_df)
+        args.hierarchy = decor_level(args.hierarchy, args.decorrelate_k)
     return args
 
 

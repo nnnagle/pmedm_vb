@@ -150,12 +150,17 @@ class Hierarchy:
         zero a Tweedie error, held as ``.tweedie`` (``None`` without one); a
         ``+k0w<w>`` suffix (:mod:`pmedm_vb.assemble.k0`) gives every row the
         count-shaped ``K0`` error with Sigma's correlations, held in the same
-        slot (it needs ``alpha`` and ``taper``)."""
+        slot (it needs ``alpha`` and ``taper``). A ``+decor<c>`` suffix
+        (:mod:`pmedm_vb.assemble.decorrelate`) drops the replicate deviations of
+        the rows with a positive estimate and ``k_hat < c`` in :meth:`sigma`,
+        held as ``.decor`` and ``.decor_rows``; plain levels only."""
         from pmedm_vb.assemble.k0 import K0Term, split_k0
         from pmedm_vb.assemble.prior import prior_variance, split_prior
         from pmedm_vb.assemble.sharecap import split_cap
         from pmedm_vb.assemble.tweedie import TweedieZeros, split_tweedie
+        from pmedm_vb.assemble.decorrelate import decorrelated_rows, split_decor
 
+        level, decor = split_decor(level)
         level, k0_spec = split_k0(level)
         level, tweedie_w = split_tweedie(level)
         if k0_spec is not None and tweedie_w is not None:
@@ -164,6 +169,11 @@ class Hierarchy:
         level, prior_sd = split_prior(level)
         level, cap = split_cap(level)
         h = cls._build(inputs, level, alpha=alpha, taper=taper, variance_floor=variance_floor)
+        if decor is not None:
+            if getattr(h, "is_collapsed", False) or type(h) is not cls:
+                raise ValueError(f"+decor<c> needs a plain level (none, tract, puma), got {level!r}")
+            h.decor = decor
+            h.decor_rows = decorrelated_rows(inputs, decor)
         h.cap = cap
         h.prior_sd = prior_sd
         h.prior_var = prior_variance(prior_sd, inputs.n, inputs.N)
@@ -253,6 +263,8 @@ class Hierarchy:
     prior_sd = None
     prior_var = 0.0
     tweedie = None
+    decor = None
+    decor_rows = None
 
     @property
     def targets_ext(self) -> np.ndarray:
@@ -341,10 +353,16 @@ class Hierarchy:
               variance_floor: str | float | None) -> Sigma:
         """``Sigma_ext``: the run's ``Sigma`` with the PUMA rows appended as their
         own taper group. The same as ``inputs.sigma(...)`` below ``"puma"``.
-        With a prior (``+prior<sd>``), its ``prior_var`` on the diagonal."""
+        With a prior (``+prior<sd>``), its ``prior_var`` on the diagonal; with
+        ``+decor<c>``, the low-``k_hat`` rows without their replicate
+        deviations (the PUMA rows keep theirs)."""
         from pmedm_vb.assemble.prior import with_prior
 
         base = inputs.sigma(alpha, taper, variance_floor)
+        if self.decor_rows is not None:
+            from pmedm_vb.assemble.decorrelate import decorrelate
+
+            base = decorrelate(base, self.decor_rows)
         if not self.n_puma:
             return with_prior(base, self.prior_var)
         v = np.concatenate([base.v, self.v_P])
