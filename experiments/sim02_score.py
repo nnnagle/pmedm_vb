@@ -24,9 +24,19 @@ against the truth's ``T``, cell by cell:
   their share); a fit with none in any draw scores 1, having no income
   distribution for the race at all, and a race the truth has none of is left
   out (NaN);
-- **rare groups** (``rare_groups``): per group, the persons a draw places in
-  block groups where the truth has none of the group (posterior mean and 90%
-  interval), with the group's true and fitted totals;
+- **rare groups** (``rare_groups``, and always :data:`SCORED_RARE`): per
+  group, the persons a draw places in block groups where the truth has none of
+  the group (posterior mean and 90% interval), with the group's true and fitted
+  totals; and the group's count per block group (its ``B03002`` block group
+  constraint column, persons) against the truth's over *every* block group,
+  those where the truth has none included: CRPS of the draws as an ensemble
+  (the formula above), 90% coverage, interval width and mean |error|. Why a
+  proper score and not the misplaced persons alone: a published zero or a
+  count resting on one sampled case says little about where the group lives,
+  so a fit that spreads it over the plausible block groups can be honest
+  rather than wrong; the CRPS rewards that spread only when it is calibrated
+  (a spread that misses the truth's block groups, or too narrow a one, scores
+  worse than a calibrated one), and coverage says which way it errs;
 - **borrowed weight** (statewide fit): the share of ``N`` on pool B's
   records, prior and posterior (``compare_support.borrowed_fraction``); and,
   for the borrowed kind, the truth's own share on pool A's records.
@@ -51,8 +61,11 @@ Writes, under ``<root>/<name>/simulation/scores``:
     constraint and held-out cells the mean |error| and CRPS over ``se``.
 ``puma_crosstab.csv``, ``income_within_race.csv``, ``rare_groups.csv``, ``borrowed.csv``
     The PUMA's cross-tabulation cells (truth, posterior mean and interval),
-    each race's TVD, the rare groups and the borrowed weight, per kind,
-    truth and fit.
+    each race's TVD, the rare groups (with ``bg_*``: the per-block-group
+    count's CRPS, coverage, width and mean |error| over ``block_groups``) and
+    the borrowed weight, per kind, truth and fit. The rare groups' measures
+    are also in ``per_truth.csv`` (``misplaced_<g>``, ``rare_crps_<g>``,
+    ``rare_cover90_<g>``), hence in the paired comparisons and summary.txt.
 ``per_truth.csv``, ``paired.csv``, ``summary.txt``
     One row per (kind, truth, fit) of every measure; per kind and measure the
     two fits over the truths both have (means, the paired difference statewide
@@ -90,6 +103,14 @@ from sim02_build import truth_source  # noqa: E402
 from sim02_common import FITS, Sim02  # noqa: E402
 from sim_common import Tabulator  # noqa: E402
 from sim_score import ensemble_scores  # noqa: E402
+
+#: The rare ``B03002`` groups whose block group counts are always scored, with
+#: the simulation's ``rare_groups`` (persons; tn01's one-case tract cells were
+#: in these groups).
+SCORED_RARE = ("nh_nhpi", "nh_aian", "nh_other_race", "nh_asian")
+#: The rare-group scores' random draws (``ensemble_scores``' rank ties) come from
+#: their own generator, so the other scores are those of a run without them.
+RARE_SEED = 1
 
 
 def parse_args() -> argparse.Namespace:
@@ -164,10 +185,16 @@ def shares(x: np.ndarray) -> np.ndarray:
     return np.divide(x, total, out=np.full(x.shape, np.nan), where=total > 0)
 
 
+def rare_groups(rare: list[str]) -> list[str]:
+    """The simulation's rare groups, then those of :data:`SCORED_RARE` it lacks."""
+    return list(rare) + [g for g in SCORED_RARE if g not in rare]
+
+
 def score_fit(truth: dict, draws: dict, names: dict, se: dict, rare: list[str],
-              rng) -> tuple[list[dict], dict, list[dict], list[dict], list[dict]]:
+              rng, rare_rng=None) -> tuple[list[dict], dict, list[dict], list[dict], list[dict]]:
     """One fit of one truth: the cell sets' scores, the per-truth measures, the
-    PUMA cross-tabulation, the races' TVDs and the rare groups."""
+    PUMA cross-tabulation, the races' TVDs and the rare groups (scored with
+    ``rare_rng``, default ``rng``)."""
     n_cons = {"block group": len(names["bg"]), "tract": len(names["tract"])}
     rows, measures = [], {}
     sets = [("block group", "crosstab", draws["crosstab"], truth["crosstab"], None),
@@ -213,7 +240,7 @@ def score_fit(truth: dict, draws: dict, names: dict, se: dict, rare: list[str],
         measures[f"tvd_{race.split('.', 1)[1]}"] = value
 
     groups = []
-    for group in rare:
+    for group in rare_groups(rare):
         name = f"B03002.{group}"
         if name not in names["bg"]:
             continue
@@ -222,12 +249,19 @@ def score_fit(truth: dict, draws: dict, names: dict, se: dict, rare: list[str],
         placed = draws["block group"][:, :, k].astype(float)
         misplaced = placed[:, zero].sum(1)
         a, b = np.quantile(misplaced, [0.05, 0.95])
+        # The count in every block group, truth-zero ones included (persons).
+        bg = score_set(placed, truth["block group"][:, k], None,
+                       rng if rare_rng is None else rare_rng)
         groups.append({"group": group, "truth_total": float(truth["block group"][:, k].sum()),
                        "fit_total": float(placed.sum(1).mean()),
                        "truth_zero_block_groups": int(zero.sum()),
                        "misplaced_mean": float(misplaced.mean()), "misplaced_q05": float(a),
-                       "misplaced_q95": float(b)})
+                       "misplaced_q95": float(b), "block_groups": bg["cells"],
+                       "bg_crps": bg["crps"], "bg_cover90": bg["cover90"],
+                       "bg_width90": bg["width90"], "bg_mae": bg["mae"]})
         measures[f"misplaced_{group}"] = float(misplaced.mean())
+        measures[f"rare_crps_{group}"] = bg["crps"]
+        measures[f"rare_cover90_{group}"] = bg["cover90"]
     return rows, measures, cross, within, groups
 
 
@@ -327,9 +361,10 @@ def load_fit(path: Path, trace: Path, draws: int, names: dict):
 
 def record_fit(tables: dict, base: dict, truth: dict, cells: dict, borrowed: np.ndarray,
                prior: float, truth_borrowed: float, names: dict, se: dict, rare: list[str],
-               rng) -> dict:
+               rng, rare_rng=None) -> dict:
     """Score one fit of one truth into ``tables``; its per-truth measures."""
-    rows, measures, cross, within, groups = score_fit(truth, cells, names, se, rare, rng)
+    rows, measures, cross, within, groups = score_fit(truth, cells, names, se, rare, rng,
+                                                      rare_rng)
     tables["scores"] += [{**base, **row} for row in rows]
     tables["cross"] += [{**base, **row} for row in cross]
     tables["within"] += [{**base, **row} for row in within]
@@ -407,7 +442,7 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     rare = list(sim.settings.get("rare_groups", []))
     pool_names = HeldOut.load(sim.pool_inputs("B")).names
-    rng = np.random.default_rng(0)
+    rng, rare_rng = np.random.default_rng(0), np.random.default_rng(RARE_SEED)
     tables = {k: [] for k in ("scores", "per_truth", "cross", "within", "rare", "borrowed")}
     missing = []
     # The bootstrap fit is scored once some replicate has a trace; then each truth
@@ -440,7 +475,7 @@ def main() -> None:
                                                             draws_wanted, names)
                 measures = record_fit(tables, {"kind": kind, "truth_id": i, "fit": fit}, truth,
                                       cells, borrowed, prior, truth_borrowed, names, se, rare,
-                                      rng)
+                                      rng, rare_rng)
                 print(f"{puma} {fit}: {borrowed.size} draws, {rows:,} rows; race x "
                       f"income CRPS {measures['block_group_crosstab_crps']:.3g}, TVD "
                       f"{measures['tvd_mean']:.3g}", flush=True)
@@ -459,7 +494,7 @@ def main() -> None:
             prior = float(np.mean([part[2] for part in parts]))
             measures = record_fit(tables, {"kind": kind, "truth_id": i, "fit": "boot"}, truth,
                                   cells, borrowed, prior, truth_borrowed, names, parts[0][3],
-                                  rare, rng)
+                                  rare, rng, rare_rng)
             boot_pooled[puma] = [part[1].size for part in parts]
             print(f"{puma} boot: {borrowed.size} draws ({' + '.join(map(str, boot_pooled[puma]))} "
                   f"from {R} replicates); race x income CRPS "
@@ -488,7 +523,10 @@ def main() -> None:
     if missing:
         lines += [f"missing fits, left out ({len(missing)}): {', '.join(missing)}", ""]
     rare_measures = [(f"misplaced_{g}", f"{g}: persons in block groups where the truth has none")
-                     for g in rare]
+                     for g in rare_groups(rare)]
+    rare_measures += [(f"rare_{m}_{g}", f"{g} per block group (all): {label}")
+                      for g in rare_groups(rare)
+                      for m, label in (("crps", "CRPS (persons)"), ("cover90", "90% coverage"))]
     for kind in sim.kinds():
         part = pairs[pairs["kind"] == kind].set_index("measure")
         if part.empty:

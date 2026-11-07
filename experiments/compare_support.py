@@ -26,7 +26,8 @@ and reports:
    published estimate and its standard error -- the error, the predictive
    ``z = (mean - Y) / sqrt(SE^2 + sd^2)``, 90% predictive coverage and a
    Gaussian log score -- by level and by relation to the fitted tables, and
-   how often the statewide posterior is closer.
+   how often the statewide posterior is closer (``heldout_scores.py``, shared
+   with ``compare_variants.py``).
 
 Section 1 also gives, for each race and ethnicity, the distribution of its
 persons over household income bands (shares within the race): under each
@@ -65,6 +66,8 @@ from scipy.special import logsumexp
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_experiment as rx  # noqa: E402
+from heldout_scores import (HeldoutPredictor, area_names, level_frame, score_cells,  # noqa: E402
+                            score_groups)
 
 from pmedm_vb import compare  # noqa: E402
 from pmedm_vb.assemble.heldout import HeldOut  # noqa: E402
@@ -142,10 +145,9 @@ def draw_summaries(inputs: PMEDMInputs, lam: np.ndarray, outcomes: sp.spmatrix,
            "borrowed": np.empty((d, inputs.n_zones)),
            "max_share": np.empty(d), "max_zone": np.empty(d, int), "max_row": np.empty(d, int)}
     if heldout is not None:
-        h_b, h_t = (sp.csr_matrix(heldout.X[level]) for level in ("block group", "tract"))
-        A_T = sp.csr_matrix(inputs.A_T)
-        out["held_bg"] = np.empty((d, inputs.n_zones, h_b.shape[1]), dtype=np.float32)
-        out["held_tract"] = np.empty((d, A_T.shape[0], h_t.shape[1]), dtype=np.float32)
+        held = HeldoutPredictor(inputs, heldout)
+        out["held_bg"] = np.empty((d, inputs.n_zones, held.h_b.shape[1]), dtype=np.float32)
+        out["held_tract"] = np.empty((d, held.A_T.shape[0], held.h_t.shape[1]), dtype=np.float32)
     for k in range(d):
         logits = log_q - op.adjoint(lam[:, k])
         log_z = logsumexp(logits)
@@ -156,23 +158,8 @@ def draw_summaries(inputs: PMEDMInputs, lam: np.ndarray, outcomes: sp.spmatrix,
         out["max_share"][k] = np.exp(logits.flat[flat] - log_z)
         out["max_zone"][k], out["max_row"][k] = divmod(flat, inputs.n_units)
         if heldout is not None:
-            out["held_bg"][k] = (h_b.T @ W.T).T
-            out["held_tract"][k] = A_T @ (h_t.T @ W.T).T
+            out["held_bg"][k], out["held_tract"][k] = held(W)
     return out
-
-
-def score_cells(draws: np.ndarray, Y: np.ndarray, v: np.ndarray) -> dict[str, np.ndarray]:
-    """Per cell of ``(draws, areas, k)`` predictions against published ``Y`` and
-    variance ``v``: mean, sd, error, predictive z, 90% predictive coverage and a
-    Gaussian log score. Cells with no spread at all (zero variance and sd) are NaN."""
-    mean, sd = draws.mean(0).astype(float), draws.std(0, ddof=1).astype(float)
-    spread = np.sqrt(np.asarray(v, float) + sd**2)
-    ok = spread > 0
-    safe = np.where(ok, spread, 1.0)
-    pred_z = np.where(ok, (mean - Y) / safe, np.nan)
-    return {"mean": mean, "sd": sd, "error": mean - Y, "pred_z": pred_z,
-            "covers": np.where(ok, np.abs(pred_z) <= 1.645, np.nan),
-            "log_score": np.where(ok, -0.5 * np.log(2 * np.pi * safe**2) - 0.5 * pred_z**2, np.nan)}
 
 
 def income_within_race(totals: pd.DataFrame, base_draws: np.ndarray, alt_draws: np.ndarray
@@ -411,25 +398,15 @@ def main() -> None:
                      "with --epsilon for the statewide one)")
     else:
         frames, summary = [], []
-        areas = {"block group": zones, "tract": list(base.tracts.iloc[:, 0].astype(str))}
+        areas = area_names(base)
         for level, key in (("block group", "held_bg"), ("tract", "held_tract")):
             Y, v = base_held.Y[level], base_held.v[level]
-            names, relation = base_held.names[level], base_held.relation(level)
             scores = {tag: score_cells(s[key], Y, v) for tag, s in (("base", base_s), ("alt", alt_s))}
-            frame = pd.DataFrame({
-                "level": level, "area": np.repeat(areas[level], len(names)),
-                "cell": np.tile(names, len(areas[level])),
-                "relation": np.tile(relation, len(areas[level])),
-                "published": Y.ravel(), "se": np.sqrt(v).ravel(),
-                **{f"{tag}_{m}": vals.ravel() for tag, sc in scores.items() for m, vals in sc.items()},
-            })
+            frame = level_frame(base_held, level, areas[level], scores)
             frames.append(frame)
-            groups = list(frame.groupby("relation"))
-            # Race x poverty (B17010A-I) on its own too: the joint structure borrowing changes.
-            race_poverty = frame[frame["cell"].str.startswith("B17010")]
-            if len(race_poverty):
-                groups.append(("B17010 race x poverty", race_poverty))
-            for rel, g in groups:
+            # By relation, and race x poverty (B17010A-I) on its own too: the joint
+            # structure borrowing changes.
+            for rel, g in score_groups(frame):
                 ok = g.dropna(subset=["base_pred_z", "alt_pred_z"])
                 summary.append({
                     "level": level, "relation": rel, "cells": len(ok),
