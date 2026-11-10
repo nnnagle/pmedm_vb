@@ -74,6 +74,25 @@ PUMA is done (or failed twice: ``run_experiment.py --retry-failed`` clears
 that); an error in one round is printed and the next round tries again, so it
 can be left running in ``tmux`` on a login node.
 
+**The driver job** (``--start``), as ``run_paper.py`` does: a small job on a
+CPU partition (``--driver-sbatch``, by default ``short``, 30 minutes, 1 core)
+runs one call (``--tick``) and, while work remains, submits itself again to
+start ``--every`` minutes later (``sbatch --begin=now+<every>minutes``), so
+nothing has to keep running on a login node and the prompt is free at once.
+The driver's own jobs are recorded in ``<root>/run_queue/jobs.jsonl`` and their
+logs go to ``<root>/run_queue/logs``. A lock under ``<root>/run_queue`` keeps
+two calls (a driver job and one by hand) from submitting at the same time.
+``--stop`` cancels the driver job; ``--status`` also says whether one is queued
+or running. A call that fails (``squeue`` or the file system) still schedules
+the next one and exits non-zero, which mails the failure; after
+:data:`MAX_TICK_FAILURES` failed calls in a row the driver stops rescheduling.
+The driver job passes on the experiments and every queue option it was started
+with, so ``--start`` with the same arguments as a hand call does the same work::
+
+    $CONDA_PREFIX/bin/python experiments/run_queue.py <the JSONs> --root $R --start
+    $CONDA_PREFIX/bin/python experiments/run_queue.py <the JSONs> --root $R --status
+    $CONDA_PREFIX/bin/python experiments/run_queue.py <the JSONs> --root $R --stop
+
 Only experiments with a ``bundle`` block are run here (their fits and HMC go
 in bundle jobs); raking and pilots stay with ``run_experiment.py``.
 """
@@ -84,6 +103,10 @@ import argparse
 import copy
 import json
 import math
+import os
+import shlex
+import socket
+import subprocess
 import sys
 import time
 import traceback
@@ -111,6 +134,14 @@ DEFAULT_QUEUE = {
 }
 
 
+#: The driver job's sbatch options (``--driver-sbatch`` replaces them).
+DRIVER_SBATCH = "--partition=short --qos=short --time=00:30:00 --cpus-per-task=1 --mem=4G"
+#: Failed driver calls in a row after which it stops rescheduling itself.
+MAX_TICK_FAILURES = 3
+#: A lock older than this (seconds) is taken to be left by a killed call.
+STALE_LOCK = 2 * 3600
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -136,8 +167,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true",
                         help="print what one call would submit; write nothing")
     parser.add_argument("--watch", type=float, default=None, metavar="MINUTES",
-                        help="repeat every MINUTES until every PUMA is done")
-    return parser.parse_args()
+                        help="repeat every MINUTES until every PUMA is done, in this terminal")
+    parser.add_argument("--start", action="store_true",
+                        help="submit the driver job, which repeats every --every minutes "
+                             "until every PUMA is done, and return")
+    parser.add_argument("--stop", action="store_true", help="cancel the driver job")
+    parser.add_argument("--tick", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--every", type=float, default=20.0, metavar="MINUTES",
+                        help="the driver job's interval (default 20)")
+    parser.add_argument("--driver-sbatch", default=DRIVER_SBATCH, metavar="OPTIONS",
+                        help="the driver job's sbatch options, given with '=' since they "
+                             f"start with '--' (default --driver-sbatch=\"{DRIVER_SBATCH}\")")
+    args = parser.parse_args()
+    if sum(map(bool, (args.start, args.stop, args.tick, args.status,
+                      args.watch is not None))) > 1:
+        parser.error("--start, --stop, --status and --watch are alternatives")
+    return args
 
 
 # -- the configuration ----------------------------------------------------------
@@ -404,6 +449,143 @@ def report(experiments: list[Experiment], queue: dict) -> None:
         print("\n".join(experiment.status()))
 
 
+# -- the driver job --------------------------------------------------------------
+
+
+class Lock:
+    """``<root>/run_queue/lock``: one call submits at a time."""
+
+    def __init__(self, root: Path) -> None:
+        self.path = root / "run_queue" / "lock"
+
+    def __enter__(self) -> "Lock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path.exists() and time.time() - self.path.stat().st_mtime > STALE_LOCK:
+            self.path.unlink()
+        try:
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            raise SystemExit(f"{self.path} is held ({self.path.read_text().strip()}); another "
+                             "call is submitting -- try again in a minute") from None
+        os.write(fd, f"{socket.gethostname()} pid {os.getpid()} {time.ctime()}\n".encode())
+        os.close(fd)
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.path.unlink(missing_ok=True)
+
+
+class Driver:
+    """The driver's records, ``<root>/run_queue/jobs.jsonl``: its jobs (``job``)
+    and the outcome of each call it ran (``tick``)."""
+
+    def __init__(self, root: Path) -> None:
+        self.dir = root / "run_queue"
+        self.path = self.dir / "jobs.jsonl"
+        self.records = ([json.loads(line) for line in self.path.read_text().splitlines()
+                         if line.strip()] if self.path.exists() else [])
+
+    def append(self, record: dict) -> None:
+        self.dir.mkdir(parents=True, exist_ok=True)
+        record = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **record}
+        with open(self.path, "a") as handle:
+            handle.write(json.dumps(record) + "\n")
+        self.records.append(record)
+
+    def live(self) -> dict[str, str]:
+        """The driver's jobs queued or running: job id -> state."""
+        ids = [r["job_id"] for r in self.records if r.get("kind") == "job"]
+        return rx.active_jobs(ids) if ids else {}
+
+    def failures_in_a_row(self) -> int:
+        count = 0
+        for record in reversed([r for r in self.records if r.get("kind") == "tick"]):
+            if record["ok"]:
+                break
+            count += 1
+        return count
+
+    def last_tick(self) -> dict | None:
+        ticks = [r for r in self.records if r.get("kind") == "tick"]
+        return ticks[-1] if ticks else None
+
+
+def passthrough(args: argparse.Namespace) -> list[str]:
+    """The experiments and queue options, for the driver job's own call."""
+    out = [str(p.resolve()) for p in args.experiments] + ["--root", str(args.root.resolve())]
+    if args.queue is not None:
+        out += ["--queue", str(args.queue.resolve())]
+    for flag, values in (("--max-submitted", args.max_submitted),
+                         ("--max-running", args.max_running), ("--sbatch", args.sbatch),
+                         ("--per-job", args.per_job)):
+        for value in values:
+            out.append(f"{flag}={value}")  # "=": a value may itself start with "--"
+    if args.partitions:
+        out += ["--partitions", *args.partitions]
+    if args.account:
+        out += ["--account", args.account]
+    out += ["--every", f"{args.every:g}", f"--driver-sbatch={args.driver_sbatch}"]
+    return out
+
+
+def schedule(args: argparse.Namespace, driver: Driver, now: bool) -> str:
+    """Submit the driver job: at once (``--start``) or ``--every`` minutes from now."""
+    account = args.account or queue_config(args)["account"]
+    logs = driver.dir / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    command = ["sbatch", "--parsable", f"--account={account}", "--job-name=run-queue",
+               f"--output={logs / 'driver-%j.log'}", *shlex.split(args.driver_sbatch)]
+    if not now:
+        command.append(f"--begin=now+{max(1, round(args.every))}minutes")
+    command += [str(rx.EXPERIMENTS / "run_queue.sbatch"), *passthrough(args), "--tick"]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise SystemExit(f"sbatch failed: {result.stderr.strip()}\n{' '.join(command)}")
+    job_id = result.stdout.strip().split(";")[0]
+    driver.append({"kind": "job", "job_id": job_id, "command": command})
+    print(f"driver job {job_id} submitted" + ("" if now else f", to start in {args.every:g} min"))
+    return job_id
+
+
+def tick(args: argparse.Namespace, experiments: list, queue: dict) -> int:
+    """One call as the driver job; then the next job while work remains."""
+    driver = Driver(args.root)
+    ok, left = False, True
+    try:
+        with Lock(args.root):
+            count, left = one_call(experiments, queue, False)
+            print(f"{count} job(s) submitted", flush=True)
+        ok = True
+    except (Exception, SystemExit):
+        traceback.print_exc()
+    driver.append({"kind": "tick", "ok": ok, "left": bool(left),
+                   "job_id": os.environ.get("SLURM_JOB_ID", "")})
+    if ok and not left:
+        failed = {e.name: e.failed() for e in experiments if e.failed()}
+        print("every PUMA is done" + (f", but failed: {failed} (run_experiment.py "
+                                      "--retry-failed, then --start again)" if failed else "")
+              + "; the driver stops")
+        return 0
+    if driver.failures_in_a_row() >= MAX_TICK_FAILURES:
+        print(f"{MAX_TICK_FAILURES} calls in a row failed; the driver stops (see the logs in "
+              f"{driver.dir / 'logs'}, then --start again)")
+        return 1
+    schedule(args, driver, now=False)
+    return 0 if ok else 1
+
+
+def driver_status(args: argparse.Namespace) -> None:
+    driver = Driver(args.root)
+    live = driver.live()
+    last = driver.last_tick()
+    line = ("driver: " + (", ".join(f"job {j} {s}" for j, s in live.items()) if live
+                          else "no driver job queued or running"))
+    if last:
+        line += (f"; last call {last['time']} " + ("ok" if last["ok"] else "FAILED")
+                 + ("" if last.get("left", True) else ", nothing left"))
+    print(line)
+
+
 def main() -> None:
     args = parse_args()
     queue = queue_config(args)
@@ -412,24 +594,48 @@ def main() -> None:
     if len(set(names)) != len(names):
         raise SystemExit(f"an experiment is named twice: {names}")
     if args.status:
+        driver_status(args)
         report(experiments, queue)
         return
+    if args.stop:
+        live = Driver(args.root).live()
+        if not live:
+            print("no driver job queued or running")
+            return
+        subprocess.run(["scancel", *live], check=False)
+        print(f"cancelled driver job(s) {', '.join(live)}")
+        return
+    if args.tick:
+        sys.exit(tick(args, experiments, queue))
+    if args.start:
+        driver = Driver(args.root)
+        live = driver.live()
+        if live:
+            raise SystemExit(f"a driver job is already queued or running: {', '.join(live)} "
+                             "(--stop first)")
+        if args.dry_run:
+            print("would submit the driver job: run_queue.sbatch " + " ".join(passthrough(args)))
+            return
+        schedule(args, driver, now=True)
+        return
     if args.watch is None or args.dry_run:
-        count, left = one_call(experiments, queue, args.dry_run)
+        with (Lock(args.root) if not args.dry_run else _nolock()):
+            count, left = one_call(experiments, queue, args.dry_run)
         print(f"{count} job(s) {'would be ' if args.dry_run else ''}submitted"
               + ("" if left else "; every PUMA is done or failed") + "; see --status")
         return
     while True:
         print(f"\n--- {time.strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
         try:
-            count, left = one_call(experiments, queue, False)
+            with Lock(args.root):
+                count, left = one_call(experiments, queue, False)
             print(f"{count} job(s) submitted", flush=True)
             if not left:
                 failed = {e.name: e.failed() for e in experiments if e.failed()}
                 print("every PUMA is done" + (f", but failed: {failed} (run_experiment.py "
                                               "--retry-failed, then watch again)" if failed else ""))
                 return
-        except Exception:  # a round that fails (squeue, the file system) is retried
+        except (Exception, SystemExit):  # a round that fails (squeue, the file system, the lock)
             traceback.print_exc()
         sys.stdout.flush()
         try:
@@ -437,6 +643,14 @@ def main() -> None:
         except KeyboardInterrupt:
             print("stopped")
             return
+
+
+class _nolock:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return None
 
 
 if __name__ == "__main__":
