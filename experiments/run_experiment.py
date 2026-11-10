@@ -103,6 +103,10 @@ is stale), its failures, and the live pilots.
 send a smoke test to a debug partition without editing the JSON; a
 ``--partition`` in it is also where that call counts GPU jobs against
 ``--max-gpu-jobs``.
+
+``run_queue.py`` runs several bundle experiments across more than one GPU
+partition (ai-tenn-debug, then campus-gpu) with the same bundles, claims and
+job records (:func:`bundle_todo`, :func:`submit_bundle`).
 """
 
 from __future__ import annotations
@@ -394,13 +398,22 @@ def gpu_partition(spec: dict) -> str:
     return (spec.get("slurm") or {}).get("gpu_partition", GPU_PARTITION)
 
 
-def gpu_jobs_in_queue(partition: str = GPU_PARTITION) -> int:
+def user_jobs(partition: str) -> list[tuple[str, str]] | None:
+    """``(job id, state)`` of each of the user's jobs ``squeue`` lists in the
+    partition (queued or running, whatever submitted them); ``None`` when
+    ``squeue`` cannot be run."""
     try:
         out = subprocess.run(["squeue", "-h", "-u", os.environ.get("USER", ""), "-p",
-                              partition], capture_output=True, text=True, timeout=60).stdout
+                              partition, "-o", "%i %T"],
+                             capture_output=True, text=True, timeout=60).stdout
     except (OSError, subprocess.SubprocessError):
-        return 0
-    return sum(1 for line in out.splitlines() if line.strip())
+        return None
+    return [tuple(line.split()[:2]) for line in out.splitlines() if len(line.split()) >= 2]
+
+
+def gpu_jobs_in_queue(partition: str = GPU_PARTITION) -> int:
+    """The user's jobs queued or running in the partition (0 when ``squeue`` cannot answer)."""
+    return len(user_jobs(partition) or [])
 
 
 def read_jobs(exp: Path) -> list[dict]:
@@ -710,24 +723,63 @@ def held_elsewhere(spec: dict, exp: Path) -> tuple[dict[str, dict], list[str]]:
     return claims, failed
 
 
-def stage_bundle(sub: Submitter, spec: dict, exp: Path, active: dict, slots: list[int]) -> None:
-    """Submit the unfinished PUMAs that no live bundle job holds, no live job has
-    claimed and that have not failed, split over ``bundle.jobs`` jobs of
-    run_puma_bundle.sbatch."""
+def bundle_todo(spec: dict, exp: Path, active: dict, prefix: str = "bundles") -> list[str]:
+    """The PUMAs a new bundle job should take, in the experiment's order: the
+    unfinished ones that no live bundle job holds, no live job has claimed and
+    that have not failed. Says, after ``prefix``, which are held and why."""
     live = bundled(active)
     claims, failed = held_elsewhere(spec, exp)
     todo = [p for p in spec["pumas"] if p not in live and p not in claims and p not in failed
             and not puma_complete(spec, exp, p)]
     if live:
-        print(f"bundles: {len(live)} PUMA(s) in live job(s) "
+        print(f"{prefix}: {len(live)} PUMA(s) in live job(s) "
               f"{', '.join(sorted({job['job_id'] for job in live.values()}))}")
     if claims:
-        print(f"bundles: {len(claims)} PUMA(s) claimed by running job(s) "
+        print(f"{prefix}: {len(claims)} PUMA(s) claimed by running job(s) "
               f"{', '.join(sorted({str(c.get('job_id')) for c in claims.values()}))}: "
               f"{' '.join(sorted(claims))}")
     if failed:
-        print(f"bundles: {len(failed)} PUMA(s) failed {rpb.MAX_FAILURES} times, not submitted "
+        print(f"{prefix}: {len(failed)} PUMA(s) failed {rpb.MAX_FAILURES} times, not submitted "
               f"(see --status; --retry-failed): {' '.join(failed)}")
+    return todo
+
+
+def submit_bundle(sub: Submitter, spec: dict, exp: Path, group: list[str], tag: str,
+                  slurm: list[str], extra: dict | None = None) -> str:
+    """Write the work file ``bundles/bundle-<tag>.json`` for the PUMAs ``group``
+    and submit it as a run_puma_bundle.sbatch job with ``slurm``'s options (a
+    ``-<n>`` is added to ``tag`` should that file exist already, so that no two
+    jobs share a work file or a record); the job id. The job's record in
+    jobs.jsonl carries ``pumas`` and ``extra``. A refused ``sbatch`` removes the
+    work file and raises ``SystemExit``, as :meth:`Submitter.submit` does."""
+    path = exp / "bundles" / f"bundle-{tag}.json"
+    n = 1
+    while path.exists():
+        n += 1
+        path = exp / "bundles" / f"bundle-{tag}-{n}.json"
+    if n > 1:
+        tag = f"{tag}-{n}"
+    bundle = {**bundle_header(spec, exp),
+              "pumas": [bundle_item(spec, exp, puma) for puma in group]}
+    if sub.dry_run:
+        print(f"  would write {path}")
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(bundle, indent=2) + "\n")
+    try:
+        return sub.submit("bundle", tag, "run_puma_bundle.sbatch", [str(path)], slurm=slurm,
+                          extra={"pumas": list(group), **(extra or {})})
+    except SystemExit:
+        if not sub.dry_run:
+            path.unlink(missing_ok=True)  # no job will read it
+        raise
+
+
+def stage_bundle(sub: Submitter, spec: dict, exp: Path, active: dict, slots: list[int]) -> None:
+    """Submit the unfinished PUMAs that no live bundle job holds, no live job has
+    claimed and that have not failed (:func:`bundle_todo`), split over
+    ``bundle.jobs`` jobs of run_puma_bundle.sbatch."""
+    todo = bundle_todo(spec, exp, active)
     if not todo:
         print("bundles: nothing to submit")
         return
@@ -739,18 +791,9 @@ def stage_bundle(sub: Submitter, spec: dict, exp: Path, active: dict, slots: lis
             print(f"bundles: the GPU partition is full; {len(groups) - k} job(s) wait "
                   "for a later call")
             return
-        bundle = {**bundle_header(spec, exp),
-                  "pumas": [bundle_item(spec, exp, puma) for puma in group]}
-        path = exp / "bundles" / f"bundle-{stamp}-{k + 1}.json"
         print(f"bundle {k + 1}/{jobs}: {len(group)} PUMA(s) {' '.join(group)}")
-        if sub.dry_run:
-            print(f"  would write {path}")
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(bundle, indent=2) + "\n")
-        sub.submit("bundle", f"{stamp}-{k + 1}", "run_puma_bundle.sbatch", [str(path)],
-                   slurm=with_signal(slurm_options(spec, "bundle", FITS_SLURM)),
-                   extra={"pumas": group})
+        submit_bundle(sub, spec, exp, group, f"{stamp}-{k + 1}",
+                      with_signal(slurm_options(spec, "bundle", FITS_SLURM)))
         slots[0] -= 1
 
 
