@@ -256,6 +256,11 @@ def parse_args() -> argparse.Namespace:
                         help="drop the replicate correlations of the rows with a positive estimate "
                              "and k_hat = (estimate/SE)^2 below this (pmedm_vb.assemble.decorrelate), "
                              "e.g. 2; the hierarchy level gains +decor<c>")
+    parser.add_argument("--poisson-k", type=float, default=None,
+                        help="pull the finest cells with k_hat = (estimate/SE)^2 below this, zeros "
+                             "included, out of the tract or puma hierarchy as Poisson rows "
+                             "(pmedm_vb.assemble.poisson), e.g. 2; the hierarchy level gains "
+                             "+poisson<c>")
     args = parser.parse_args()
     if (getattr(args, "vb_run", None) is None) == (getattr(args, "map_run", None) is None):
         parser.error("give one of --vb-run and --map-run")
@@ -275,13 +280,15 @@ def parse_args() -> argparse.Namespace:
     from pmedm_vb.assemble.k0 import k0_level
     from pmedm_vb.assemble.tweedie import tweedie_level
     from pmedm_vb.assemble.decorrelate import decor_level
+    from pmedm_vb.assemble.poisson import poisson_level
 
     if getattr(args, "hierarchy", None) is not None:
         args.hierarchy = k0_level(tweedie_level(
             prior_level(cap_level(level_name(args.hierarchy, args.collapse, args.rollup),
                                   args.share_cap, args.cap_strength), args.prior_sd),
             args.tweedie_weight), args.k0_weight, args.k0_df)
-        args.hierarchy = decor_level(args.hierarchy, args.decorrelate_k)
+        args.hierarchy = poisson_level(decor_level(args.hierarchy, args.decorrelate_k),
+                                       args.poisson_k)
     return args
 
 
@@ -406,11 +413,16 @@ def metric_name(args: argparse.Namespace) -> str:
 
 def draw_arrays(draws: np.ndarray, hierarchy) -> dict[str, np.ndarray]:
     """Kept draws for the trace: ``lam`` always in today's layout (the
-    multipliers the data see), plus ``xi`` under a hierarchy, for densities."""
+    multipliers the data see), plus ``xi`` under a hierarchy, for densities --
+    in the sampled coordinates, which under Poisson rows are ``u`` on those
+    rows (:mod:`pmedm_vb.assemble.poisson`)."""
+    from pmedm_vb.assemble.poisson import sampled_to_xi
+
     if hierarchy.is_trivial:
         return {"lam": draws}
     kept, chains, size = draws.shape
-    lam = hierarchy.lambda_data(draws.reshape(-1, size).T).T.reshape(kept, chains, -1)
+    xi = sampled_to_xi(hierarchy, draws.reshape(-1, size).T)
+    lam = hierarchy.lambda_data(xi).T.reshape(kept, chains, -1)
     return {"lam": lam, "xi": draws}
 
 

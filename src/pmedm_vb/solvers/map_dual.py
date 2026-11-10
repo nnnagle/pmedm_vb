@@ -293,6 +293,17 @@ class DualHessian:
         self.blocks.append(block)
         self.factors.append(factor)
 
+    def rescale(self, d: np.ndarray) -> None:
+        """Become ``diag(d) H diag(d)``: the Hessian in coordinates ``x`` with
+        ``xi = phi(x)``, ``d = phi'(x)``, at a stationary point (elsewhere the
+        change of variables adds a gradient term, left out here)."""
+        self.blocks = [d[rows][:, None] * block * d[rows][None, :]
+                       for rows, block in zip(self.rows, self.blocks)]
+        self.factors = [cho_factor(block, lower=True) for block in self.blocks]
+        self.w = d[:, None] * self.w
+        self.k_inv_w = self._k_solve(self.w)
+        self.capacitance = lu_factor(np.linalg.inv(self.J) + self.w.T @ self.k_inv_w)
+
     def _k_solve(self, x: np.ndarray) -> np.ndarray:
         out = np.empty_like(x, dtype=float)
         for rows, factor in zip(self.rows, self.factors):
@@ -364,18 +375,26 @@ class CollapsedHessian(DualHessian):
         W = h.tract_group_basis()                     # (size, g)
         g, k = W.shape[1], h.n_puma
         Ws = inv[:, None] * W                         # S^{-1} W
-        G = np.zeros((h.m_full, k + g))
-        tract_rows = np.flatnonzero(h.puma_of_row >= 0)
-        G[tract_rows, h.puma_of_row[tract_rows]] = inv[h.m + h.puma_of_row[tract_rows]]
-        G[:, k:] = Ws[: h.m][np.maximum(h.row_cell, 0)]
-        G[h.row_cell < 0, k:] = 0.0                  # rows in no cell carry no multiplier
-        G[tract_rows, k:] += Ws[h.m + h.puma_of_row[tract_rows]]
+        general = hasattr(h, "loading")               # a general 0/1 loading (poisson.py)
+        if general:
+            columns_in = np.zeros((h.size, k + g))
+            columns_in[h.m:, :k] = np.diag(inv[h.m:])
+            columns_in[:, k:] = Ws
+            G = h.loading(columns_in)                 # B0 S^{-1} [E_glob, W]
+        else:
+            G = np.zeros((h.m_full, k + g))
+            tract_rows = np.flatnonzero(h.puma_of_row >= 0)
+            G[tract_rows, h.puma_of_row[tract_rows]] = inv[h.m + h.puma_of_row[tract_rows]]
+            G[:, k:] = Ws[: h.m][np.maximum(h.row_cell, 0)]
+            G[h.row_cell < 0, k:] = 0.0              # rows in no cell carry no multiplier
+            G[tract_rows, k:] += Ws[h.m + h.puma_of_row[tract_rows]]
         F = np.zeros((h.size, k + g))
         GSG = np.zeros((k + g, k + g))
         sig_w = np.zeros((h.size, g))
         w_sig_w = np.zeros((g, g))
         for (full_rows, s_block), cells in zip(_tract_blocks(inputs, state.p), h.tract_cells):
-            C_t = (h.row_cell[full_rows][None, :] == cells[:, None]).astype(float)
+            C_t = (h.cell_loading(cells, full_rows) if general else
+                   (h.row_cell[full_rows][None, :] == cells[:, None]).astype(float))
             Q = h.local_projector(cells)
             Z = inv[cells][:, None] * (np.eye(cells.size) - Q)
             sigma_block = sigma.block_dense(cells)
@@ -426,7 +445,8 @@ class CollapsedHessian(DualHessian):
 def dual_hessian(inputs: PMEDMInputs, state: DualState, sigma: Sigma, hierarchy=None) -> DualHessian:
     """The dual Hessian for whichever hierarchy ``hierarchy`` is. With a Tweedie
     zero term its rows' variance is ``K''`` at this point, not ``v0``
-    (:meth:`~pmedm_vb.assemble.tweedie.TweedieZeros.sigma_at`)."""
+    (:meth:`~pmedm_vb.assemble.tweedie.TweedieZeros.sigma_at`); likewise for
+    the Poisson rows of :mod:`pmedm_vb.assemble.poisson`, barrier included."""
     tweedie = getattr(hierarchy, "tweedie", None)
     if tweedie is not None:
         zeta = state.lam if hierarchy.is_trivial else hierarchy.zeta(state.lam)
@@ -470,12 +490,19 @@ def solve_map(
         :mod:`pmedm_vb.assemble.collapse`. Newton then runs in
         ``xi``; ``init``, if given, is ``xi``. The saddlepoint evidence is
         reported as NaN, since it is not comparable across constraint sets.
+        With ``+poisson<c>`` (:mod:`pmedm_vb.assemble.poisson`) the objective
+        includes the log-Jacobian barrier of the Poisson rows' transform, so the
+        result is the mode of the transformed target (finite also for the zero
+        rows, whose untransformed optimum is on their wall); ``xi`` stays in the
+        linear coordinates.
     """
     if device != "cpu":
         raise ValueError(f"solve_map runs on numpy/scipy only; got device={device!r}")
     from pmedm_vb.assemble.hierarchy import Hierarchy
 
     h = Hierarchy.build(inputs, hierarchy, alpha=alpha, taper=taper, variance_floor=variance_floor)
+    if hasattr(h, "describe"):
+        logger.info("solve_map PUMA %s: %s", inputs.puma, h.describe())
     sigma = h.sigma(inputs, alpha, taper, variance_floor)
     op = ConstraintOperator(inputs)
     lam = np.zeros(h.size) if init is None else np.asarray(init, float)

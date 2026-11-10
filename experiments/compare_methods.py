@@ -125,6 +125,7 @@ from pmedm_vb import compare
 from pmedm_vb.assemble.allcells import is_subtotal, table_leaves
 from pmedm_vb.assemble.heldout import HeldOut
 from pmedm_vb.assemble.inputs import PMEDMInputs
+from pmedm_vb.assemble.poisson import sampled_to_xi
 from pmedm_vb.config import processed_dir
 from pmedm_vb.data.variance import SDR_FACTOR
 from pmedm_vb.progress import logger, record_run
@@ -224,6 +225,11 @@ def parse_args() -> argparse.Namespace:
                         help="drop the replicate correlations of the rows with a positive estimate "
                              "and k_hat = (estimate/SE)^2 below this (pmedm_vb.assemble.decorrelate), "
                              "e.g. 2; the hierarchy level gains +decor<c>")
+    parser.add_argument("--poisson-k", type=float, default=None,
+                        help="pull the finest cells with k_hat = (estimate/SE)^2 below this, zeros "
+                             "included, out of the tract or puma hierarchy as Poisson rows "
+                             "(pmedm_vb.assemble.poisson), e.g. 2; the hierarchy level gains "
+                             "+poisson<c>")
     args = parser.parse_args()
     from pmedm_vb.assemble.hierarchy import level_name
     from pmedm_vb.assemble.prior import prior_level
@@ -231,13 +237,15 @@ def parse_args() -> argparse.Namespace:
     from pmedm_vb.assemble.k0 import k0_level
     from pmedm_vb.assemble.tweedie import tweedie_level
     from pmedm_vb.assemble.decorrelate import decor_level
+    from pmedm_vb.assemble.poisson import poisson_level
 
     if getattr(args, "hierarchy", None) is not None:
         args.hierarchy = k0_level(tweedie_level(
             prior_level(cap_level(level_name(args.hierarchy, args.collapse, args.rollup),
                                   args.share_cap, args.cap_strength), args.prior_sd),
             args.tweedie_weight), args.k0_weight, args.k0_df)
-        args.hierarchy = decor_level(args.hierarchy, args.decorrelate_k)
+        args.hierarchy = poisson_level(decor_level(args.hierarchy, args.decorrelate_k),
+                                       args.poisson_k)
     return args
 
 
@@ -265,7 +273,7 @@ def thinned(kept: np.ndarray | None, draws: int) -> np.ndarray | None:
 def with_lambda(h, xi: np.ndarray, q) -> dict:
     """A draw source from draws in the solver's coordinates: ``lam`` in today's
     layout for W, and ``xi`` for densities and whitening."""
-    return {"lam": xi if h.is_trivial else h.lambda_data(xi), "xi": xi, "q": q}
+    return {"lam": xi if h.is_trivial else h.lambda_data(sampled_to_xi(h, xi)), "xi": xi, "q": q}
 
 
 def check_level(path: Path, saved, level: str) -> None:
@@ -295,7 +303,7 @@ def truncated_draws(args, inputs: PMEDMInputs, rng, h, q) -> tuple[np.ndarray, d
     batch = max(64, args.draws // 4)
     while sum(k.shape[1] for k in kept) < args.draws and tried < args.trunc_max_factor * args.draws:
         xi = q.sample(rng, batch)
-        lam = xi if h.is_trivial else h.lambda_data(xi)
+        lam = xi if h.is_trivial else h.lambda_data(sampled_to_xi(h, xi))
         keep = np.ones(batch, bool)
         for d in range(batch):
             log_p = log_p_of(inputs, op, lam[:, d])

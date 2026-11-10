@@ -153,21 +153,42 @@ class Hierarchy:
         slot (it needs ``alpha`` and ``taper``). A ``+decor<c>`` suffix
         (:mod:`pmedm_vb.assemble.decorrelate`) drops the replicate deviations of
         the rows with a positive estimate and ``k_hat < c`` in :meth:`sigma`,
-        held as ``.decor`` and ``.decor_rows``; plain levels only."""
+        held as ``.decor`` and ``.decor_rows``; plain levels only. A
+        ``+poisson<c>`` suffix (:mod:`pmedm_vb.assemble.poisson`) pulls the cells
+        with ``k_hat < c`` (zeros included) out of the ``tract`` or ``puma``
+        hierarchy as rows of their own with a Poisson error, returning a
+        :class:`~pmedm_vb.assemble.poisson.PoissonHierarchy` whose ``.tweedie``
+        slot holds that term."""
         from pmedm_vb.assemble.k0 import K0Term, split_k0
         from pmedm_vb.assemble.prior import prior_variance, split_prior
         from pmedm_vb.assemble.sharecap import split_cap
         from pmedm_vb.assemble.tweedie import TweedieZeros, split_tweedie
         from pmedm_vb.assemble.decorrelate import decorrelated_rows, split_decor
+        from pmedm_vb.assemble.poisson import PoissonHierarchy, split_poisson
 
+        level, poisson_c = split_poisson(level)
         level, decor = split_decor(level)
         level, k0_spec = split_k0(level)
         level, tweedie_w = split_tweedie(level)
         if k0_spec is not None and tweedie_w is not None:
             raise ValueError("+k0w<w> already gives the zero rows their Tweedie error; "
                              "drop +tweedie<w>")
+        if poisson_c is not None and (decor is not None or k0_spec is not None
+                                      or tweedie_w is not None):
+            raise ValueError("+poisson<c> gives the sparse cells their own error; it does not "
+                             "combine with +decor, +tweedie or +k0w")
         level, prior_sd = split_prior(level)
         level, cap = split_cap(level)
+        if poisson_c is not None:
+            base, collapse = split_level(level)
+            if collapse is not None:
+                raise ValueError(f"+poisson<c> needs a plain tract or puma level, got {level!r}")
+            h = PoissonHierarchy.build(inputs, base, poisson_c)
+            h.cap = cap
+            h.prior_sd = prior_sd
+            h.prior_var = prior_variance(prior_sd, inputs.n, inputs.N)
+            h.tweedie = h.poisson_term()
+            return h
         h = cls._build(inputs, level, alpha=alpha, taper=taper, variance_floor=variance_floor)
         if decor is not None:
             if getattr(h, "is_collapsed", False) or type(h) is not cls:

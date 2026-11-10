@@ -337,7 +337,11 @@ class StructuredGaussian:
         """``N(lambda*, (n H)^{-1})`` written in this family.
 
         With a hierarchy (``result.hierarchy``) the family is over ``xi``, centred
-        at ``result.xi``, and ``H`` is the Hessian of ``f~``.
+        at ``result.xi``, and ``H`` is the Hessian of ``f~``. Under Poisson rows
+        (:mod:`pmedm_vb.assemble.poisson`) it is over the sampled coordinates
+        (``u`` on those rows), centred at ``u*`` with ``H`` becoming ``D H D``
+        for ``D = dxi/du``: exact at the transformed target's mode, which is
+        what the MAP finds at that level.
         """
         from pmedm_vb.assemble.hierarchy import Hierarchy
 
@@ -346,6 +350,10 @@ class StructuredGaussian:
         sigma = h.sigma(inputs, result.alpha, result.taper, result.variance_floor)
         centre = result.lam if getattr(result, "xi", None) is None else result.xi
         hessian = dual_hessian(inputs, dual_state(inputs, centre, sigma, hierarchy=h), sigma, h)
+        term = getattr(h, "tweedie", None)
+        if hasattr(term, "to_sampled"):
+            hessian.rescale(term.jacobian_diag(centre))
+            centre = term.to_sampled(centre)
         n = inputs.n
         blocks = [np.linalg.cholesky(n * block) for block in hessian.blocks]
         family = cls(centre.copy(), hessian.rows, blocks,
@@ -445,6 +453,9 @@ class _DualTarget:
         self.cap = getattr(hierarchy, "cap", None)
         tweedie = getattr(hierarchy, "tweedie", None)
         self.tweedie = None if tweedie is None else tweedie.torch_term(device, DTYPE)
+        # The Poisson rows (pmedm_vb.assemble.poisson): the argument is in the
+        # sampled coordinates, u on those rows, mapped to xi by zeta = b - exp(u).
+        self.to_xi = getattr(self.tweedie, "to_xi", None)
         # VB sets this: the Tweedie term continued past the bound, so that a
         # Gaussian's draws never meet an infinite target (it only whitens HMC).
         self.tweedie_extend = False
@@ -482,16 +493,24 @@ class _DualTarget:
         sums = sums.index_add(1, self.groups, self.b[None] * lam[:, :, None])
         return out + (self.b[None] * sums[:, self.groups, :]).sum(-1)
 
+    def xi(self, lam: torch.Tensor) -> torch.Tensor:
+        """The solver's linear coordinates of ``lam``: itself, but under Poisson
+        rows, whose sampled coordinates ``u`` map through ``zeta = b - exp(u)``."""
+        return lam if self.to_xi is None else self.to_xi(lam)
+
     def data_lambda(self, lam: torch.Tensor) -> torch.Tensor:
         """The multipliers the data see: ``lam`` itself, or ``lambda_data(xi)``."""
-        return lam if self.h is None else self.h.lambda_data(lam)
+        return lam if self.h is None else self.h.lambda_data(self.xi(lam))
 
     def logits(self, lam: torch.Tensor) -> torch.Tensor:
         """``log q - X lambda_data`` as ``(batch, n_zones, n_units)``."""
         return self.log_q[None] - self.adjoint(self.data_lambda(lam))
 
     def __call__(self, lam: torch.Tensor) -> torch.Tensor:
+        """``f`` per row of ``lam``; under Poisson rows, in their sampled
+        coordinates, with the log-Jacobian in the term's barrier."""
         eta = self.adjoint(self.data_lambda(lam))
+        lam = self.xi(lam)
         logits = self.log_q[None] - eta
         log_z = torch.logsumexp(logits.reshape(lam.shape[0], -1), dim=1)
         if self.h is None:
@@ -512,6 +531,7 @@ class _DualTarget:
         for a Tweedie zero term's one-sided bound."""
         if self.tweedie is None:
             return torch.ones(lam.shape[0], dtype=torch.bool, device=lam.device)
+        lam = self.xi(lam)
         return self.tweedie.feasible(lam if self.h is None else self.h.zeta(lam))
 
     def cap_penalty(self, eta: torch.Tensor, log_z: torch.Tensor) -> torch.Tensor:
@@ -925,5 +945,8 @@ def posterior_weights(
     rng = rng or np.random.default_rng()
     h = Hierarchy.build(inputs, result.hierarchy, alpha=result.alpha, taper=result.taper,
                         variance_floor=result.variance_floor)
-    lams = h.lambda_data(result.q.sample(rng, n_draws)) if not h.is_trivial else result.q.sample(rng, n_draws)
+    from pmedm_vb.assemble.poisson import sampled_to_xi
+
+    draws = result.q.sample(rng, n_draws)
+    lams = draws if h.is_trivial else h.lambda_data(sampled_to_xi(h, draws))
     return np.stack([inputs.N * weights_from_lambda(inputs, lam) for lam in lams.T])

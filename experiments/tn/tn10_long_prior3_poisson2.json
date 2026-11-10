@@ -1,0 +1,77 @@
+{
+  "name": "tn10_long_prior3_poisson2",
+  "description": "The four tn01_gpu PUMAs whose rare-race tract multipliers rest on about one sampled case (4703000, 4702300: R-hat ~1.07 on a tract nh_asian cell; 4702900: NH/PI tract cells; 4701900: a tract B26001 cell), with tn05's longer HMC: 32 chains, 500 warmup with a diagonal learned in Stan's windows, 4,000 samples kept every 40th (3,200 draws), started from screened draws of the whitening shrunk toward its mean only if too few pass (init_floor). Held-out tables scored (compare_variants.py). PUMA-only support with the Gaussian multiplier prior, sd 3 (+prior3, as tn05_long_prior3), and the finest cells (block group; tract for B26001) with k_hat = (estimate/SE)^2 below 2, published zeros included, pulled out of the Gaussian hierarchy as Poisson rows of their own, zeros merged coarsest first (+poisson2, pmedm_vb.assemble.poisson; step 3 of the sparse-cells plan). HMC and VB sample those rows' multipliers as zeta = b - exp(u); the VB Gaussian (in u) whitens HMC. Compare with tn05_long_prior3 and tn09_long_prior3_decor2 (compare_variants.py). Two PUMAs per GPU bundle; run_queue.py.",
+  "area": {
+    "name": "tennessee-5t",
+    "state": "47",
+    "counties": [],
+    "year": 2024,
+    "span": 5,
+    "tables": [
+      "B01001",
+      "B03002",
+      "B19001",
+      "B25003",
+      "B26001"
+    ]
+  },
+  "pumas": [
+    "4701900",
+    "4702300",
+    "4702900",
+    "4703000"
+  ],
+  "alphas": [
+    0.01
+  ],
+  "data_dir": "/lustre/isaac24/scratch/$USER/pmedm_vb_paper_data",
+  "heldout": true,
+  "model": {
+    "taper": "none",
+    "variance_floor": "zero",
+    "hierarchy": "puma",
+    "rollup": null,
+    "share_cap": null,
+    "cap_strength": null,
+    "multiplier_prior_sd": 3,
+    "poisson_k": 2
+  },
+  "rake": [],
+  "vb_families": [
+    "gaussian"
+  ],
+  "vb_device": "cuda",
+  "hmc": {
+    "whiten": "gaussian",
+    "kinds": [
+      "ref"
+    ],
+    "trajectory": 3.0,
+    "chains": 32,
+    "ref": {
+      "warmup": 500,
+      "samples": 4000,
+      "thin": 40,
+      "checkpoint": 250,
+      "adapt_diag": true,
+      "init_floor": 0.01,
+      "seed": 5000
+    }
+  },
+  "bundle": {
+    "jobs": 2
+  },
+  "slurm": {
+    "account": "isaac-utk0533",
+    "gpu_partition": "campus-gpu",
+    "max_gpu_jobs": 6,
+    "bundle": [
+      "--partition=campus-gpu",
+      "--qos=campus-gpu",
+      "--gpus=v100s:1",
+      "--cpus-per-task=4",
+      "--mem=32G",
+      "--time=03:00:00"
+    ]
+  }
+}

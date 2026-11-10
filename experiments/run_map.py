@@ -205,6 +205,11 @@ def parse_args() -> argparse.Namespace:
                         help="drop the replicate correlations of the rows with a positive estimate "
                              "and k_hat = (estimate/SE)^2 below this (pmedm_vb.assemble.decorrelate), "
                              "e.g. 2; the hierarchy level gains +decor<c>")
+    parser.add_argument("--poisson-k", type=float, default=None,
+                        help="pull the finest cells with k_hat = (estimate/SE)^2 below this, zeros "
+                             "included, out of the tract or puma hierarchy as Poisson rows "
+                             "(pmedm_vb.assemble.poisson), e.g. 2; the hierarchy level gains "
+                             "+poisson<c>")
     args = parser.parse_args()
     from pmedm_vb.assemble.hierarchy import level_name
     from pmedm_vb.assemble.prior import prior_level
@@ -212,13 +217,15 @@ def parse_args() -> argparse.Namespace:
     from pmedm_vb.assemble.k0 import k0_level
     from pmedm_vb.assemble.tweedie import tweedie_level
     from pmedm_vb.assemble.decorrelate import decor_level
+    from pmedm_vb.assemble.poisson import poisson_level
 
     if getattr(args, "hierarchy", None) is not None:
         args.hierarchy = k0_level(tweedie_level(
             prior_level(cap_level(level_name(args.hierarchy, args.collapse, args.rollup),
                                   args.share_cap, args.cap_strength), args.prior_sd),
             args.tweedie_weight), args.k0_weight, args.k0_df)
-        args.hierarchy = decor_level(args.hierarchy, args.decorrelate_k)
+        args.hierarchy = poisson_level(decor_level(args.hierarchy, args.decorrelate_k),
+                                       args.poisson_k)
     return args
 
 
