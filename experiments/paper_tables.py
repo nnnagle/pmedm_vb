@@ -75,8 +75,8 @@ ALPHAS = (0.01, 0.1, 1.0)
 #: are compared with each alpha's reference.
 NO_ALPHA = ("ipf", "ipf_multinomial")
 
-#: Table 5's statistics that are shares of draws: for a method without an alpha,
-#: one draw per PUMA, shown as a count of draws.
+#: Table 5's statistics that are shares of draws: for IPF, one fit per PUMA,
+#: shown as a count of its fits (IPF multinomial, with many draws, as a share).
 SHARE_KEYS = ("walls", "dh_lt", "neff_lt", "hhz_gt")
 
 #: Cell columns read from the detail files.
@@ -377,7 +377,7 @@ def fmt(row: pd.Series | None, key: str) -> str:
     if row is None or pd.isna(row["value"]):
         return "--"
     v, d = row["value"], DIGITS[key]
-    if key in SHARE_KEYS and row["method"] in NO_ALPHA:
+    if key in SHARE_KEYS and row["method"] == "ipf":
         return f"{round(v * row['n']):d}/{int(row['n'])}"
     if d == "min":
         return "<1" if v < 0.5 else f"{v:,.0f}"
@@ -468,7 +468,7 @@ RAKING_NOTES = {
     "4": " IPF has no alpha; it is compared with each alpha's reference.",
     "4t": " IPF has no alpha; it is compared with each alpha's reference.",
     "5": " IPF has no alpha: one fit per PUMA, shown once; its shares of draws are counts "
-         "of its four draws, one per PUMA.",
+         "of its four fits, one per PUMA.",
 }
 
 
@@ -647,14 +647,14 @@ def word_notes(pumas: list[str]) -> None:
     if n == 4:
         return
     the = f"PUMA {pumas[0]}" if n == 1 else f"the {NUMBER_WORDS.get(n, n)} PUMAs"
-    draws = ("its one draw" if n == 1 else f"its {NUMBER_WORDS.get(n, n)} draws, one per PUMA")
+    fits = ("its one fit" if n == 1 else f"its {NUMBER_WORDS.get(n, n)} fits, one per PUMA")
     for key, (title, note) in TITLES.items():
         note = (note.replace("mean over the four PUMAs", "mean over " + the if n > 1 else the)
                 .replace("of the four PUMAs", "of " + the).replace("over PUMAs", "over " + (
                     "PUMAs" if n > 1 else "its one fit")))
         TITLES[key] = (title, note)
     for key, note in RAKING_NOTES.items():
-        RAKING_NOTES[key] = note.replace("its four draws, one per PUMA", draws)
+        RAKING_NOTES[key] = note.replace("its four fits, one per PUMA", fits)
 
 
 def flatten(value, prefix: str) -> list[tuple[str, str]]:
