@@ -31,11 +31,16 @@ its ``short`` run):
   ``--draws`` evenly spaced draws made populations and scored against every
   held-out cell as ``compare_support.py`` does (``heldout_scores.py``): mean
   |error| and RMSE of the posterior mean, the mean and mean square of the
-  predictive z, 90% predictive coverage and the mean Gaussian log score, by
-  level and relation to the fitted tables, plus the B17010 race x poverty
-  cells; and against ``--base`` (default the first ``--exp``), over the cells
-  both have: the mean log score difference and the share of cells where the
-  experiment's mean is nearer the published value.
+  predictive z, 90% predictive coverage, the mean Gaussian log score and the
+  mean count score (the log predictive probability of the published value
+  under a scaled-Poisson survey model, ``heldout_scores.count_log_score``;
+  the case size behind a published zero is an assumption there), by level
+  and relation to the fitted tables, plus the B17010 race x poverty cells,
+  plus the cell's own evidence (published zero, ``0 < k_hat < 2``,
+  ``k_hat >= 2``); and against ``--base`` (default the first ``--exp``), over
+  the cells both have, in the same groups: the mean log score and count score
+  differences and the share of cells where the experiment's mean is nearer the
+  published value (a tie counting half).
 
 Experiments, PUMAs or runs that are missing are reported in summary.txt and
 ``missing.csv`` (reason: no ``experiment.json``, PUMA not in the experiment, no
@@ -70,8 +75,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_experiment as rx  # noqa: E402
 from cell_cases import cell_frame  # noqa: E402
 from compare_support import thinned  # noqa: E402
-from heldout_scores import (LEVELS, area_names, group_summary, level_frame, predict,  # noqa: E402
-                            score_cells, score_groups)
+from heldout_scores import (LEVELS, area_names, closer_share, group_summary,  # noqa: E402
+                            level_frame, predict, score_cells, score_groups, zero_case_size)
 
 #: The coordinate key shared by every experiment's runs of a PUMA.
 CELL = ["level", "area", "constraint"]
@@ -213,8 +218,9 @@ def load_experiment(folder: Path) -> dict | None:
 
 
 def heldout_tables(run: Run, inputs, lam: np.ndarray, draws: int) -> pd.DataFrame | None:
-    """Every held-out cell of the run's inputs, scored (``heldout_scores``);
-    ``None`` without held-out tables there."""
+    """Every held-out cell of the run's inputs, scored (``heldout_scores``, with
+    the count score, its zeros' case sizes from these inputs:
+    ``zero_case_size``); ``None`` without held-out tables there."""
     from pmedm_vb.assemble.heldout import HeldOut
 
     if not HeldOut.exists(run.inputs_path):
@@ -222,14 +228,38 @@ def heldout_tables(run: Run, inputs, lam: np.ndarray, draws: int) -> pd.DataFram
     held = HeldOut.load(run.inputs_path)
     predictions = predict(inputs, held, thinned(lam, draws))
     areas = area_names(inputs)
+    own_inputs, own_held = own_records(run, inputs, held)
     return pd.concat([level_frame(held, level, areas[level],
                                   {"post": score_cells(predictions[level], held.Y[level],
-                                                       held.v[level])})
+                                                       held.v[level],
+                                                       zero_case_size(own_inputs, own_held, level))})
                       for level in LEVELS], ignore_index=True)
 
 
+def own_records(run: Run, inputs, held):
+    """The inputs and held-out tables the published zeros' case sizes are taken
+    from (``heldout_scores.zero_case_size``): for a run on a statewide support,
+    the PUMA's own-records inputs (the experiment's area without
+    ``model.epsilon``) where they are assembled with the same held-out cells, so
+    every run of a PUMA is scored with the same ones; otherwise the run's own."""
+    from pmedm_vb.assemble.heldout import HeldOut
+    from pmedm_vb.assemble.inputs import PMEDMInputs
+
+    if inputs.unit_members is None:
+        return inputs, held
+    local = {**run.spec, "model": {**run.spec["model"], "epsilon": None}}
+    path = rx.inputs_dir(local) / run.puma
+    if (path / "manifest.json").exists() and HeldOut.exists(path):
+        own = HeldOut.load(path)
+        if own.names == held.names:
+            return PMEDMInputs.load(path), own
+    print(f"  {run.name} {run.puma}: no PUMA-only inputs with these held-out tables at {path}; "
+          "the zeros' case sizes come from the statewide support's merged rows", flush=True)
+    return inputs, held
+
+
 def heldout_summary(cells: pd.DataFrame) -> list[dict]:
-    """Per level and group (relation, race x poverty): :func:`group_summary`."""
+    """Per level and group (relation, race x poverty, evidence): :func:`group_summary`."""
     rows = []
     for level in LEVELS:
         for group, part in score_groups(cells[cells["level"] == level]):
@@ -238,21 +268,30 @@ def heldout_summary(cells: pd.DataFrame) -> list[dict]:
 
 
 def versus_base(cells: pd.DataFrame, base: pd.DataFrame) -> list[dict]:
-    """Against the base run, over the cells both have: per level and group, the
-    mean log score difference (this minus base; positive favours this run) and
-    the share of cells where this run's mean is nearer the published value."""
+    """Against the base run, over the cells both have: per level and group
+    (:func:`heldout_scores.score_groups`, the evidence groups by this run's
+    published values, which both runs share), the mean log score difference and
+    the mean count score difference (this minus base; positive favours this
+    run; the count score over the cells where both have one) and the share of
+    cells where this run's mean is nearer the published value, a tie counting
+    half (``heldout_scores.closer_share``)."""
     keys = ["level", "area", "cell"]
-    both = cells.merge(base[keys + ["post_error", "post_log_score"]], on=keys,
-                       suffixes=("", "_base"))
+    columns = ["post_error", "post_log_score"] + (["post_count_score"]
+                                                  if "post_count_score" in base else [])
+    both = cells.merge(base[keys + columns], on=keys, suffixes=("", "_base"))
     rows = []
     for level in LEVELS:
         for group, part in score_groups(both[both["level"] == level]):
             ok = part.dropna(subset=["post_log_score", "post_log_score_base"])
-            rows.append({"level": level, "group": group, "cells": len(ok),
-                         "log_score_diff": float((ok["post_log_score"]
-                                                  - ok["post_log_score_base"]).mean()),
-                         "closer": float((ok["post_error"].abs()
-                                          < ok["post_error_base"].abs()).mean())})
+            row = {"level": level, "group": group, "cells": len(ok),
+                   "log_score_diff": float((ok["post_log_score"]
+                                            - ok["post_log_score_base"]).mean())}
+            if "post_count_score_base" in ok and "post_count_score" in ok:
+                counted = ok.dropna(subset=["post_count_score", "post_count_score_base"])
+                row["count_score_diff"] = float((counted["post_count_score"]
+                                                 - counted["post_count_score_base"]).mean())
+            row["closer"] = closer_share(ok["post_error"], ok["post_error_base"])
+            rows.append(row)
     return rows
 
 
@@ -397,7 +436,12 @@ def main() -> None:
     lines += ["min: HMC wall time (trace seconds), warm min: its warmup part; leap: leapfrog "
               "steps per sampling iteration; div: divergent sampling transitions; R-hat, ESS over "
               "the kept lambda draws; share max: largest cell's share of N (report); MAP |lam|: "
-              "the MAP multipliers", ""]
+              "the MAP multipliers",
+              "held-out groups: relation to the fitted tables, B17010 race x poverty, and the "
+              "cell's own evidence, k_hat = (estimate/SE)^2 (published zero, 0 < k_hat < 2, "
+              "k_hat >= 2); count score: log posterior predictive probability of the published "
+              "value under a scaled-Poisson survey model (k_hat cases of size SE^2/estimate; a "
+              "zero's case size assumed, N/n per unit times persons per carrying unit)", ""]
     selected = []
     for puma in pumas:
         part = runs[runs["puma"] == puma] if len(runs) else runs
@@ -425,13 +469,14 @@ def main() -> None:
         hp = held[held["puma"] == puma] if len(held) else held
         if len(hp):
             lines.append("   held-out cells (mean |error|, RMSE, mean z, mean z^2, 90% coverage, "
-                         "mean log score):")
+                         "mean Gaussian log score, mean count score):")
             table = hp.drop(columns="puma").round(3).to_string(index=False)
             lines += ["     " + line for line in table.splitlines()]
         vp = versus[versus["puma"] == puma] if len(versus) else versus
         if len(vp):
-            lines.append(f"   against {base_name}, same cells (log score difference per cell, "
-                         "positive favours the experiment; share of cells nearer):")
+            lines.append(f"   against {base_name}, same cells (log score and count score "
+                         "differences per cell, positive favours the experiment; share of cells "
+                         "nearer, ties half):")
             table = vp.drop(columns=["puma", "base"]).round(4).to_string(index=False)
             lines += ["     " + line for line in table.splitlines()]
         lines.append("")

@@ -1,0 +1,78 @@
+{
+  "name": "tn09_long_state_prior3_decor2",
+  "description": "The four tn01_gpu PUMAs whose rare-race tract multipliers rest on about one sampled case (4703000, 4702300: R-hat ~1.07 on a tract nh_asian cell; 4702900: NH/PI tract cells; 4701900: a tract B26001 cell), with tn05's longer HMC: 32 chains, 500 warmup with a diagonal learned in Stan's windows, 4,000 samples kept every 40th (3,200 draws), started from screened draws of the whitening shrunk toward its mean only if too few pass (init_floor). Held-out tables scored (compare_variants.py). The statewide support at epsilon 0.01 with the Gaussian multiplier prior, sd 3 (+prior3), and the tract and block group rows with k_hat below 2 decorrelated (+decor2): tn08_long_state_prior3 with decorrelation, to compare with it (compare_variants.py). One PUMA per GPU bundle, 64G; run_queue.py.",
+  "area": {
+    "name": "tennessee-5t",
+    "state": "47",
+    "counties": [],
+    "year": 2024,
+    "span": 5,
+    "tables": [
+      "B01001",
+      "B03002",
+      "B19001",
+      "B25003",
+      "B26001"
+    ]
+  },
+  "pumas": [
+    "4701900",
+    "4702300",
+    "4702900",
+    "4703000"
+  ],
+  "alphas": [
+    0.01
+  ],
+  "data_dir": "/lustre/isaac24/scratch/$USER/pmedm_vb_paper_data",
+  "heldout": true,
+  "model": {
+    "taper": "none",
+    "variance_floor": "zero",
+    "hierarchy": "puma",
+    "rollup": null,
+    "share_cap": null,
+    "cap_strength": null,
+    "epsilon": 0.01,
+    "multiplier_prior_sd": 3,
+    "decorrelate_k": 2
+  },
+  "rake": [],
+  "vb_families": [
+    "gaussian"
+  ],
+  "vb_device": "cuda",
+  "hmc": {
+    "whiten": "gaussian",
+    "kinds": [
+      "ref"
+    ],
+    "trajectory": 3.0,
+    "chains": 32,
+    "ref": {
+      "warmup": 500,
+      "samples": 4000,
+      "thin": 40,
+      "checkpoint": 250,
+      "adapt_diag": true,
+      "init_floor": 0.01,
+      "seed": 5000
+    }
+  },
+  "bundle": {
+    "jobs": 4
+  },
+  "slurm": {
+    "account": "isaac-utk0533",
+    "gpu_partition": "campus-gpu",
+    "max_gpu_jobs": 6,
+    "bundle": [
+      "--partition=campus-gpu",
+      "--qos=campus-gpu",
+      "--gpus=v100s:1",
+      "--cpus-per-task=4",
+      "--mem=64G",
+      "--time=03:00:00"
+    ]
+  }
+}

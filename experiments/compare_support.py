@@ -25,8 +25,12 @@ and reports:
    prediction of every held-out tract and block group cell against the
    published estimate and its standard error -- the error, the predictive
    ``z = (mean - Y) / sqrt(SE^2 + sd^2)``, 90% predictive coverage and a
-   Gaussian log score -- by level and by relation to the fitted tables, and
-   how often the statewide posterior is closer (``heldout_scores.py``, shared
+   Gaussian log score, and the count score (the log predictive probability of
+   the published value under a scaled-Poisson survey model, the published
+   zeros' case size an assumption, from the base's own records for both) -- by level,
+   by relation to the fitted tables and by the cell's own evidence (published
+   zero, ``0 < k_hat < 2``, ``k_hat >= 2``), and how often the statewide
+   posterior is closer, a tie counting half (``heldout_scores.py``, shared
    with ``compare_variants.py``).
 
 Section 1 also gives, for each race and ethnicity, the distribution of its
@@ -66,8 +70,8 @@ from scipy.special import logsumexp
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_experiment as rx  # noqa: E402
-from heldout_scores import (HeldoutPredictor, area_names, level_frame, score_cells,  # noqa: E402
-                            score_groups)
+from heldout_scores import (HeldoutPredictor, area_names, closer_share, level_frame,  # noqa: E402
+                            score_cells, score_groups, zero_case_size)
 
 from pmedm_vb import compare  # noqa: E402
 from pmedm_vb.assemble.heldout import HeldOut  # noqa: E402
@@ -401,7 +405,10 @@ def main() -> None:
         areas = area_names(base)
         for level, key in (("block group", "held_bg"), ("tract", "held_tract")):
             Y, v = base_held.Y[level], base_held.v[level]
-            scores = {tag: score_cells(s[key], Y, v) for tag, s in (("base", base_s), ("alt", alt_s))}
+            # Both runs' zeros get the case sizes of the PUMA's own records (the base's).
+            zero_w = zero_case_size(base, base_held, level)
+            scores = {tag: score_cells(s[key], Y, v, zero_w)
+                      for tag, s in (("base", base_s), ("alt", alt_s))}
             frame = level_frame(base_held, level, areas[level], scores)
             frames.append(frame)
             # By relation, and race x poverty (B17010A-I) on its own too: the joint
@@ -416,7 +423,9 @@ def main() -> None:
                     "pred_z2_alt": (ok["alt_pred_z"] ** 2).mean(),
                     "cover90_base": ok["base_covers"].mean(), "cover90_alt": ok["alt_covers"].mean(),
                     "logscore_alt_minus_base": (ok["alt_log_score"] - ok["base_log_score"]).sum(),
-                    "alt_closer": (ok["alt_error"].abs() < ok["base_error"].abs()).mean(),
+                    "alt_closer": closer_share(ok["alt_error"], ok["base_error"]),
+                    "countscore_alt_minus_base": (ok["alt_count_score"]
+                                                  - ok["base_count_score"]).sum(),
                 })
         pd.concat(frames).to_csv(out / "heldout_cells.csv", index=False)
         lines += [
@@ -424,7 +433,11 @@ def main() -> None:
             "   (about 1 if calibrated); cover90: share of cells within the 90% predictive interval",
             "   (about 0.9 if calibrated); logscore_alt_minus_base: summed Gaussian log score, alt minus",
             "   base (positive favours the statewide support); alt_closer: share of cells where alt's",
-            "   mean is nearer the published estimate",
+            "   mean is nearer the published estimate (a tie counting half); countscore_alt_minus_base:",
+            "   summed count score (log predictive probability of the published value, scaled-Poisson",
+            "   survey model; a zero's case size assumed), alt minus base",
+            "   relation groups, then B17010 race x poverty, then each cell's own evidence: published",
+            "   zero, 0 < k_hat < 2, k_hat >= 2 (k_hat = (estimate/SE)^2)",
         ]
         lines += ["   " + line for line in pd.DataFrame(summary).round(3).to_string(index=False)
                   .splitlines()]
