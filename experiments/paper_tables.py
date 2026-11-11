@@ -129,19 +129,51 @@ def parse_args() -> argparse.Namespace:
 # -- reading ------------------------------------------------------------------
 
 
+#: A cell whose reference interval is narrower than this fraction of its MOE
+#: (half-width over MOE) has no spread to compare with: its line is carried by
+#: no PUMS record, or by so few that the posterior allocates none of them to a
+#: published zero, and every method's interval there is zero wide. Its width
+#: ratio, a near-zero width over the ratio's floor, is left out (Tables 4, 4t).
+REF_ZERO_WIDTH = 1e-3
+
+
+def reference_spread(path: Path, frame: pd.DataFrame, cache: dict) -> np.ndarray | None:
+    """Per row of ``frame`` (``path``'s cells, in its row order), whether the
+    reference's interval has width (``REF_ZERO_WIDTH``): from the same cell
+    folder's ``hmc_ref_cells.parquet``, whose rows are the same cells in the
+    same order. None without one."""
+    ref_path = path.parent / "hmc_ref_cells.parquet"
+    if not ref_path.exists():
+        return None
+    if ref_path not in cache:
+        cache[ref_path] = pd.read_parquet(ref_path, columns=["subset", "cell", "halfwidth_over_moe"])
+    ref = cache[ref_path]
+    if len(ref) != len(frame) or not (
+            (ref.subset.to_numpy() == frame.subset.to_numpy()).all()
+            and (ref.cell.astype(str).to_numpy() == frame.cell.astype(str).to_numpy()).all()):
+        raise SystemExit(f"{path} and {ref_path} do not list the same cells in the same order")
+    return ~(ref.halfwidth_over_moe.to_numpy() < REF_ZERO_WIDTH)
+
+
 def read_detail(folder: Path, kind: str, columns: list[str], subsets=None) -> pd.DataFrame:
     """Every ``<method>_<kind>.parquet`` under ``folder``, with the columns it has.
 
     Cells are leaf cells only: an all-cell table's totals and subtotals (names
     ending in ``":"``) are sums of its leaves, so counting them as cells would
     count the same people again and weight the large aggregates. Cells also
-    get ``acs_table``, the ACS table of their name ``"{table}.{category}"``."""
-    frames = []
+    get ``acs_table``, the ACS table of their name ``"{table}.{category}"``, and
+    a ``width_ratio_ref`` of NaN where the reference's interval has no width
+    (:func:`reference_spread`)."""
+    frames, cache = [], {}
     for path in sorted(folder.glob(f"*/*_{kind}.parquet")):
         names = pq.read_schema(path).names
         have = [c for c in columns if c in names]
         leaves_only = kind == "cells" and "cell" in names
         frame = pd.read_parquet(path, columns=have + (["cell"] if leaves_only else []))
+        if "width_ratio_ref" in frame and "cell" in frame and "subset" in frame:
+            spread = reference_spread(path, frame, cache)
+            if spread is not None:
+                frame.loc[~spread, "width_ratio_ref"] = np.nan
         if leaves_only:
             cell = frame.pop("cell").astype("category")
             names = cell.cat.categories
@@ -420,7 +452,8 @@ TITLES = {
     "4": ("Agreement with the reference HMC",
           "Block-group constraint leaf cells of the four PUMAs pooled. Median diff.: |median - "
           "reference median| in reference sds; width ratio: 90% interval width over the "
-          "reference's. k-hat: PSIS k-hat of the method's density against the posterior, one "
+          "reference's, over the cells where the reference's interval has width (lines no or "
+          "almost no PUMS record carries, where every method's is zero wide, left out). k-hat: PSIS k-hat of the method's density against the posterior, one "
           "per fit, median [min, max] over PUMAs (methods with a density only)."),
     "4t": ("Tract agreement with the reference HMC",
            "As Table 4, for tract constraint leaf cells; k-hat, one per fit, is in Table 4."),
