@@ -14,7 +14,16 @@ and prints them:
 ``width_contrast.csv``  narrow cells against the rest: medians of the published
                         count, the reference's and short HMC's half-width over
                         MOE, the sd ratio and the median difference
-``width_lines.csv``     the table lines with the most narrow cells
+``width_lines.csv``     the table lines with the most narrow cells, with the
+                        PUMS records carrying each (fewest and most over PUMAs)
+``width_by_records.csv`` per level and PUMS records carrying the cell's line
+                        in its PUMA (none, 1-4, 5-19, 20+): a line no record
+                        carries is zero in every allocation, so its interval
+                        has width zero whatever the method
+``width_by_records_zero.csv`` the same, published zeros only
+
+The records are the PUMA's own (``PMEDMInputs.units``): the units whose column
+of ``X`` is positive for the line, and their design weights summed.
 
     python experiments/width_check.py --root $R --out $R/width_check
 """
@@ -22,6 +31,8 @@ and prints them:
 from __future__ import annotations
 
 import argparse
+import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +42,8 @@ KEYS = ["puma", "subset", "area", "cell"]
 LEVELS = {"constrained_block_group": "block group", "constrained_tract": "tract"}
 SIZES = [-np.inf, 0, 9, 49, 199, np.inf]
 SIZE_LABELS = ["zero", "1-9", "10-49", "50-199", "200+"]
+RECORDS = [-np.inf, 0, 4, 19, np.inf]
+RECORD_LABELS = ["none", "1-4", "5-19", "20+"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,6 +71,31 @@ def read(detail: Path, method: str, alpha: float, columns: list[str]) -> pd.Data
     return pd.concat(frames, ignore_index=True)
 
 
+def pums_records(root: Path, experiment: str) -> pd.DataFrame:
+    """Per PUMA, level and line: the PUMA's records carrying it (``records``) and
+    their design weights summed (``weighted``)."""
+    import scipy.sparse as sp
+
+    import run_experiment as rx
+    from pmedm_vb.assemble.inputs import PMEDMInputs
+    from pmedm_vb.config import processed_dir
+
+    spec = json.loads((root / experiment / "experiment.json").read_text())
+    os.environ["PMEDM_VB_DATA"] = str(rx.data_dir(spec))
+    rows = []
+    for puma in spec["pumas"]:
+        inputs = PMEDMInputs.load(processed_dir() / "inputs" / rx.area_slug(spec["area"]) / puma)
+        weight = inputs.units["weight"].to_numpy(dtype=float)
+        for level, X, names in (("tract", inputs.X_T, inputs.tract_constraints),
+                                ("block group", inputs.X_B, inputs.bg_constraints)):
+            carries = sp.csc_matrix(X) > 0
+            rows.append(pd.DataFrame({
+                "puma": str(puma), "level": level, "cell": list(names),
+                "records": np.asarray(carries.sum(axis=0)).ravel(),
+                "weighted": np.asarray(carries.T @ weight).ravel()}))
+    return pd.concat(rows, ignore_index=True)
+
+
 def share(group: pd.DataFrame) -> pd.Series:
     return pd.Series({"cells": len(group), "narrow": int(group.narrow.sum()),
                       "share_narrow": group.narrow.mean()})
@@ -79,6 +117,10 @@ def main() -> None:
     cells["table"] = cells.cell.astype(str).str.split(".").str[0]
     cells["size"] = pd.cut(cells.published, SIZES, labels=SIZE_LABELS)
     cells["narrow"] = cells.width_ratio_ref < args.narrow
+    cells = cells.merge(pums_records(args.root, args.experiment), on=["puma", "level", "cell"],
+                        how="left")
+    matched = cells.records.notna().mean()
+    cells["carried"] = pd.cut(cells.records, RECORDS, labels=RECORD_LABELS)
 
     out = {}
     q = cells.groupby("level").width_ratio_ref.quantile([0.01, 0.05, 0.1, 0.25, 0.5]).unstack()
@@ -88,17 +130,25 @@ def main() -> None:
                        .sort_values(["level", "share_narrow"], ascending=[True, False]))
     out["by_size"] = cells.groupby(["level", "size"], observed=True).apply(share).reset_index()
     out["by_puma"] = cells.groupby(["level", "puma"]).apply(share).reset_index()
+    out["by_records"] = (cells.groupby(["level", "carried"], observed=True).apply(share)
+                         .reset_index())
+    out["by_records_zero"] = (cells[cells.published == 0]
+                              .groupby(["level", "carried"], observed=True).apply(share)
+                              .reset_index())
     out["contrast"] = (cells.groupby(["level", "narrow"])
-                       [["published", "ref_halfwidth_over_moe", "halfwidth_over_moe",
-                         "sd_ratio_ref", "median_diff_ref_sd"]].median()
+                       [["published", "records", "weighted", "ref_halfwidth_over_moe",
+                         "halfwidth_over_moe", "sd_ratio_ref", "median_diff_ref_sd"]].median()
                        .join(cells.groupby(["level", "narrow"]).sampled.mean()
                              .rename("share_sampled"))
                        .reset_index())
-    lines = cells.groupby(["level", "cell"]).apply(share).reset_index()
+    lines = (cells.groupby(["level", "cell"]).apply(share)
+             .join(cells.groupby(["level", "cell"]).records.agg(records_min="min", records_max="max"))
+             .reset_index())
     out["lines"] = lines[lines.narrow > 0].sort_values("narrow", ascending=False).head(args.lines)
 
     print(f"{args.experiment}, tag {args.tag}, alpha {args.alpha:g}: narrow = width ratio "
-          f"< {args.narrow:g}; {len(cells):,} leaf cells")
+          f"< {args.narrow:g}; {len(cells):,} leaf cells, {100 * matched:.1f}% matched to "
+          "their PUMS records")
     with pd.option_context("display.width", 200, "display.max_columns", None,
                            "display.max_rows", 200):
         for name, frame in out.items():
