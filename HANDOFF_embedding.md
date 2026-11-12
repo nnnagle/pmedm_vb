@@ -224,13 +224,17 @@ All items below are targets and inputs.
   group and tract); B26001, B17024, B23001 (tract).
 - **Held-out tables (targets too; PUMS attributes, not published values):**
   B25044, C17002, C24030, B12001, B15002, B25040, B17010A–I.
-- **Added tables** (5-year 2023 geography from the Census data product list;
-  BG = block group and tract, T = tract only):
-  - housing stock: B25024 units in structure (BG), B25034 year built (BG),
-    B25017 rooms (BG), B25041 bedrooms (BG), B25014 tenure by occupants per
-    room (BG), B25075 value (BG), B25063 gross rent (BG), B25038 tenure by
-    year moved in (BG);
-  - transport: B08303 travel time (BG), B08134 mode by travel time (BG);
+- **Vintage:** 2020–2024 (the repo's study areas use year 2024): the
+  2020–2024 PUMS and data dictionary, and 2024 5-year tables.
+- **Added tables** (built in step 1, `embed/tables.py`; BG = block group and
+  tract, T = tract only):
+  - housing stock (occupied-unit versions, crossed with tenure, because the
+    all-unit tables B25024/B25034/B25017/B25041 count vacant units the model
+    doesn't carry): B25032 units in structure (BG), B25036 year built (BG),
+    B25020 rooms (BG), B25042 bedrooms (BG); also B25014 tenure by occupants
+    per room (BG), B25075 value (BG), B25063 gross rent (BG);
+  - transport: B08303 travel time (BG), B08134 mode by travel time (BG, full
+    detail via JWRIP);
   - composition: B11001 household type (BG), B11016 type by size (BG),
     B11005 children under 18 by type (BG), B25007 tenure by age of
     householder (BG), B25009 tenure by size (BG), B19037 age of householder by
@@ -239,21 +243,28 @@ All items below are targets and inputs.
     B25091 owner cost burden (BG), B27010 health insurance (BG), B14001
     school enrolment (T), B18101 disability (T);
   - language, nativity, mobility: C16002 household language (BG), B05002
-    nativity and citizenship (T), B07201 mobility (BG).
-- **Attributes without a BG or tract table:** MULTG (multigenerational;
-  B11017 is national and state only), CPLT (couple type), HUPAC (presence and
-  age of children).
+    nativity and citizenship (T), B07003 mobility by sex (T; replaces B07201,
+    whose universe is metro-area residents only; the "moved within the US"
+    lines are collapsed because splitting them needs MIGPUMA).
+- **Attributes without a usable table:** MULTG (multigenerational; B11017 is
+  national and state only), CPLT (couple type), HUPAC (presence and age of
+  children), MV (time since moving in; B25038's calendar-year bands can't be
+  reproduced from MV, so B25038 was dropped).
 - **Omitted by the user:** veteran status, internet.
 - **Excluded:** MIGPUMA, POWPUMA (geography), ancestry, detailed race codes.
-- **To check when building:** JWMNP code 888 ("suppressed for data year 2023"
-  in some PUMAs) is missing data; both rooms/bedrooms and both B08303/B08134
-  were kept ("the rest are good") and can be pruned.
+- **Notes from building:** JWMNP 888 is treated as missing (none in
+  Tennessee); both rooms/bedrooms and both B08303/B08134 were kept and can be
+  pruned. Judgement calls (civilian noninstitutionalized, mortgage status,
+  cost-burden bands, the missing "Medicaid only" 65+ line in B27010) are
+  documented in `embed/tables.py`. The user accepted these departures.
+- **Configuration:** `experiments/embed/stage1_v1.json` (49 tables, 4
+  attributes, all targets and inputs).
 
 ### Data
 
 - Stage 1 fitting uses **no published values**; tables give categories and
-  universes only. The 2019–2023 PUMS PUMA codes use the 2020 definitions
-  (data dictionary).
+  universes only. The PUMS PUMA codes use the 2020 definitions (data
+  dictionary).
 - **Published tables outside the VRE come from the Census API** (new code; the
   repo has never used it). Estimates and MOEs only; SE = MOE/1.645. The VRE
   route stays as it is for Σ in stage 2.
