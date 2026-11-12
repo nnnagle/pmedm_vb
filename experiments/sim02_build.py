@@ -63,6 +63,31 @@ same tables as pool B's; otherwise each record takes the held-out counts of its
 merged row in the real statewide inputs (the prior-weight average over the
 row's records), which is recorded in calibration.json as ``heldout_source``.
 
+**Several PUMAs, other fits, no pools** (``sim04.json``; ``sim02_common.py``):
+everything above is done PUMA by PUMA, with that PUMA's source inputs, trace,
+held-out tables, real sample size and out-of-PUMA records; ``c`` is
+calibrated per kind *and PUMA*, over the kind's truths of that PUMA, since
+each PUMA's published variances are its own (with one PUMA that is sim02's
+per-kind ``c``). Without a ``pools`` block the statewide fits' out-of-PUMA
+records are the real statewide inputs' (``statewide``), every one with its
+real design weight, in place of pool B's; a source on those same inputs (a
+statewide experiment) then shares out-of-PUMA records with the fits, and each
+truth's share of ``N`` on out-of-PUMA records is recorded
+(``truth_borrowed``). The local inputs are written only if a fit JSON fits
+the local problem, the statewide ones only if one fits the statewide problem,
+once per inputs folder. With several PUMAs each truth's random draws come
+from ``default_rng([seed, k, <puma>, i])`` (one PUMA: ``[seed, k, i]``, as
+before), and calibration.json is ``{"sampling_fraction", "epsilon", "pumas":
+{<puma>: {"pool": ..., "kinds": {<kind>: ...}}}}``, each kind's entry as
+sim02's plus ``truth_borrowed`` per truth.
+A source with Poisson rows (``+poisson<c>``, tn10) is drawn exactly as a
+Gaussian one: its trace's ``lam`` holds the multipliers the data see, in
+today's stacked layout (``run_mcmc.draw_arrays``; the sampled coordinates,
+``u`` on the Poisson rows, are ``xi``), so ``p(lambda)`` is the same function
+of it [assumed: the allocation under Poisson rows is ``q exp(-X lam)`` with
+those multipliers, as :mod:`pmedm_vb.assemble.poisson` defines it].
+The same command builds sim04 with ``--sim experiments/sim/sim04.json``.
+
 Writes the two fits' inputs (with ``heldout/``),
 ``<root>/<name>/simulation/truths/<sim puma>.npz`` (``T``, ``S``, ``P``, the
 local fit's units as source unit indices, ``local_units``, and each one's row in
@@ -108,13 +133,14 @@ def parse_args() -> argparse.Namespace:
 # -- the truths' sources ----------------------------------------------------------
 
 
-def truth_source(sim: Sim02, kind: str, names: dict):
-    """The kind's source inputs, their held-out tables, and where those came from.
-    ``names`` are pool B's held-out names, which the source's must match."""
+def truth_source(sim: Sim02, kind: str, names: dict, puma: str | None = None):
+    """The kind's source inputs for ``puma`` (default the simulation's one PUMA),
+    their held-out tables, and where those came from. ``names`` are the fits'
+    out-of-PUMA records' held-out names (pool B's), which the source's must match."""
     from pmedm_vb.assemble.heldout import HeldOut
     from pmedm_vb.assemble.inputs import PMEDMInputs
 
-    path = sim.truth_inputs(kind)
+    path = sim.truth_inputs(kind, puma)
     inputs = PMEDMInputs.load(path)
     if HeldOut.exists(path):
         held = HeldOut.load(path)
@@ -128,7 +154,7 @@ def truth_source(sim: Sim02, kind: str, names: dict):
         raise SystemExit(f"{path}/heldout: missing (sim02_pools.py writes it)")
     # A PUMA-only problem: each record takes its merged row's held-out counts in
     # the real statewide inputs.
-    state_path = sim.statewide_inputs()
+    state_path = sim.statewide_inputs(puma)
     state, state_held = PMEDMInputs.load(state_path), HeldOut.load(state_path)
     members = state.unit_members
     own = members[members["in_puma"].to_numpy(dtype=bool) & (members["row"] >= 0)]
@@ -226,13 +252,18 @@ def local_fit(source, held, name: str, survey: dict, sigma: tuple, c: float,
 
 
 class PoolB:
-    """Pool B's out-of-PUMA records: their rows, design weights and held-out counts."""
+    """Pool B's out-of-PUMA records: their rows, design weights and held-out counts.
 
-    def __init__(self, path: Path) -> None:
+    Any statewide inputs serve (every out-of-PUMA record with a row and a
+    positive design weight is taken); ``key`` is the name under which the
+    statewide fits' ``support`` records the inputs' path (``pool_b`` for
+    sim02's pool B, ``pool`` for real statewide inputs)."""
+
+    def __init__(self, path: Path, key: str = "pool_b") -> None:
         from pmedm_vb.assemble.heldout import HeldOut
         from pmedm_vb.assemble.inputs import PMEDMInputs
 
-        self.path = path
+        self.path, self.key = path, key
         self.inputs = PMEDMInputs.load(path)
         self.held = HeldOut.load(path)
         members = self.inputs.unit_members
@@ -281,7 +312,7 @@ def statewide_fit(local, local_held, types: np.ndarray, counts: np.ndarray,
     units = unit_frame(members, gq[item], merged.size)
     support, columns = support_report(members, d, X_T, X_B, list(local.tract_constraints),
                                       list(local.bg_constraints), epsilon)
-    support["pool_b"] = str(pool.path)
+    support[pool.key] = str(pool.path)
     out = dataclasses.replace(
         local, q=design_weights(units["weight"], n_zones=local.n_zones), X_T=X_T, X_B=X_B,
         units=units, unit_members=members, support=support, support_columns=columns,
@@ -299,28 +330,20 @@ def statewide_fit(local, local_held, types: np.ndarray, counts: np.ndarray,
 # -- the build ------------------------------------------------------------------
 
 
-def main() -> None:
-    args = parse_args()
-    sim = Sim02(args.sim, args.root)
+def draw_puma(sim: Sim02, puma: str, pool: PoolB, record: dict, kinds: dict,
+              no_zero: list[str]) -> None:
+    """Draw and check every kind's truths, surveys and PUMS samples of ``puma``
+    (nothing written): each kind's ``(source, held, tab, c, draws, r,
+    weight_each)`` into ``kinds[(kind, puma)]``, its calibration into
+    ``record[kind]``, and the truths without a zero cell at a level into
+    ``no_zero``."""
+    from compare_support import borrowed_fraction
     from pmedm_vb.data.variance import SDR_FACTOR
 
-    names = sim.sim_pumas()
-    existing = [n for n in names if sim.truth_file(n).exists()]
-    if existing and not args.overwrite:
-        raise SystemExit(f"{sim.truth_file(existing[0])} exists; --overwrite to redraw")
-    pool = PoolB(sim.pool_inputs("B"))
-    print(f"pool B ({pool.path}): {pool.d.size:,} records in {pool.rows.size:,} rows, "
-          f"design weight {pool.d.sum():,.0f}", flush=True)
     f = sim.fraction
-    calibration = {"sampling_fraction": f, "epsilon": sim.epsilon,
-                   "pool_b": {"inputs": str(pool.path), "records": int(pool.d.size),
-                              "rows": int(pool.rows.size)},
-                   "kinds": {}}
-    # Everything is drawn and checked before anything is written, so a build
-    # that fails leaves the inputs and truths of an earlier one as they were.
-    kinds, no_zero = {}, []
+    single = sim.puma is not None
     for k, kind in enumerate(sim.kinds()):
-        source, held, held_note = truth_source(sim, kind, pool.held.names)
+        source, held, held_note = truth_source(sim, kind, pool.held.names, puma)
         for label, a, b in (("tract", source.tract_constraints, pool.inputs.tract_constraints),
                             ("block group", source.bg_constraints, pool.inputs.bg_constraints)):
             if list(a) != list(b):
@@ -338,8 +361,9 @@ def main() -> None:
 
         count = sim.count(kind)
         seed = int(sim.settings["seed"])
-        rngs = [np.random.default_rng([seed, k, i]) for i in range(1, count + 1)]
-        trace = sim.truth_trace(kind)
+        rngs = [np.random.default_rng([seed, k, i] if single else [seed, k, int(puma), i])
+                for i in range(1, count + 1)]
+        trace = sim.truth_trace(kind, puma)
         truths = posterior_truths(source, trace, count, rngs)
         total = int(round(source.N))
         target = sim.settings.get("pums_size") or source.n
@@ -361,21 +385,61 @@ def main() -> None:
             zero = (stacked(tab(S / f), columns) == 0) & (replicate == 0)
             for label, part in (("tract", zero[:split]), ("block group", zero[split:])):
                 if not part.any():
-                    no_zero.append(f"{sim.sim_puma(kind, i)} ({label})")
+                    no_zero.append(f"{sim.sim_puma(kind, i, puma)} ({label})")
         ratios = np.concatenate(ratios)
         c = float(np.median(ratios))
-        calibration["kinds"][kind] = {
+        record[kind] = {
             "c": c, "cells": int(ratios.size),
             "ratio_quantiles": {f"q{q:g}": float(np.quantile(ratios, q))
                                 for q in (0.1, 0.25, 0.5, 0.75, 0.9)},
-            "source_inputs": str(sim.truth_inputs(kind)), "source_trace": str(trace),
+            "source_inputs": str(sim.truth_inputs(kind, puma)), "source_trace": str(trace),
             "source_draws": [d for d, *_ in draws], "heldout_source": held_note,
             "pums_target": int(target), "pums_rate": r, "pums_weight": weight_each,
             "total": total}
-        print(f"{kind}: {source.n_units:,} source units; c = {c:.4g} over {ratios.size:,} "
-              f"cell-truths; PUMS rate {r:.4g} (target {target:,} of {total:,} at f = {f:g}), "
-              f"weight {weight_each:.2f}\n  held-out counts: {held_note}", flush=True)
-        kinds[kind] = (source, held, tab, c, draws, r, weight_each)
+        if not single:
+            # The truth's share of N on records from outside the PUMA, which
+            # without pools may be among the fits' own out-of-PUMA records.
+            frac = borrowed_fraction(source)
+            record[kind]["truth_borrowed"] = [float(T.sum(0) @ frac / T.sum())
+                                              for _, T, _, _ in draws]
+        print(f"{kind}{'' if single else f' {puma}'}: {source.n_units:,} source units; "
+              f"c = {c:.4g} over {ratios.size:,} cell-truths; PUMS rate {r:.4g} (target "
+              f"{target:,} of {total:,} at f = {f:g}), weight {weight_each:.2f}\n  held-out "
+              f"counts: {held_note}", flush=True)
+        kinds[(kind, puma)] = (source, held, tab, c, draws, r, weight_each)
+
+
+def main() -> None:
+    args = parse_args()
+    sim = Sim02(args.sim, args.root)
+
+    names = sim.sim_pumas()
+    existing = [n for n in names if sim.truth_file(n).exists()]
+    if existing and not args.overwrite:
+        raise SystemExit(f"{sim.truth_file(existing[0])} exists; --overwrite to redraw")
+    single = sim.puma is not None
+    f = sim.fraction
+    calibration = {"sampling_fraction": f, "epsilon": sim.epsilon}
+    if not single:
+        calibration["pumas"] = {}
+    # Everything is drawn and checked before anything is written, so a build
+    # that fails leaves the inputs and truths of an earlier one as they were.
+    pools, kinds, no_zero = {}, {}, []
+    for puma in sim.pumas:
+        pool = PoolB(sim.fit_pool_inputs(puma), "pool_b" if sim.pools is not None else "pool")
+        pools[puma] = pool
+        label = "pool B" if sim.pools is not None else f"{puma}: out-of-PUMA records"
+        print(f"{label} ({pool.path}): {pool.d.size:,} records in {pool.rows.size:,} rows, "
+              f"design weight {pool.d.sum():,.0f}", flush=True)
+        pool_record = {"inputs": str(pool.path), "records": int(pool.d.size),
+                       "rows": int(pool.rows.size)}
+        if single:
+            calibration["pool_b"], calibration["kinds"] = pool_record, {}
+            record = calibration["kinds"]
+        else:
+            calibration["pumas"][puma] = {"pool": pool_record, "kinds": {}}
+            record = calibration["pumas"][puma]["kinds"]
+        draw_puma(sim, puma, pool, record, kinds, no_zero)
     if no_zero:
         raise SystemExit("no constraint cell estimated as zero with no replicate spread, so no "
                          "zero-count variance for the fits' variance floor, in "
@@ -383,20 +447,23 @@ def main() -> None:
 
     sim.folder.mkdir(parents=True, exist_ok=True)
     (sim.folder / "truths").mkdir(exist_ok=True)
-    for kind, (source, held, tab, c, draws, r, weight_each) in kinds.items():
+    # The inputs each fit needs, written once per inputs folder.
+    supports = sim.input_fits()
+    for (kind, puma), (source, held, tab, c, draws, r, weight_each) in kinds.items():
         sigma = scaled_sigma(source, c, kind)
         for i, (source_draw, T, S, P) in enumerate(draws, start=1):
-            name = sim.sim_puma(kind, i)
+            name = sim.sim_puma(kind, i, puma)
             survey = tab(S / f)
             counts = P.sum(axis=0)
             local, local_held, types = local_fit(source, held, name, survey, sigma, c, counts,
                                                  weight_each)
             state, state_held, state_rows = statewide_fit(local, local_held, types, counts,
-                                                          weight_each, pool, sim.epsilon)
-            for fit, problem, h in (("local", local, local_held),
-                                    ("statewide", state, state_held)):
-                problem.save(sim.fit_inputs(fit, name))
-                h.save(sim.fit_inputs(fit, name))
+                                                          weight_each, pools[puma], sim.epsilon)
+            for support, problem, h in (("local", local, local_held),
+                                        ("statewide", state, state_held)):
+                for folder in sorted({sim.fit_inputs(fit, name) for fit in supports[support]}):
+                    problem.save(folder)
+                    h.save(folder)
             np.savez_compressed(
                 sim.truth_file(name), T=T, S=S, P=P, local_units=types, state_rows=state_rows,
                 c=c, kind=kind, source_draw=source_draw, fraction=f, pums_rate=r,

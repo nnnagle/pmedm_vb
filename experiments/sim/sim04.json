@@ -1,0 +1,40 @@
+{
+  "name": "sim04",
+  "description": "Crossed simulation on the four real PUMAs whose rare-race tract cells rest on about one sampled case (4703000, 4702300, 4702900, 4701900): truths drawn from two statewide-support (epsilon 0.01) posteriors with the tau prior sd 3, the Gaussian rows of tn08_long_state_prior3 (gauss) and the Poisson rows of tn10_long_state_prior3_poisson2 (poisson), 3,200 long-HMC draws each; a 1-in-8 survey of each truth and a simulated PUMS subsample of the PUMA's real sample size, as sim02; each truth fitted on the statewide support (its simulated PUMS plus the PUMA's real out-of-PUMA records) with Gaussian rows (sim04_fits_gauss.json, puma+prior3) and with Poisson rows (sim04_fits_poisson.json, puma+prior3+poisson2). No pools: a truth may hold out-of-PUMA records that are also in the fits' support, the same for both fits (sim02_common.py).",
+  "pumas": [
+    "4703000",
+    "4702300",
+    "4702900",
+    "4701900"
+  ],
+  "alpha": 0.01,
+  "epsilon": 0.01,
+  "statewide": "experiments/tn/tn08_long_state_prior3.json",
+  "truths": {
+    "gauss": {
+      "spec": "experiments/tn/tn08_long_state_prior3.json",
+      "count": 5,
+      "letter": "g",
+      "run": "ref"
+    },
+    "poisson": {
+      "spec": "experiments/tn/tn10_long_state_prior3_poisson2.json",
+      "count": 5,
+      "letter": "p",
+      "run": "ref"
+    }
+  },
+  "sampling_fraction": 0.125,
+  "pums_size": null,
+  "fits": {
+    "gauss": "experiments/sim/sim04_fits_gauss.json",
+    "poisson": "experiments/sim/sim04_fits_poisson.json"
+  },
+  "rare_groups": [
+    "nh_nhpi",
+    "nh_aian",
+    "nh_other_race"
+  ],
+  "draws": 400,
+  "seed": 4400
+}

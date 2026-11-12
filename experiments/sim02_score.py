@@ -107,6 +107,21 @@ fit, with the rare groups' per-block-group CRPS and coverage, then the
 income-within-race TVDs of every fit. They are written to ``--out``, by default
 ``<root>/<name>/simulation/scores_<fit>+<fit>...``, so the default run's
 ``scores`` is left as it is; without ``--fits`` nothing changes.
+
+**Other simulations** (``sim02_common.py``: several PUMAs, any named fits,
+no pools; ``experiments/sim/sim04.json``). A simulation whose ``fits`` are not
+sim02's ``local`` and ``statewide``, or that has several PUMAs, is always
+scored as named fits: ``--fits`` defaults to its ``fits``, in order, and
+``--base`` to the first. A ``--fits`` name is first one of the simulation's
+``fits``, then ``<sim name>_fits_<name>.json`` as above. With several PUMAs
+every table has a ``puma`` column (the real PUMA the truth was drawn for), and
+``paired.csv`` and summary.txt compare the fits per kind for each PUMA and for
+all PUMAs pooled (``puma`` ``all``: the paired differences over every truth of
+the kind, each truth one PUMA's); the truths are matched by PUMA and number.
+``truth_borrowed`` (``borrowed.csv``) is the truth's share of ``N`` on records
+from outside the PUMA, which, without pools, may include the fits' own
+out-of-PUMA records. Coverage counts a truth of zero as covered when the
+interval includes zero, as for sim02.
 """
 
 from __future__ import annotations
@@ -155,8 +170,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base", default=None,
                         help="with --fits: the fit the others are compared with (default the first)")
     args = parser.parse_args()
-    if args.base is not None and args.fits is None:
-        parser.error("--base needs --fits")
     if args.fits is not None:
         if len(set(args.fits)) != len(args.fits):
             parser.error("--fits: a name is given twice")
@@ -306,15 +319,28 @@ def score_fit(truth: dict, draws: dict, names: dict, se: dict, rare: list[str],
     return rows, measures, cross, within, groups
 
 
+def truth_groups(per_truth: pd.DataFrame):
+    """The sets of truths compared: ``(labels, rows, index)`` per kind, and with a
+    ``puma`` column per kind and PUMA and per kind over all PUMAs (``puma``
+    ``all``), ``index`` the columns that identify a truth in the set."""
+    for kind, group in per_truth.groupby("kind", sort=False):
+        if "puma" not in per_truth:
+            yield {"kind": kind}, group, "truth_id"
+            continue
+        for puma, part in group.groupby("puma", sort=False):
+            yield {"kind": kind, "puma": puma}, part, "truth_id"
+        yield {"kind": kind, "puma": "all"}, group, ["puma", "truth_id"]
+
+
 def paired(per_truth: pd.DataFrame, base: str = "local",
            other: str = "statewide") -> pd.DataFrame:
-    """Per kind and measure: two fits over the truths both have, the difference
-    ``other - base`` per truth."""
-    keys = ["kind", "truth_id", "fit"]
+    """Per kind (and PUMA, :func:`truth_groups`) and measure: two fits over the
+    truths both have, the difference ``other - base`` per truth."""
+    keys = ["kind", "puma", "truth_id", "fit"]
     measures = [c for c in per_truth.columns if c not in keys]
     out = []
-    for kind, group in per_truth.groupby("kind", sort=False):
-        wide = group.pivot(index="truth_id", columns="fit", values=measures)
+    for labels, group, index in truth_groups(per_truth):
+        wide = group.pivot(index=index, columns="fit", values=measures)
         for measure in measures:
             if (measure, base) not in wide or (measure, other) not in wide:
                 continue
@@ -323,7 +349,7 @@ def paired(per_truth: pd.DataFrame, base: str = "local",
                 continue
             a, b = both.iloc[:, 0].to_numpy(), both.iloc[:, 1].to_numpy()
             diff = b - a
-            out.append({"kind": kind, "measure": measure, "truths": len(diff),
+            out.append({**labels, "measure": measure, "truths": len(diff),
                         base: a.mean(), other: b.mean(),
                         "diff_mean": diff.mean(),
                         "diff_sd": diff.std(ddof=1) if len(diff) > 1 else np.nan,
@@ -388,34 +414,36 @@ def fit_json(sim: Sim02, name: str) -> Path:
             raise SystemExit(f"--fits {name}: no such file")
         return path
     for folder in (sim.path.parent, REPO / "experiments" / "sim"):
-        candidate = folder / f"sim02_fits_{name}.json"
+        candidate = folder / f"{sim.name}_fits_{name}.json"
         if candidate.exists():
             return candidate
-    raise SystemExit(f"--fits {name}: not local, statewide or boot, and no sim02_fits_{name}.json "
-                     f"in {sim.path.parent} or {REPO / 'experiments' / 'sim'}")
+    raise SystemExit(f"--fits {name}: not among {', '.join(sim.settings['fits'])} or boot, and "
+                     f"no {sim.name}_fits_{name}.json in {sim.path.parent} or "
+                     f"{REPO / 'experiments' / 'sim'}")
 
 
-def fit_label(name: str) -> str:
-    """A ``--fits`` name as the tables call it: a path's file name less ``sim02_fits_``."""
+def fit_label(name: str, prefix: str = "sim02") -> str:
+    """A ``--fits`` name as the tables call it: a path's file name less
+    ``<prefix>_fits_`` (the simulation's name)."""
     path = Path(name)
     if path.suffix != ".json":
         return name
-    stem = path.stem
-    return stem[len("sim02_fits_"):] if stem.startswith("sim02_fits_") else stem
+    stem, head = path.stem, f"{prefix}_fits_"
+    return stem[len(head):] if stem.startswith(head) else stem
 
 
 def named_fits(sim: Sim02, names: list[str]) -> list[str]:
     """Register the ``--fits`` names as fits of ``sim`` (``sim.fits[label]``, so
     its traces and inputs are found as the built-in fits' are) and check that
-    each fits the simulation's truths; the labels, in order. ``local``,
-    ``statewide`` and ``boot`` are the simulation's own."""
+    each fits the simulation's truths; the labels, in order. The simulation's
+    ``fits`` (sim02's ``local`` and ``statewide``) and ``boot`` are its own."""
     labels, problems = [], []
     for name in names:
-        label = fit_label(name)
+        label = fit_label(name, sim.name)
         if label in labels:
             raise SystemExit(f"--fits: two names stand for the fit {label!r}")
         labels.append(label)
-        if label in FITS:
+        if label in sim.settings["fits"]:
             continue
         if label == "boot":
             if sim.bootstrap is None:
@@ -434,7 +462,7 @@ def named_fits(sim: Sim02, names: list[str]) -> list[str]:
         epsilon = spec["model"].get("epsilon")
         if epsilon is not None and float(epsilon) != sim.epsilon:
             problems.append(f"{path}: model.epsilon must be unset or {sim.epsilon:g}")
-        if str(rx.data_dir(spec)) != str(rx.data_dir(sim.fits["local"])):
+        if str(rx.data_dir(spec)) != str(rx.data_dir(next(iter(sim.fits.values())))):
             problems.append(f"{path}: data_dir must be the simulation's")
         sim.fits[label] = spec
     if problems:
@@ -473,40 +501,68 @@ def named_summary(sim: Sim02, labels: list[str], base: str, pairs: pd.DataFrame,
                      + "; ".join(boot_skipped))
     if lines:
         lines.append("")
+    # One PUMA: per kind; several: per kind, each PUMA and then all PUMAs pooled.
+    groups = [None] if sim.puma is not None else [*sim.pumas, "all"]
     for kind in sim.kinds():
-        for other in labels:
-            if other == base:
-                continue
-            part = (pairs[(pairs["kind"] == kind) & (pairs["comparison"] == f"{other} - {base}")]
-                    if len(pairs) else pairs)
-            if part.empty:
-                lines += [f"== {kind} truths, {other} vs {base}: no truth with both fits", ""]
-                continue
-            part = part.set_index("measure")
-            lines.append(f"== {kind} truths, {other} vs {base} ({int(part['truths'].max())} "
-                         "with both fits; diff = fit - base)")
-            lines += table_lines(part, measures, "base", "fit", "fit_lower", ("base", "fit"))
-            lines.append("")
-        within = frames["within"][frames["within"]["kind"] == kind]
-        if len(within):
-            table = within.pivot_table(index="race", columns="fit", values="tvd", aggfunc="mean")
-            table = table[[f for f in labels if f in table]]
-            persons = (within.drop_duplicates(["truth_id", "race"]).groupby("race")
-                       ["truth_persons"].mean().rename("truth persons"))
-            lines.append(f"   {kind} truths, income within race, TVD from the truth (mean over "
-                         "truths):")
-            lines += ["   " + line for line in table.join(persons).round(4).to_string().splitlines()]
-        b = frames["borrowed"][frames["borrowed"]["kind"] == kind]
-        for fit in labels:
-            spec = sim.fits.get(fit)
-            if spec is None or spec["model"].get("epsilon") is None:
-                continue
-            part = b[b["fit"] == fit]
-            if len(part):
-                lines.append(f"   pool B share of N, {fit}: prior {part['prior'].mean():.4f}, "
-                             f"posterior {part['mean'].mean():.4f} (truth's own share on records "
-                             f"from outside the PUMA: {part['truth_borrowed'].mean():.4f})")
+        for group in groups:
+            lines += kind_summary(sim, kind, group, labels, base, pairs, frames, measures)
+    return lines
+
+
+def kind_summary(sim: Sim02, kind: str, group: str | None, labels: list[str], base: str,
+                 pairs: pd.DataFrame, frames: dict[str, pd.DataFrame],
+                 measures: list[tuple[str, str]]) -> list[str]:
+    """summary.txt's lines for one kind's truths, of one PUMA (``group``), of all
+    PUMAs (``"all"``) or of the one PUMA of a single-PUMA simulation (``None``):
+    every other fit against ``base``, income within race for every fit and the
+    out-of-PUMA weight of every statewide-support fit."""
+    def rows(frame: pd.DataFrame, pooled: bool = False) -> pd.DataFrame:
+        """The kind's rows of the group; ``pooled``: the frame has rows of its
+        own for all PUMAs (``puma`` ``all``, as ``paired.csv``)."""
+        if not len(frame):
+            return frame
+        keep = frame["kind"] == kind
+        if group == "all" and pooled:
+            keep &= frame["puma"] == "all"
+        elif group not in (None, "all"):
+            keep &= frame["puma"] == group
+        return frame[keep]
+
+    where = {None: "", "all": ", all PUMAs"}.get(group, f", PUMA {group}")
+    lines, chosen = [], rows(pairs, pooled=True)
+    for other in labels:
+        if other == base:
+            continue
+        part = (chosen[chosen["comparison"] == f"{other} - {base}"] if len(chosen) else chosen)
+        if part.empty:
+            lines += [f"== {kind} truths{where}, {other} vs {base}: no truth with both fits", ""]
+            continue
+        part = part.set_index("measure")
+        lines.append(f"== {kind} truths{where}, {other} vs {base} ({int(part['truths'].max())} "
+                     "with both fits; diff = fit - base)")
+        lines += table_lines(part, measures, "base", "fit", "fit_lower", ("base", "fit"))
         lines.append("")
+    within = rows(frames["within"])
+    if len(within):
+        table = within.pivot_table(index="race", columns="fit", values="tvd", aggfunc="mean")
+        table = table[[f for f in labels if f in table]]
+        truth = [c for c in ("puma", "truth_id") if c in within]
+        persons = (within.drop_duplicates([*truth, "race"]).groupby("race")
+                   ["truth_persons"].mean().rename("truth persons"))
+        lines.append(f"   {kind} truths{where}, income within race, TVD from the truth (mean "
+                     "over truths):")
+        lines += ["   " + line for line in table.join(persons).round(4).to_string().splitlines()]
+    b = rows(frames["borrowed"])
+    for fit in labels:
+        spec = sim.fits.get(fit)
+        if spec is None or spec["model"].get("epsilon") is None:
+            continue
+        part = b[b["fit"] == fit]
+        if len(part):
+            lines.append(f"   {sim.pool_label} share of N, {fit}: prior {part['prior'].mean():.4f}, "
+                         f"posterior {part['mean'].mean():.4f} (truth's own share on records "
+                         f"from outside the PUMA: {part['truth_borrowed'].mean():.4f})")
+    lines.append("")
     return lines
 
 
@@ -608,6 +664,13 @@ def main() -> None:
     sim = Sim02(args.sim, args.root)
     from pmedm_vb.assemble.heldout import HeldOut
 
+    if args.fits is None and (set(sim.settings["fits"]) != set(FITS) or sim.puma is None):
+        # Not sim02's two fits of one PUMA: always the named-fits comparison.
+        args.fits = list(sim.settings["fits"])
+        args.base = args.base or args.fits[0]
+    elif args.base is not None and args.fits is None:
+        raise SystemExit("--base needs --fits")
+
     # The fits scored, in order: the two built-in ones and (once started) boot,
     # or the --fits names.
     labels = named_fits(sim, args.fits) if args.fits is not None else None
@@ -618,7 +681,7 @@ def main() -> None:
         out = args.out or sim.folder / ("scores_" + "+".join(labels))
     out.mkdir(parents=True, exist_ok=True)
     rare = list(sim.settings.get("rare_groups", []))
-    pool_names = HeldOut.load(sim.pool_inputs("B")).names
+    pool_names = {puma: HeldOut.load(sim.fit_pool_inputs(puma)).names for puma in sim.pumas}
     rng, rare_rng = np.random.default_rng(0), np.random.default_rng(RARE_SEED)
     tables = {k: [] for k in ("scores", "per_truth", "cross", "within", "rare", "borrowed")}
     missing = []
@@ -636,14 +699,16 @@ def main() -> None:
     if boot and per_replicate < 1:
         raise SystemExit(f"--draws {draws_wanted}: fewer than one per bootstrap replicate ({R})")
     boot_pooled, boot_skipped = {}, []
-    for kind in sim.kinds():
-        source, held, _ = truth_source(sim, kind, pool_names)
+    sources = [(kind, area) for kind in sim.kinds() for area in sim.pumas]
+    for kind, area in sources:
+        source, held, _ = truth_source(sim, kind, pool_names[area], area)
         src_tab, (src_cross, cross_names) = Tabulator(source, held), crosstab(source)
         src_frac = borrowed_fraction(source)
         names = {"bg": list(source.bg_constraints), "tract": list(source.tract_constraints),
                  "crosstab": cross_names}
-        for i in range(1, sim.count(kind) + 1):
-            puma = sim.sim_puma(kind, i)
+        # The rows' identity: the real PUMA too when there are several.
+        where = {"kind": kind} if sim.puma is not None else {"kind": kind, "puma": area}
+        for i, puma in sim.truths(kind, area):
             with np.load(sim.truth_file(puma)) as saved:
                 T = saved["T"].astype(float)
             truth = tabulate(src_tab, src_cross, T)
@@ -664,7 +729,7 @@ def main() -> None:
                              for k in parts[0][0]}
                     borrowed = np.concatenate([part[1] for part in parts])
                     prior = float(np.mean([part[2] for part in parts]))
-                    measures = record_fit(tables, {"kind": kind, "truth_id": i, "fit": "boot"},
+                    measures = record_fit(tables, {**where, "truth_id": i, "fit": "boot"},
                                           truth, cells, borrowed, prior, truth_borrowed, names,
                                           parts[0][3], rare, rng, rare_rng)
                     boot_pooled[puma] = [part[1].size for part in parts]
@@ -679,7 +744,7 @@ def main() -> None:
                     continue
                 cells, borrowed, prior, se, rows = load_fit(sim.fit_inputs(fit, puma), trace,
                                                             draws_wanted, names)
-                measures = record_fit(tables, {"kind": kind, "truth_id": i, "fit": fit}, truth,
+                measures = record_fit(tables, {**where, "truth_id": i, "fit": fit}, truth,
                                       cells, borrowed, prior, truth_borrowed, names, se, rare,
                                       rng, rare_rng)
                 print(f"{puma} {fit}: {borrowed.size} draws, {rows:,} rows; race x "
@@ -702,7 +767,9 @@ def main() -> None:
         pairs = paired_named(frames["per_truth"], args.base,
                              [f for f in labels if f != args.base])
         pairs.to_csv(out / "paired.csv", index=False)
-        lines = [f"{sim.name}: PUMA {sim.puma}, alpha {sim.alpha:g}, epsilon {sim.epsilon:g}; "
+        areas = (f"PUMA {sim.puma}" if sim.puma is not None
+                 else f"PUMAs {', '.join(sim.pumas)}")
+        lines = [f"{sim.name}: {areas}, alpha {sim.alpha:g}, epsilon {sim.epsilon:g}; "
                  f"{draws_wanted} HMC short draws per fit",
                  "fits: " + "; ".join(
                      f"{f} ({sim.fits[f]['name']}, level {rx.level(sim.fits[f])})"
@@ -713,7 +780,7 @@ def main() -> None:
         if missing:
             lines += [f"missing fits, left out ({len(missing)}): {', '.join(missing)}", ""]
         lines += named_summary(sim, labels, args.base, pairs, frames, SUMMARY + rare_measures + [
-            ("borrowed_posterior", "share of N on pool B records (posterior mean)")],
+            ("borrowed_posterior", f"share of N on {sim.pool_label} records (posterior mean)")],
             boot_pooled, boot_skipped)
         text = "\n".join(lines) + "\n"
         (out / "summary.txt").write_text(text)

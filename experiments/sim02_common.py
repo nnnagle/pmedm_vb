@@ -30,6 +30,26 @@ Everything the simulation writes besides the inputs is under
 ``<root>/<name>/simulation`` (``truths/``, ``calibration.json``, ``scores/``):
 the simulation's own folder, since its two fits' experiment folders
 (``<root>/<fits name>``) are run_experiment.py's.
+
+**Other simulations on the same code** (``experiments/sim/sim04.json``). The
+build and the scores take any simulation JSON of this form, with three
+generalisations; sim02.json uses none of them and is built and scored as before:
+
+- ``pumas`` (a list) in place of ``puma``: the truths of each kind are drawn
+  for every PUMA from the kind's source experiment run on that PUMA, named
+  ``<puma><letter><i>`` (kind by kind, then PUMA by PUMA in ``pumas``' order,
+  then ``i``); every per-PUMA quantity (the source, its calibration ``c``, the
+  PUMS target, the fits' out-of-PUMA records) is the PUMA's own;
+- ``fits`` names any fits JSONs: one with ``model.epsilon`` unset fits the
+  *local* problem (the simulated PUMS alone), one with ``model.epsilon`` set
+  (the simulation's) the *statewide* one; fits that share an area share the
+  inputs, which the build writes once per area;
+- without a ``pools`` block, the fits' out-of-PUMA records are those of the
+  real statewide inputs (``statewide``) of the PUMA, all of them. Then a truth
+  drawn from a statewide source may hold out-of-PUMA records that are also in
+  the fits' support (the leakage that sim02's pools A and B prevent); its
+  share of ``N`` on such records is recorded (calibration.json and the scores'
+  ``borrowed.csv``, ``truth_borrowed``).
 """
 
 from __future__ import annotations
@@ -54,7 +74,15 @@ BOOT_SHARED = ("area", "alphas", "data_dir", "heldout", "model", "rake", "vb_fam
 
 
 class Sim02:
-    """The settings of ``experiments/sim/sim02.json`` and what follows from them."""
+    """The settings of a simulation JSON (``experiments/sim/sim02.json``, or one
+    with the generalisations of the module docstring, ``sim04.json``) and what
+    follows from them.
+
+    ``pumas`` is the list of real PUMAs the truths are drawn for; ``puma`` is
+    the one PUMA of a single-PUMA simulation (``None`` with several). Methods
+    that take ``puma`` default to that one PUMA, so a single-PUMA caller need
+    not name it.
+    """
 
     def __init__(self, path: Path, root: Path | None = None) -> None:
         self.path = Path(path)
@@ -62,7 +90,12 @@ class Sim02:
         self.root = None if root is None else Path(root)
         s = self.settings
         self.name = s["name"]
-        self.puma = s["puma"]
+        if ("puma" in s) == ("pumas" in s):
+            raise SystemExit(f"{self.path}: give 'puma' (one PUMA) or 'pumas' (a list), not both")
+        self.pumas = [s["puma"]] if "puma" in s else [str(p) for p in s["pumas"]]
+        if not self.pumas or len(set(self.pumas)) != len(self.pumas):
+            raise SystemExit(f"{self.path}: pumas must be distinct and at least one")
+        self.puma = self.pumas[0] if len(self.pumas) == 1 else None
         self.alpha = float(s["alpha"])
         self.epsilon = float(s["epsilon"])
         self.fraction = float(s["sampling_fraction"])
@@ -70,13 +103,13 @@ class Sim02:
         self.statewide = rx.load_experiment(REPO / s["statewide"])
         self.truth_specs = {kind: rx.load_experiment(REPO / entry["spec"])
                             for kind, entry in s["truths"].items()}
-        self.fits = {fit: rx.load_experiment(REPO / s["fits"][fit]) for fit in FITS}
+        self.fits = {fit: rx.load_experiment(REPO / path) for fit, path in s["fits"].items()}
         #: The ``bootstrap`` block (``None`` without one); its fits are ``fits["boot"]``.
         self.bootstrap = s.get("bootstrap")
         if self.bootstrap is not None:
             self.fits["boot"] = rx.load_experiment(REPO / self.bootstrap["fits"])
         self._check()
-        os.environ["PMEDM_VB_DATA"] = str(rx.data_dir(self.fits["local"]))
+        os.environ["PMEDM_VB_DATA"] = str(rx.data_dir(next(iter(self.fits.values()))))
 
     def _check(self) -> None:
         s, problems = self.settings, []
@@ -87,7 +120,9 @@ class Sim02:
             problems.append(f"the experiments name different data_dir values: {sorted(dirs)}")
         if float(self.statewide["model"].get("epsilon") or -1) != self.epsilon:
             problems.append(f"{s['statewide']}: model.epsilon must be {self.epsilon:g}")
-        for fit in FITS:
+        if not s["fits"] or "boot" in s["fits"]:
+            problems.append("fits: at least one, and 'boot' is the bootstrap block's")
+        for fit in s["fits"]:
             spec = self.fits[fit]
             if spec["pumas"] != expected:
                 problems.append(f"{s['fits'][fit]}: pumas must be {expected[0]} ... "
@@ -95,23 +130,35 @@ class Sim02:
             if [float(a) for a in spec["alphas"]] != [self.alpha]:
                 problems.append(f"{s['fits'][fit]}: alphas must be [{self.alpha:g}]")
             epsilon = spec["model"].get("epsilon")
-            want = self.epsilon if fit == "statewide" else None
-            if (epsilon is None) != (want is None) or (want is not None and float(epsilon) != want):
-                problems.append(f"{s['fits'][fit]}: model.epsilon must be "
-                                f"{'unset' if want is None else f'{want:g}'}")
+            if set(s["fits"]) == set(FITS):
+                want = self.epsilon if fit == "statewide" else None
+                if (epsilon is None) != (want is None) or (want is not None
+                                                           and float(epsilon) != want):
+                    problems.append(f"{s['fits'][fit]}: model.epsilon must be "
+                                    f"{'unset' if want is None else f'{want:g}'}")
+            elif epsilon is not None and float(epsilon) != self.epsilon:
+                problems.append(f"{s['fits'][fit]}: model.epsilon must be unset (the local "
+                                f"problem) or {self.epsilon:g} (the statewide one)")
             if "short" not in (spec["hmc"] or {}).get("kinds", []):
                 problems.append(f"{s['fits'][fit]}: the scores read HMC short (hmc.kinds)")
-        if self.fits["local"]["area"]["name"] != self.fits["statewide"]["area"]["name"]:
-            problems.append("the two fits JSONs must share area.name")
-        pool_a = self.pool_inputs("A")
+        if len({spec["area"]["name"] for spec in self.fits.values()}) > 1:
+            problems.append("the fits JSONs must share area.name")
         for kind, entry in s["truths"].items():
             spec = self.truth_specs[kind]
             if self.alpha not in [float(a) for a in spec["alphas"]]:
                 problems.append(f"{entry['spec']}: alpha {self.alpha:g} is not among its alphas")
-            if entry.get("pool") == "A" and self.truth_inputs(kind) != pool_a:
-                problems.append(f"{entry['spec']}: its inputs ({self.truth_inputs(kind)}) are not "
-                                f"pool A's ({pool_a}); its area.name must be "
-                                f"{s['pools']['areas']['A']!r}")
+            absent = [p for p in self.pumas if p not in rx.grid(spec)["pumas"]]
+            if absent:
+                problems.append(f"{entry['spec']}: PUMAs {absent} are not in its grid")
+            if entry.get("pool") == "A":
+                if self.pools is None:
+                    problems.append(f"truths.{kind}: pool A, but there is no pools block")
+                elif self.truth_inputs(kind, self.pumas[0]) != self.pool_inputs("A",
+                                                                                self.pumas[0]):
+                    problems.append(f"{entry['spec']}: its inputs "
+                                    f"({self.truth_inputs(kind, self.pumas[0])}) are not "
+                                    f"pool A's ({self.pool_inputs('A', self.pumas[0])}); its "
+                                    f"area.name must be {s['pools']['areas']['A']!r}")
         if self.bootstrap is not None:
             problems += self._check_bootstrap()
         if problems:
@@ -151,23 +198,52 @@ class Sim02:
 
     # -- names and paths ------------------------------------------------------
 
+    @property
+    def pools(self) -> dict | None:
+        """The ``pools`` block (sim02's pools A and B), ``None`` without one."""
+        return self.settings.get("pools")
+
+    @property
+    def pool_label(self) -> str:
+        """What the fits' out-of-PUMA records are called in reports: ``pool B``,
+        or ``out-of-PUMA`` when they are the statewide inputs' own."""
+        return "pool B" if self.pools is not None else "out-of-PUMA"
+
+    def _puma(self, puma: str | None) -> str:
+        """``puma``, or the simulation's one PUMA when ``None``."""
+        if puma is not None:
+            return puma
+        if self.puma is None:
+            raise ValueError(f"{self.path}: several PUMAs, so name one")
+        return self.puma
+
     def kinds(self) -> list[str]:
         return list(self.settings["truths"])
 
     def count(self, kind: str) -> int:
+        """Truths of ``kind`` per PUMA."""
         return int(self.settings["truths"][kind]["count"])
 
-    def sim_puma(self, kind: str, i: int) -> str:
-        """``<puma><letter><i>``, e.g. ``4701502b07``: the ``i``-th truth (from 1) of ``kind``."""
-        return f"{self.puma}{self.settings['truths'][kind]['letter']}{i:02d}"
+    def sim_puma(self, kind: str, i: int, puma: str | None = None) -> str:
+        """``<puma><letter><i>``, e.g. ``4701502b07``: the ``i``-th truth (from 1) of
+        ``kind`` drawn for ``puma``."""
+        return f"{self._puma(puma)}{self.settings['truths'][kind]['letter']}{i:02d}"
 
     def sim_pumas(self, kind: str | None = None) -> list[str]:
+        """Every truth, kind by kind, then PUMA by PUMA, then by number: the fits'
+        ``pumas``."""
         kinds = self.kinds() if kind is None else [kind]
-        return [self.sim_puma(k, i) for k in kinds for i in range(1, self.count(k) + 1)]
+        return [self.sim_puma(k, i, p) for k in kinds for p in self.pumas
+                for i in range(1, self.count(k) + 1)]
 
-    def statewide_inputs(self) -> Path:
-        """The real statewide inputs the pools are split from."""
-        return rx.inputs_dir(self.statewide) / self.puma
+    def truths(self, kind: str, puma: str) -> list[tuple[int, str]]:
+        """``(i, sim puma)`` of every truth of ``kind`` drawn for ``puma``."""
+        return [(i, self.sim_puma(kind, i, puma)) for i in range(1, self.count(kind) + 1)]
+
+    def statewide_inputs(self, puma: str | None = None) -> Path:
+        """The real statewide inputs: what the pools are split from, or, without a
+        ``pools`` block, the fits' out-of-PUMA records."""
+        return rx.inputs_dir(self.statewide) / self._puma(puma)
 
     def pool_spec(self, pool: str) -> dict:
         """The statewide spec with the pool's area name: what run_experiment.py
@@ -175,19 +251,38 @@ class Sim02:
         area = {**self.statewide["area"], "name": self.settings["pools"]["areas"][pool]}
         return {**self.statewide, "area": area}
 
-    def pool_inputs(self, pool: str) -> Path:
+    def pool_inputs(self, pool: str, puma: str | None = None) -> Path:
         """``<data>/processed/inputs/<pool area>-<year>-<span>yr-state-e<epsilon>/<puma>``."""
-        return rx.inputs_dir(self.pool_spec(pool)) / self.puma
+        return rx.inputs_dir(self.pool_spec(pool)) / self._puma(puma)
 
-    def truth_inputs(self, kind: str) -> Path:
-        return rx.inputs_dir(self.truth_specs[kind]) / self.puma
+    def fit_pool_inputs(self, puma: str | None = None) -> Path:
+        """The inputs whose out-of-PUMA records join the statewide fits: pool B's,
+        or the real statewide inputs' without a ``pools`` block."""
+        if self.pools is not None:
+            return self.pool_inputs("B", puma)
+        return self.statewide_inputs(puma)
 
-    def truth_trace(self, kind: str) -> Path:
+    def truth_inputs(self, kind: str, puma: str | None = None) -> Path:
+        return rx.inputs_dir(self.truth_specs[kind]) / self._puma(puma)
+
+    def truth_trace(self, kind: str, puma: str | None = None) -> Path:
         """The truth source's HMC trace (``truths.<kind>.run``: ``short`` or ``ref``)."""
-        spec = self.truth_specs[kind]
+        spec, puma = self.truth_specs[kind], self._puma(puma)
         run = self.settings["truths"][kind].get("run", "short")
-        return (self._root() / spec["name"] / self.puma / f"hmc_{run}"
-                / f"{rx.fit_name(spec, self.puma, self.alpha)}_trace.npz")
+        return (self._root() / spec["name"] / puma / f"hmc_{run}"
+                / f"{rx.fit_name(spec, puma, self.alpha)}_trace.npz")
+
+    def is_statewide(self, fit: str) -> bool:
+        """Whether the fit's support is the statewide one (``model.epsilon`` set)."""
+        return self.fits[fit]["model"].get("epsilon") is not None
+
+    def input_fits(self) -> dict[str, list[str]]:
+        """The fits (not ``boot``) by the support they fit, ``local`` or
+        ``statewide``: the inputs the build writes."""
+        out = {"local": [], "statewide": []}
+        for fit in self.settings["fits"]:
+            out["statewide" if self.is_statewide(fit) else "local"].append(fit)
+        return out
 
     def boot_truths(self) -> list[str]:
         """The truths with bootstrap replicates (none without a ``bootstrap`` block)."""
@@ -210,9 +305,10 @@ class Sim02:
     def truth_index(self, sim_puma: str) -> tuple[int, int]:
         """``(k, i)``: the truth's kind's position in ``truths`` and its number."""
         for k, kind in enumerate(self.kinds()):
-            for i in range(1, self.count(kind) + 1):
-                if self.sim_puma(kind, i) == sim_puma:
-                    return k, i
+            for puma in self.pumas:
+                for i, name in self.truths(kind, puma):
+                    if name == sim_puma:
+                        return k, i
         raise KeyError(sim_puma)
 
     def fit_inputs(self, fit: str, sim_puma: str) -> Path:

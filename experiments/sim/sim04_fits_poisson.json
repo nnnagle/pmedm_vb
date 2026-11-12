@@ -1,0 +1,112 @@
+{
+  "name": "sim04_poisson",
+  "description": "sim04's Poisson-row fits (experiments/sim/sim04.json): every truth of both generators (tn08 gauss, tn10 poisson; 4 PUMAs x 5 each), its simulated PUMS plus the PUMA's real out-of-PUMA records at epsilon 0.01 (tnsim04-2024-5yr-state-e0.01, built by sim02_build.py), level puma+prior3+poisson2 as tn10_long_state_prior3_poisson2, whitened by its VB Gaussian (in u on the Poisson rows); sim02's short HMC. Scored by sim02_score.py --sim experiments/sim/sim04.json --fits gauss poisson --base gauss. Two truths per bundle job, 64G; run_queue.py across ai-tenn-debug and campus-gpu, resumed from the HMC checkpoints past the 3 h limit.",
+  "area": {
+    "name": "tnsim04",
+    "state": "47",
+    "counties": [],
+    "year": 2024,
+    "span": 5,
+    "tables": [
+      "B01001",
+      "B03002",
+      "B19001",
+      "B25003",
+      "B26001"
+    ]
+  },
+  "pumas": [
+    "4703000g01",
+    "4703000g02",
+    "4703000g03",
+    "4703000g04",
+    "4703000g05",
+    "4702300g01",
+    "4702300g02",
+    "4702300g03",
+    "4702300g04",
+    "4702300g05",
+    "4702900g01",
+    "4702900g02",
+    "4702900g03",
+    "4702900g04",
+    "4702900g05",
+    "4701900g01",
+    "4701900g02",
+    "4701900g03",
+    "4701900g04",
+    "4701900g05",
+    "4703000p01",
+    "4703000p02",
+    "4703000p03",
+    "4703000p04",
+    "4703000p05",
+    "4702300p01",
+    "4702300p02",
+    "4702300p03",
+    "4702300p04",
+    "4702300p05",
+    "4702900p01",
+    "4702900p02",
+    "4702900p03",
+    "4702900p04",
+    "4702900p05",
+    "4701900p01",
+    "4701900p02",
+    "4701900p03",
+    "4701900p04",
+    "4701900p05"
+  ],
+  "alphas": [
+    0.01
+  ],
+  "data_dir": "/lustre/isaac24/scratch/$USER/pmedm_vb_paper_data",
+  "heldout": true,
+  "model": {
+    "taper": "none",
+    "variance_floor": "zero",
+    "hierarchy": "puma",
+    "rollup": null,
+    "share_cap": null,
+    "cap_strength": null,
+    "epsilon": 0.01,
+    "multiplier_prior_sd": 3,
+    "poisson_k": 2
+  },
+  "rake": [],
+  "vb_families": [
+    "gaussian"
+  ],
+  "vb_device": "cuda",
+  "hmc": {
+    "whiten": "gaussian",
+    "kinds": [
+      "short"
+    ],
+    "trajectory": 3.0,
+    "chains": 32,
+    "short": {
+      "warmup": 200,
+      "samples": 1000,
+      "thin": 10,
+      "checkpoint": 100,
+      "seed": 2000
+    }
+  },
+  "bundle": {
+    "jobs": 20
+  },
+  "slurm": {
+    "account": "isaac-utk0533",
+    "gpu_partition": "campus-gpu",
+    "max_gpu_jobs": 6,
+    "bundle": [
+      "--partition=campus-gpu",
+      "--qos=campus-gpu",
+      "--gpus=v100s:1",
+      "--cpus-per-task=4",
+      "--mem=64G",
+      "--time=03:00:00"
+    ]
+  }
+}
