@@ -59,7 +59,9 @@ import time
 import numpy as np
 import torch
 
-from pmedm_vb.embed.model import Decoder, category_weights, data_term, ridge_term, whiten
+from pmedm_vb.embed.model import (
+    C_MAX, Decoder, category_weights, data_term, ridge_term, whiten,
+)
 from pmedm_vb.embed.units import TargetArrays
 from pmedm_vb.progress import logger
 
@@ -181,6 +183,7 @@ def fit_baseline(
     gamma: float,
     ridge: float,
     weighted: bool = True,
+    c_max: float | None = C_MAX,
     heldout_fraction: float = 0.1,
     seed: int = 1,
     device: str | None = None,
@@ -205,7 +208,8 @@ def fit_baseline(
     fit_weight = arrays.weight if weighted else arrays.n_units
     design = arrays.weight
     empty = arrays.counts.sum(0) == 0
-    c = category_weights(arrays.counts, fit_weight, arrays.groups, gamma, train=train)
+    c = category_weights(arrays.counts, fit_weight, arrays.groups, gamma, train=train,
+                         c_max=c_max)
     c[empty] = 0.0
 
     b0, O0 = intercepts(train_counts, fit_weight, arrays.gq, arrays.groups, c)
@@ -290,6 +294,7 @@ def fit_baseline(
 
     return {
         "settings": {"d": d, "gamma": gamma, "ridge": ridge, "weighted": weighted,
+                     "c_max": c_max,
                      "heldout_fraction": heldout_fraction, "masking": masking,
                      "heldout_seed_probability": seed_probability,
                      "heldout_share": float(held.sum() / max((universe > 0).sum(), 1)),

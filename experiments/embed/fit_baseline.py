@@ -20,6 +20,7 @@ from pathlib import Path
 from pmedm_vb.embed.check import reconstruction
 from pmedm_vb.embed.config import load_config
 from pmedm_vb.embed.fit import fit_baseline, save_fit
+from pmedm_vb.embed.model import C_MAX
 from pmedm_vb.embed.units import load_targets
 from pmedm_vb.progress import logger, record_run, stage
 
@@ -37,6 +38,9 @@ def main() -> None:
     parser.add_argument("--ridge", type=float, nargs="+", required=True)
     parser.add_argument("--unweighted", action="store_true",
                         help="the diagnostic: every unit weight 1 in the fit")
+    parser.add_argument("--c-max", type=float, default=None,
+                        help="cap on a category's weight c_k (default: the configuration's "
+                             f"fit.c_max, else {C_MAX:g}); 0 for no cap")
     parser.add_argument("--heldout-fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--device", default=None, help="cuda or cpu (default: cuda if present)")
@@ -46,6 +50,7 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config(args.config)
+    c_max = config.fit.c_max if args.c_max is None else (args.c_max or None)
     arrays = load_targets(config)
     record_run(args.out, args)
     for d, gamma, ridge in itertools.product(args.d, args.gamma, args.ridge):
@@ -56,6 +61,7 @@ def main() -> None:
         with stage(f"fit {directory.name}"):
             fit = fit_baseline(arrays, d=d, gamma=gamma, ridge=ridge,
                                weighted=not args.unweighted,
+                               c_max=c_max,
                                heldout_fraction=args.heldout_fraction, seed=args.seed,
                                device=args.device, max_iter=args.max_iter, tol=args.tol,
                                calibrate_iter=args.calibrate_iter)

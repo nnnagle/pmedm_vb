@@ -109,6 +109,9 @@ class FitSettings:
     design_weights: bool = True
     gamma: tuple[float, ...] = (0.5,)
     beta: float = 1.0
+    #: Cap on a category's weight c_k (``None``: no cap); see
+    #: :func:`pmedm_vb.embed.model.category_weights`.
+    c_max: float | None = 10.0
     d: tuple[int, ...] = (8,)
     ridge: tuple[float, ...] | None = None
     encoder: str = "none"
@@ -189,13 +192,15 @@ def load_config(path: str | Path) -> EmbedConfig:
     )
 
     fit_raw = raw.get("fit") or {}
-    unknown = set(fit_raw) - {"design_weights", "gamma", "beta", "d", "ridge", "encoder"}
+    unknown = set(fit_raw) - {"design_weights", "gamma", "beta", "c_max", "d", "ridge",
+                            "encoder"}
     if unknown:
         raise ValueError(f"{where}: fit has unknown keys {sorted(unknown)}")
     fit = FitSettings(
         design_weights=bool(fit_raw.get("design_weights", True)),
         gamma=_as_tuple(fit_raw.get("gamma", 0.5), float, "gamma"),
         beta=float(fit_raw.get("beta", 1.0)),
+        c_max=None if fit_raw.get("c_max", 10.0) is None else float(fit_raw.get("c_max", 10.0)),
         d=_as_tuple(fit_raw.get("d", 8), int, "d"),
         ridge=_as_tuple(fit_raw.get("ridge"), float, "ridge"),
         encoder=str(fit_raw.get("encoder", "none")),

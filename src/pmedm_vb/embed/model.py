@@ -36,9 +36,14 @@ import torch
 EMPTY_LOGIT = -1.0e4
 
 
+#: Default cap on a category's weight ``c_k``, relative to the share-weighted
+#: mean of 1 within its target.
+C_MAX = 10.0
+
+
 def category_weights(
     counts: np.ndarray, weight: np.ndarray, groups: np.ndarray, gamma: float,
-    train: np.ndarray | None = None,
+    train: np.ndarray | None = None, c_max: float | None = C_MAX,
 ) -> np.ndarray:
     """``c_k = π_k^(−γ)``, scaled within each target so that ``Σ_k π_k c_k = 1``.
 
@@ -53,7 +58,17 @@ def category_weights(
     categories is very rare (a single tiny ``π_k`` makes the mean of ``1/π_k``
     huge), which is not what γ is for. At γ = 1 every category of a target then
     carries an equal share of its weight. Empty categories get ``c_k = 0``.
+
+    **Cap.** No category's weight may exceed ``c_max`` (``None`` for no cap).
+    At γ = 1 a category with a share of 1e-4 in a 14-category target would
+    otherwise weigh about 700 times the average, so a handful of records would
+    steer the positions. Capped categories are held at ``c_max`` and the rest of
+    the target is rescaled so that ``Σ_k π_k c_k = 1`` still holds, repeating
+    until no further category exceeds the cap. At γ = 0 every ``c_k`` is 1 and
+    the cap does nothing.
     """
+    if c_max is not None and c_max < 1:
+        raise ValueError(f"c_max must be at least 1 (the share-weighted mean), got {c_max}")
     c = np.zeros(counts.shape[1])
     for g, (start, end) in enumerate(groups):
         block = counts[:, start:end].astype(np.float64)
@@ -65,7 +80,19 @@ def category_weights(
         present = share > 0
         raw = np.zeros_like(share)
         raw[present] = share[present] ** (-gamma)
-        c[start:end] = raw / (share * raw).sum()
+        weights = raw / (share * raw).sum()
+        if c_max is not None:
+            capped = np.zeros_like(present)
+            while True:
+                over = present & ~capped & (weights > c_max)
+                if not over.any():
+                    break
+                capped |= over
+                free = present & ~capped
+                room = 1.0 - (share[capped] * c_max).sum()
+                weights[capped] = c_max
+                weights[free] = raw[free] * room / (share[free] * raw[free]).sum()
+        c[start:end] = weights
     return c
 
 
