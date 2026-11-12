@@ -5,9 +5,9 @@ MAP/VB/HMC solvers. Compute runs on ISAAC (UTK HPC). The user runs jobs there
 and pastes output back; you cannot reach ISAAC. Give commands, and push code
 for the user to pull.
 
-**Branch:** start a new branch from `tn-statewide-gpu`, which holds everything
-below (statewide support, GPU bundles, the queue driver, the τ runs, sim04).
-`main` does not.
+**Branch:** `stage1-embedding`, started from `tn-statewide-gpu`, which holds
+everything below (statewide support, GPU bundles, the queue driver, the τ
+runs, sim04). `main` does not.
 
 ## Working with this user
 
@@ -114,7 +114,8 @@ clustering. sim02's are also τ-less.
 - **Stage 1 (this handoff):** an aspatial embedding of the statewide PUMS,
   giving each unit a fixed φ_i of dimension d.
 - **Stage 2 (later):** a PMEDM-type small-area model,
-  p_ib ∝ q_ib · exp(−x_i′λ_P − φ_i′θ_b).
+  p_ib ∝ q_ib · exp(−x_i′λ_P − θ_b′h(φ_i)), with h linear to start (see
+  the stage 1 section for h and the group-quarters indicators).
   - Per-cell multipliers λ_P at PUMA level only, where cells are well
     measured.
   - A short vector θ_b per block group carrying all small-area variation
@@ -139,95 +140,179 @@ clustering. sim02's are also τ-less.
   4. statewide support;
   5. as generator (sim05), crossed with sim04's generators.
 
-## Stage 1 plan (proposal for the user's review; no code yet)
+## Stage 1: design settled with the user (no code yet)
 
-**Purpose.** A fixed φ_i for every statewide PUMS unit. It must:
-1. **keep the table categories recoverable,** rare groups included;
-2. **make "close" mean "likely to co-locate".** This is an **assumption**:
-   stage 1 is aspatial and learns only attribute similarity, so the
-   projection test checks it;
-3. **be one fixed vector per record,** its uncertainty ignored in version 1;
-4. **cover every unit the statewide support uses** (households and
-   group-quarters persons, as `assemble/households.py` defines them), with
-   design weights (WGTP for households, PWGTP for group-quarters persons).
+**Purpose.** A fixed position φ_i for every statewide PUMS unit (households
+and group-quarters persons, as `assemble/households.py` defines them). Stage 2
+reweights the PUMS records by a tilt over φ; it never creates households
+outside the PUMS.
 
-**Features [decision S2]:**
-- **Table categories:** each unit's counts in every category.
-  - Constraint tables: B01001, B03002, B19001, B25003, B26001.
-  - Held-out tables: B25044, B25040, B17010A–I, C17002, B12001, B15002, and
-    C24030 if the PUMS dictionary is available.
-  - Held-out attributes are PUMS attributes, not published values, so there's
-    no leak.
-- **Composition:**
-  - household size; children, adults and people 65+;
-  - householder's age, sex and race/ethnicity;
-  - spouse or partner present;
-  - multigenerational household;
-  - group-quarters type.
-- **Encoding:** counts as shares plus log size; one-hot for categorical
-  attributes.
+### Framing (settled)
 
-**Model family [decision S1]:**
-- **A. Latent classes.** φ = the type probabilities. Literature to verify
-  before citing: Dunson & Xing 2009 JASA; Hu, Reiter & Wang 2018 Bayesian
-  Analysis for households with members; Manrique-Vallier & Reiter 2014 JCGS
-  for structural zeros.
-- **B. Weighted linear factor model.** Exponential-family PCA or multiple
-  correspondence analysis; φ = the scores.
-- **C. Autoencoder or VAE.**
-- **Recommended:** B as the baseline, A as the comparison, C only if both blur
-  the rare groups.
-- **[decision S3] Pass-through indicators:** append exact indicators for
-  categories that must not blur (householder race/ethnicity, group quarters).
-  Then φ = [indicators, latent factors]. Recommended.
+- **Records stay the support.** Stage 1 delivers coordinates only. A decoder
+  is used to train φ and for diagnostics, never in stage 2.
+- **Global household types, area-specific distributions over them.** Types
+  may be discrete or continuous. Stage 2 is a tilt of the weighted records:
+  p_ib ∝ q_i · exp(−x_i′λ_P − θ_b′h(φ_i)). The choice of h (linear,
+  quadratic, type indicators) is compared in the checks.
+- **The assumption stage 2 rests on:** x ⊥ b | φ (within a PUMA, units at the
+  same position are exchangeable across block groups). Stage 1 makes it cheap
+  by making φ predict the units' attributes sharply.
+- **Within-unit associations** (couples' matching, sizes) are inherited from
+  the records; block groups vary them only through the mix of positions.
+- **φ is unstructured.** The sorting literature (socio-economic status, life
+  stage, race/ethnicity; Shevky & Bell 1955, factorial ecology) and
+  spatially strong outcomes (transport, housing stock) guide **which
+  attributes go in**, nothing else. No named blocks, no block-sparse decoder.
+- **No pass-through indicators** (S3: no), apart from the unit-type
+  indicators below.
+- **Group quarters (S4):** one shared space for all units, with group
+  quarters as their own unit types, not one-person households.
+  φ_i = [GQ-institutional indicator, GQ-noninstitutional indicator (TYPEHUGQ
+  2/3), learned part]. Indicators are fixed 0/1. Decoder slopes are shared by
+  all units; the indicators give each unit type its own intercepts.
+  Household targets apply to households only. Stage 2 gets a coefficient on
+  each indicator.
+- **No PUMA information in fitting.** PUMA is used only for validation.
 
-**Checks:**
-1. **Reconstruction:** the design-weighted deviance explained of each
-   category x_ik by φ, as d or K varies. Rare categories reported separately
-   (AIAN, NH/PI, other race, Asian, group quarters, oldest ages).
-2. **Neighbour sanity:** nearest neighbours in φ share size, life stage and
-   race well above chance.
-3. **Stability:** refit on bootstrap resamples and compare subspaces or
-   matched classes.
-4. **Projection test (decisive):**
-   - On 4701502, then the four test PUMAs, fit θ_b per block group by maximum
-     entropy, with λ_P at PUMA level and no spatial prior.
-   - Report block-group and tract residuals in SE units against today's
-     per-cell model.
-   - Pass: most cells within about 1 SE at a modest d, rare groups about as
-     good as today. If only a large d fits, the low-rank idea or the features
-     need rethinking.
-5. **Choice of d (or K):** the smallest that passes checks 1 and 4 for the rare
+### Loss (settled)
+
+L = Σ_h w_h Σ_g Σ_k c_k ℓ_gk(y_hg | W_g φ_h + b_g) / Σ_h w_h + ridge
+
+- **Linear decoder** with natural links:
+  - person tables: multinomial over the unit's members in the table's
+    universe (e.g. workers for B08301), probabilities softmax(W_g φ + b_g);
+    a unit with no members in the universe contributes nothing;
+  - household tables and attributes: categorical cross-entropy;
+  - continuous attributes: binned, as the tables bin them.
+- **Prediction only through φ** (the decoder sees nothing else).
+- **Design-weighted (S5: weighted).** w_h = WGTP for households, PWGTP for
+  group-quarters persons. An unweighted fit of the baseline is run as a
+  diagnostic (Solon, Haider & Wooldridge 2015; Pfeffermann 1993).
+- **Rare categories:** c_k = π_k^(−γ), π_k the category's statewide weighted
+  share, normalised to mean 1 within each table; γ ∈ {0, 0.5, 1} compared on
+  the baseline. Attributes outside tables weigh the same as tables (β = 1).
+- **Ridge** λ(Σ_h w_h‖φ_h‖² + ‖W‖²), λ tuned on the baseline (encoder weight
+  decay in the deep model).
+- **No VAE / KL term.**
+- **After fitting:** centre and whiten the learned part of φ (design-weighted
+  mean 0, covariance I), so stage 2 can use i.i.d. priors on θ_b. The GQ
+  indicators stay 0/1.
+
+### Models (settled)
+
+- **Baseline:** encoder-free. φ_h are free parameters fitted with W
+  (close to a design-weighted exponential-family PCA). Merge identical
+  records before fitting.
+- **Challenger:** a deep set encoder (attention over a household's members,
+  plus household-level tokens; Lee et al. 2019 Set Transformer, Zaheer et
+  al. 2017 Deep Sets), same loss and decoder. Attribute tokens are randomly
+  masked in training (a "masked" token distinct from "not applicable"),
+  sometimes a whole person. φ for stage 2 is computed from the unmasked unit.
+- Latent classes (one-hot φ) remain possible as another φ under the same loss.
+
+### Targets and inputs (settled)
+
+A JSON configuration lists **targets** (what φ must predict) and **inputs**
+(what the encoder reads) separately; most items are both. Entries are tables
+(categories and universes from the builders in `constraints.py`) or PUMS
+attributes with a categorisation. The baseline has no inputs.
+
+All items below are targets and inputs.
+
+- **Constraint tables:** B01001, B03002, B08301, B19001, B25003, C24010 (block
+  group and tract); B26001, B17024, B23001 (tract).
+- **Held-out tables (targets too; PUMS attributes, not published values):**
+  B25044, C17002, C24030, B12001, B15002, B25040, B17010A–I.
+- **Added tables** (5-year 2023 geography from the Census data product list;
+  BG = block group and tract, T = tract only):
+  - housing stock: B25024 units in structure (BG), B25034 year built (BG),
+    B25017 rooms (BG), B25041 bedrooms (BG), B25014 tenure by occupants per
+    room (BG), B25075 value (BG), B25063 gross rent (BG), B25038 tenure by
+    year moved in (BG);
+  - transport: B08303 travel time (BG), B08134 mode by travel time (BG);
+  - composition: B11001 household type (BG), B11016 type by size (BG),
+    B11005 children under 18 by type (BG), B25007 tenure by age of
+    householder (BG), B25009 tenure by size (BG), B19037 age of householder by
+    income (BG), B09019 relationship (T);
+  - socio-economic: B23025 employment status (BG), B25070 rent burden (BG),
+    B25091 owner cost burden (BG), B27010 health insurance (BG), B14001
+    school enrolment (T), B18101 disability (T);
+  - language, nativity, mobility: C16002 household language (BG), B05002
+    nativity and citizenship (T), B07201 mobility (BG).
+- **Attributes without a BG or tract table:** MULTG (multigenerational;
+  B11017 is national and state only), CPLT (couple type), HUPAC (presence and
+  age of children).
+- **Omitted by the user:** veteran status, internet.
+- **Excluded:** MIGPUMA, POWPUMA (geography), ancestry, detailed race codes.
+- **To check when building:** JWMNP code 888 ("suppressed for data year 2023"
+  in some PUMAs) is missing data; both rooms/bedrooms and both B08303/B08134
+  were kept ("the rest are good") and can be pruned.
+
+### Data
+
+- Stage 1 fitting uses **no published values**; tables give categories and
+  universes only. The 2019–2023 PUMS PUMA codes use the 2020 definitions
+  (data dictionary).
+- **Published tables outside the VRE come from the Census API** (new code; the
+  repo has never used it). Estimates and MOEs only; SE = MOE/1.645. The VRE
+  route stays as it is for Σ in stage 2.
+  - The API requires a key: `CENSUS_API_KEY`, stored on ISAAC in
+    `~/.config/census/env` (sourced from `~/.bashrc`). Never written to the
+    cache, repo or logs.
+  - **API calls run only in prefetch, on the login node or dtn1/dtn2,** never
+    on a compute node. Responses are cached under explicit names (vintage,
+    span, geography, state, table) in the raw-data directory; batch jobs set
+    `PMEDM_VB_OFFLINE` as today.
+  - First use: PUMA-level tables (summary level 795) for scoring the PUMA
+    check.
+
+### Checks
+
+1. **Reconstruction** (deviance explained per category from φ), rare
+   categories reported separately; across d, γ, λ.
+2. **Neighbour sanity** and 3. **stability** (bootstrap refits, subspace
+   comparison) as originally proposed; not yet discussed in detail.
+4. **Leave-one-PUMA-out check (settled; validation only):**
+   - one stage 1 fit serves all PUMAs (it never sees PUMA codes);
+   - for PUMA P: support = the other PUMAs' records; targets = P's constraint
+     margins computed from P's own PUMS records, **unperturbed**, with
+     replicate-weight SEs (SE² = 4/80 Σ_r (X_r − X)²);
+   - fit by maximum entropy three tilts: x only (today's PMEDM, the
+     baseline), φ only, and both;
+   - score the predicted unit distribution against P's actual weighted
+     records on unconstrained joint distributions (race × poverty, tenure ×
+     vehicles, income × race, couples' matching), rare-group counts and
+     held-out categories (TVD, KL);
+   - rare groups also scored against **published PUMA-level tables** (API)
+     in SE units, and pooled across PUMAs.
+5. **Projection test at block group** (as before): 4701502, then the four
+   test PUMAs, θ_b per block group with λ_P at PUMA level, residuals in SE
+   units against today's model.
+6. **Choice of d:** the smallest that passes checks 1, 4 and 5 for the rare
    categories.
 
-**Steps:**
-1. Unit-feature table for all statewide units, reusing the unit frame and
-   constraint builders and adding the composition features; keyed by SERIALNO
-   (plus person number for group-quarters units), with design weight.
-2. Fit B (and A) over d ∈ {4, 8, 16, 32} and K ∈ {8, 16, 32, 64}, with and
-   without pass-through indicators.
-3. Run checks 1–3.
-4. Run the projection test on the best few.
-5. Freeze φ, the model and the settings under the data directory, with a
-   version tag that stage 2 records.
+### Still open
 
-**Expected files:**
-- `src/pmedm_vb/embed/` (or `assemble/embedding.py`);
-- `experiments/embed_pums.py`;
-- `experiments/projection_test.py`.
+- h forms for checks 4–5 (linear only, or linear and quadratic).
+- d values (proposed {4, 8, 16, 32}).
+- Implementation: PyTorch (already in the ISAAC environment); CPU or GPU;
+  the number of statewide units (to confirm on ISAAC).
 
-**Compute:** small; CPU. The number of units needs confirming on ISAAC; it is
-roughly the statewide support's units.
+### Expected files (proposal)
 
-**Open decisions for the user:**
-- **S1:** model family.
-- **S2:** features.
-- **S3:** pass-through indicators.
-- **S4:** group-quarters persons as units, or a separate model.
-- **S5:** design-weighted or unweighted fits.
+- `src/pmedm_vb/data/api.py`: ACS detailed tables from the API, cached,
+  offline-safe; called from `prefetch`.
+- Builders for the added tables and attributes (in `constraints.py` or a new
+  module), each declaring categories and universe.
+- `src/pmedm_vb/embed/`: unit target and input arrays from a configuration;
+  the loss; the encoder-free fit; the deep set encoder; normalisation;
+  saving φ with a version tag.
+- `experiments/embed_pums.py`, `experiments/embed/*.json`,
+  `experiments/puma_check.py`, later `experiments/projection_test.py`.
 
-**Not in stage 1:** anything spatial; stage 2 inference; decoding new
-households; use as a generator.
+**Not in stage 1:** stage 2 inference; spatial priors; households outside the
+support; use as a generator.
 
 ## Code to read first
 
