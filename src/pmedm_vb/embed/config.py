@@ -33,9 +33,10 @@ Attributes are PUMS variables with no published table
 ``fit`` carries the settings agreed for stage 1: design weights on; the
 rare-category exponent γ (a list is a grid to compare); β, the weight on
 targets outside the tables, 1; the dimensions d to try; the ridge penalty
-(``null`` until tuned); and the encoder (``"none"`` for the baseline). Fitting
-itself is not built yet; these are read and checked here so a configuration
-is complete when it is written.
+values to try; and the encoder (``"none"`` for the baseline). They record the
+agreed grid and are checked here; ``experiments/embed/fit_baseline.py`` takes
+the values to fit explicitly on its command line
+(``experiments/embed/submit_baseline_grid.sh`` passes this grid).
 """
 
 from __future__ import annotations

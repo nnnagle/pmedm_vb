@@ -9,4 +9,8 @@ here.
 * :mod:`~pmedm_vb.embed.attributes` -- PUMS attributes with no published table.
 * :mod:`~pmedm_vb.embed.config` -- the JSON configuration of targets and inputs.
 * :mod:`~pmedm_vb.embed.prefetch` -- every download the embedding needs.
+* :mod:`~pmedm_vb.embed.units` -- the target arrays, one row per unit, cached.
+* :mod:`~pmedm_vb.embed.model` -- the linear decoder, the loss, whitening.
+* :mod:`~pmedm_vb.embed.fit` -- the encoder-free baseline fit and its outputs.
+* :mod:`~pmedm_vb.embed.check` -- check 1, reconstruction of held-out entries.
 """
