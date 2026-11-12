@@ -64,7 +64,9 @@ from pmedm_vb.assemble.constraints import (
     C24030_CELL_NAMES,
     ESR_CIVILIAN_EMPLOYED,
     HFL_TO_CELL,
+    NOT_HISPANIC,
     OCCP_TO_MAJOR_GROUP,
+    RAC1P_TO_RACE,
     SEX_CODES,
     Category,
     ConstraintTable,
@@ -497,6 +499,34 @@ def householder_age_sex(area: StudyArea) -> ConstraintTable:
                   householder=("SEX",))
 
 
+def householder_race_ethnicity(area: StudyArea) -> ConstraintTable:
+    """Householder's race by Hispanic origin: 7 races x 2 origins.
+
+    The common refinement of what the configured tables use: ``B17010A``-``G``
+    iterate by the householder's race alone, whatever the origin; ``B17010H``
+    is White alone not Hispanic; ``B17010I`` is Hispanic of any race. Neither
+    ``B03002``'s eight categories (which fold every Hispanic householder into
+    one) nor race alone reproduces all nine, so both splits are kept. Race
+    codes are :data:`RAC1P_TO_RACE`'s (AIAN alone is ``RAC1P`` 3-5) and the
+    origin :data:`NOT_HISPANIC`, read from the householder's person record as
+    :func:`~pmedm_vb.assemble.constraints.householder_mask` reads them.
+
+    Household-level on purpose: race/ethnicity sorts households, and in
+    stage 2 it is the household that is reweighted. The members' composition
+    stays in the person attribute ``race_ethnicity``.
+    """
+    categories = []
+    for race, codes in RAC1P_TO_RACE.items():
+        for origin, hispanic in (("not_hispanic", False), ("hispanic", True)):
+            def select(u, codes=codes, hispanic=hispanic):
+                hisp = u["householder_HISP"]
+                same = (hisp != NOT_HISPANIC) if hispanic else (hisp == NOT_HISPANIC)
+                return u["householder_RAC1P"].isin(codes) & hisp.notna() & same
+            categories.append(Category(name=f"{race}_{origin}", select=select))
+    return _table("householder_race_ethnicity", "household", (), categories,
+                  householder=("RAC1P", "HISP"))
+
+
 def occupants_per_room(area: StudyArea) -> ConstraintTable:
     """``B25014``'s five bands of ``NP / RMSP``, closed above."""
     owners = [c.name.removeprefix("owner_") for c in T.tenure_by_occupants_per_room().categories
@@ -622,6 +652,10 @@ ATTRIBUTE_TARGETS: dict[str, AttributeTarget] = {
     "householder_age_sex": AttributeTarget(householder_age_sex, "household", T.occupied,
                                            "Households",
                                            {"age_sex": "value", "relationship": "value"}),
+    "householder_race_ethnicity": AttributeTarget(householder_race_ethnicity, "household",
+                                                  T.occupied, "Households",
+                                                  {"race_ethnicity": "value",
+                                                   "relationship": "value"}),
     "occupants_per_room": AttributeTarget(occupants_per_room, "household", T.occupied,
                                           "Occupied housing units",
                                           {"rooms": "value", "age_sex": "value"}),
@@ -659,7 +693,8 @@ TABLE_ATTRIBUTES: dict[str, tuple[str, ...]] = {
     "B12001": ("age_sex", "marital_status"),
     "B15002": ("age_sex", "educational_attainment"),
     "B25040": ("heating_fuel",),
-    **{f"B17010{s}": ("household_type", "race_ethnicity", "poverty_ratio") for s in "ABCDEFGHI"},
+    **{f"B17010{s}": ("household_type", "householder_race_ethnicity", "poverty_ratio")
+       for s in "ABCDEFGHI"},
     "B25032": ("tenure", "units_in_structure"),
     "B25036": ("tenure", "year_built"),
     "B25020": ("tenure", "rooms"),
