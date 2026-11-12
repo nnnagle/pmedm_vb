@@ -1,6 +1,8 @@
 """Check 1: how well the positions reconstruct held-out target entries.
 
-Scored on the **held-out** (row, target) entries only, with the calibrated
+Scored on the **held-out** (row, target) entries only -- held out by entry in
+configuration v1, by attribute with its dependents in v2
+(:mod:`pmedm_vb.embed.fit`) -- with the calibrated
 decoder (``c_k = 1``; :mod:`pmedm_vb.embed.fit`) and design weights, against
 the intercept-only null fitted on the training entries (household intercepts
 plus group-quarters offsets, so the null already knows each unit's type and
@@ -31,8 +33,9 @@ from pmedm_vb.embed.model import EMPTY_LOGIT
 from pmedm_vb.embed.units import TargetArrays
 
 #: Categories reported separately, by ``"{target}.{category}"``: the rare race
-#: and ethnicity groups of ``B03002`` and the oldest age bands of ``B01001``.
-#: Those absent from a configuration are skipped.
+#: and ethnicity groups and the oldest age bands -- of ``B03002`` and
+#: ``B01001`` in configuration v1, of the ``race_ethnicity`` and ``age_sex``
+#: attributes in v2. Those absent from a configuration are skipped.
 #:
 #: **Group quarters** are not categories here: whether a unit is group quarters
 #: (``B26001``, ``B09019.group_quarters``) is fixed by its type indicators, so
@@ -45,6 +48,10 @@ RARE_CATEGORIES = (
     "B03002.nh_aian", "B03002.nh_nhpi", "B03002.nh_other_race", "B03002.nh_asian",
     "B01001.male_80_to_85", "B01001.female_80_to_85",
     "B01001.male_ge_85", "B01001.female_ge_85",
+    "race_ethnicity.nh_aian", "race_ethnicity.nh_nhpi", "race_ethnicity.nh_other_race",
+    "race_ethnicity.nh_asian",
+    "age_sex.male_80_to_85", "age_sex.female_80_to_85",
+    "age_sex.male_ge_85", "age_sex.female_ge_85",
 )
 
 

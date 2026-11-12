@@ -6,10 +6,21 @@ Schapire 2001; the multinomial case is GLM-PCA, Townes et al. 2019), with the
 agreed loss: design weights, rare-category weights ``c_k``, one multinomial per
 target over its universe, and a ridge penalty.
 
-**Held-out entries.** A fixed-seed random fraction (10% by default) of the
-(row, target) entries with a nonzero universe count is withheld from the loss.
-Masking is by merged row, the unit of the free positions: every unit merged
-into a row shares the row's held-out targets. Check 1
+**Held-out entries.** Withheld from the loss, with a fixed seed, by merged row
+(the unit of the free positions: every unit merged into a row shares the row's
+held-out targets), in one of two ways recorded in the targets' metadata:
+
+* ``"entry"`` (configuration v1, tables as targets): a random 10% of the
+  (row, target) entries with a nonzero universe count, independently.
+* ``"attribute"`` (v2, attribute targets): each applicable target of a row is
+  a *seed* with probability ``q``, and a seed is held out together with every
+  target depending on it (its ``masks`` list, from
+  :func:`~pmedm_vb.embed.attribute_targets.mask_closure`); a dependent masked
+  as a seed masks only itself. ``q`` is set by bisection, on the same random
+  draws, so that 10% of applicable entries are held out overall. A held-out
+  attribute then cannot be read back through an attribute computed from it.
+
+Check 1
 (:mod:`pmedm_vb.embed.check`) scores reconstruction on those entries only,
 because in-sample reconstruction with free positions improves with every
 extra dimension and every smaller penalty, whatever the truth.
@@ -70,6 +81,42 @@ def heldout_mask(universe: np.ndarray, fraction: float, seed: int) -> np.ndarray
     mask = np.zeros(universe.size, dtype=bool)
     mask[chosen] = True
     return mask.reshape(universe.shape)
+
+
+def attribute_heldout_mask(universe: np.ndarray, masks: np.ndarray, fraction: float,
+                           seed: int) -> tuple[np.ndarray, float]:
+    """Attribute masking (v2): ``masks[s, g]`` is True when holding out target
+    ``s`` also holds out ``g``. Returns the (row, target) mask and the seed
+    probability ``q`` giving ``fraction`` of applicable entries held out."""
+    applicable = universe > 0
+    draws = np.random.default_rng(seed).random(applicable.shape)
+    spread = masks.astype(np.float32)
+
+    def held(q: float) -> np.ndarray:
+        seeds = ((draws < q) & applicable).astype(np.float32)
+        return ((seeds @ spread) > 0) & applicable
+
+    total = applicable.sum()
+    low, high = 0.0, fraction
+    for _ in range(40):
+        q = (low + high) / 2
+        if held(q).sum() / total < fraction:
+            low = q
+        else:
+            high = q
+    q = (low + high) / 2
+    return held(q), q
+
+
+def masking_matrix(arrays: TargetArrays) -> np.ndarray:
+    """``(targets, targets)``: row ``s`` marks the targets held out with ``s``."""
+    ids = [t["id"] for t in arrays.meta["targets"]]
+    index = {t: i for i, t in enumerate(ids)}
+    out = np.eye(len(ids), dtype=bool)
+    for i, t in enumerate(arrays.meta["targets"]):
+        for j in t.get("masks", [t["id"]]):
+            out[i, index[j]] = True
+    return out
 
 
 def column_group(groups: np.ndarray) -> np.ndarray:
@@ -145,7 +192,13 @@ def fit_baseline(
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(seed)
     universe = universe_counts(arrays)
-    held = heldout_mask(universe, heldout_fraction, seed)
+    masking = arrays.meta.get("masking", "entry")
+    seed_probability = None
+    if masking == "attribute":
+        held, seed_probability = attribute_heldout_mask(
+            universe, masking_matrix(arrays), heldout_fraction, seed)
+    else:
+        held = heldout_mask(universe, heldout_fraction, seed)
     train = (universe > 0) & ~held
     col = column_group(arrays.groups)
     train_counts = arrays.counts * train[:, col]
@@ -237,7 +290,10 @@ def fit_baseline(
 
     return {
         "settings": {"d": d, "gamma": gamma, "ridge": ridge, "weighted": weighted,
-                     "heldout_fraction": heldout_fraction, "seed": seed, "device": device,
+                     "heldout_fraction": heldout_fraction, "masking": masking,
+                     "heldout_seed_probability": seed_probability,
+                     "heldout_share": float(held.sum() / max((universe > 0).sum(), 1)),
+                     "seed": seed, "device": device,
                      "max_iter": max_iter, "tol": tol, "calibrate_iter": calibrate_iter},
         "z": norm["z"], "W": norm["W"], "b": norm["b"], "O": O_np,
         "W_cal": cal.W.detach().cpu().double().numpy(),

@@ -12,7 +12,7 @@
 
 # Build and cache the embedding's target arrays (CPU), after the prefetch:
 #
-#   sbatch experiments/embed/build_targets.sbatch experiments/embed/stage1_v1.json
+#   sbatch experiments/embed/build_targets.sbatch experiments/embed/stage1_v2.json
 #
 # PMEDM_VB_REPO, PMEDM_VB_ENV and PMEDM_VB_DATA override the defaults below.
 

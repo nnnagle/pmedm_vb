@@ -6,6 +6,7 @@ A configuration is a JSON file::
     {
       "name": "...",
       "area": {"state": "47", "year": 2024, "span": 5},
+      "tables":  [...],
       "targets": {"tables": [...], "attributes": [...]},
       "inputs":  {"tables": [...], "attributes": [...]},
       "fit": {"design_weights": true, "gamma": [...], "beta": 1.0,
@@ -28,7 +29,15 @@ the same categories here as wherever else the repo uses it:
 * the tables added for the embedding (:data:`pmedm_vb.embed.tables.TABLES`).
 
 Attributes are PUMS variables with no published table
-(:data:`pmedm_vb.embed.attributes.ATTRIBUTES`).
+(:data:`pmedm_vb.embed.attributes.ATTRIBUTES`) or, from configuration v2 on,
+the attribute targets of :mod:`pmedm_vb.embed.attribute_targets`: each PUMS
+attribute once, with categories refining every configured table.
+
+The optional top-level ``tables`` lists published tables carried **without
+being targets or inputs**: v2 targets attributes only, and keeps the published
+tables for the prefetch, the refinement check
+(:func:`~pmedm_vb.embed.attribute_targets.refinement_violations`), scoring and
+stage 2.
 
 ``fit`` carries the settings agreed for stage 1: design weights on; the
 rare-category exponent γ (a list is a grid to compare); β, the weight on
@@ -54,6 +63,7 @@ from pmedm_vb.assemble.constraints import (
     race_poverty,
 )
 from pmedm_vb.config import StudyArea
+from pmedm_vb.embed.attribute_targets import ATTRIBUTE_TARGETS, build_attribute_target
 from pmedm_vb.embed.attributes import ATTRIBUTES, build_attribute
 from pmedm_vb.embed.tables import TABLES, build_table
 
@@ -72,13 +82,13 @@ def table_kind(table: str) -> str:
         return "heldout"
     if table in TABLES:
         return "added"
-    if table in ATTRIBUTES:
+    if table in ATTRIBUTES or table in ATTRIBUTE_TARGETS:
         return "attribute"
     raise KeyError(
         f"unknown table or attribute {table!r}. Known: constraint "
         f"{list(default_table_ids())}, held-out "
         f"{[*HELDOUT_TABLE_IDS, *RACE_POVERTY_TABLES]}, added {sorted(TABLES)}, "
-        f"attributes {sorted(ATTRIBUTES)}"
+        f"attributes {sorted(ATTRIBUTES)}, attribute targets {sorted(ATTRIBUTE_TARGETS)}"
     )
 
 
@@ -112,6 +122,8 @@ class EmbedConfig:
     inputs: Selection
     fit: FitSettings = field(default_factory=FitSettings)
     path: Path | None = None
+    #: Published tables carried without a role (v2: for prefetch and scoring).
+    tables: tuple[str, ...] = ()
 
     @property
     def ids(self) -> tuple[str, ...]:
@@ -120,8 +132,10 @@ class EmbedConfig:
 
     @property
     def table_ids(self) -> tuple[str, ...]:
-        """Published tables in either role (attributes excluded)."""
-        return tuple(i for i in self.ids if table_kind(i) != "attribute")
+        """Published tables in either role or carried in ``tables``
+        (attributes excluded)."""
+        return tuple(dict.fromkeys(
+            [i for i in self.ids if table_kind(i) != "attribute"] + list(self.tables)))
 
 
 def _as_tuple(value, kind, name):
@@ -162,7 +176,7 @@ def load_config(path: str | Path) -> EmbedConfig:
     path = Path(path)
     raw = json.loads(path.read_text(encoding="utf-8"))
     where = str(path)
-    unknown = set(raw) - {"name", "area", "targets", "inputs", "fit"}
+    unknown = set(raw) - {"name", "area", "tables", "targets", "inputs", "fit"}
     if unknown:
         raise ValueError(f"{where}: unknown keys {sorted(unknown)}")
 
@@ -201,6 +215,12 @@ def load_config(path: str | Path) -> EmbedConfig:
     targets = _selection(raw, "targets", where)
     if not targets.ids:
         raise ValueError(f"{where}: no targets")
+    carried = tuple(raw.get("tables") or ())
+    for item in carried:
+        if table_kind(item) not in ("constraint", "heldout", "added"):
+            raise ValueError(f"{where}: tables lists {item!r}, which is not a published table")
+    if len(set(carried)) != len(carried):
+        raise ValueError(f"{where}: tables lists a table twice")
     return EmbedConfig(
         name=str(raw.get("name", path.stem)),
         area=area,
@@ -208,6 +228,7 @@ def load_config(path: str | Path) -> EmbedConfig:
         inputs=_selection(raw, "inputs", where),
         fit=fit,
         path=path,
+        tables=carried,
     )
 
 
@@ -242,6 +263,8 @@ def resolve(area: StudyArea, ids) -> dict[str, ConstraintTable]:
             built[table_id] = race_poverty(area, table_id[-1], "tract")
         elif kind == "added":
             built[table_id] = build_table(table_id)
+        elif kind == "attribute" and table_id in ATTRIBUTE_TARGETS:
+            built[table_id] = build_attribute_target(area, table_id)
         elif kind == "attribute":
             built[table_id] = build_attribute(table_id)
 

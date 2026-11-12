@@ -5,10 +5,14 @@
 # campus-gpu's 6 submitted per user; at most 3 run at once and the rest queue.
 #
 #   bash experiments/embed/submit_baseline_grid.sh [CONFIG] [OUT]
+#
+# CONFIG defaults to stage1_v2 (attribute targets); stage1_v1.json (tables as
+# targets) still runs. OUT defaults to a directory named after the
+# configuration, so the two never share fit directories.
 
 set -euo pipefail
-CONFIG=${1:-experiments/embed/stage1_v1.json}
-OUT=${2:-/lustre/isaac24/proj/UTK0533/pmedm_vb_runs/embed/baseline}
+CONFIG=${1:-experiments/embed/stage1_v2.json}
+OUT=${2:-/lustre/isaac24/proj/UTK0533/pmedm_vb_runs/embed/$(basename "$CONFIG" .json)}
 mkdir -p /lustre/isaac24/proj/UTK0533/pmedm_vb_runs/embed "$OUT"
 
 build=$(sbatch --parsable experiments/embed/build_targets.sbatch "$CONFIG")

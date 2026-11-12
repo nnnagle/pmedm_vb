@@ -1,6 +1,6 @@
 """Fit the encoder-free baseline embedding, one setting or a grid, with check 1.
 
-    python experiments/embed/fit_baseline.py --config experiments/embed/stage1_v1.json \\
+    python experiments/embed/fit_baseline.py --config experiments/embed/stage1_v2.json \\
         --out $PMEDM_VB_RUNS/embed/baseline --d 8 --gamma 0 0.5 1 --ridge 1e-4 1e-3 1e-2
 
 Every combination of ``--d``, ``--gamma`` and ``--ridge`` is fitted in turn,

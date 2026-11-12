@@ -5,7 +5,7 @@ node or dtn1/dtn2, with the Census API key loaded::
 
     . ~/.config/census/env
     $CONDA_PREFIX/bin/python experiments/embed/prefetch.py \\
-        --config experiments/embed/stage1_v1.json
+        --config experiments/embed/stage1_v2.json
 
 ``--no-values`` skips the API estimates (PUMA-level, for scoring), which are
 the only part that needs the key. See :mod:`pmedm_vb.embed.prefetch`.
@@ -19,7 +19,7 @@ from pathlib import Path
 from pmedm_vb.embed.config import load_config
 from pmedm_vb.embed.prefetch import prefetch_embedding
 
-DEFAULT_CONFIG = Path(__file__).with_name("stage1_v1.json")
+DEFAULT_CONFIG = Path(__file__).with_name("stage1_v2.json")
 
 
 def main() -> None:

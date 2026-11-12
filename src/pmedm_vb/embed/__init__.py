@@ -7,6 +7,8 @@ here.
 
 * :mod:`~pmedm_vb.embed.tables` -- builders for the tables added as targets.
 * :mod:`~pmedm_vb.embed.attributes` -- PUMS attributes with no published table.
+* :mod:`~pmedm_vb.embed.attribute_targets` -- each PUMS attribute once, as the
+  targets of configuration v2, with the dependency map and refinement checks.
 * :mod:`~pmedm_vb.embed.config` -- the JSON configuration of targets and inputs.
 * :mod:`~pmedm_vb.embed.prefetch` -- every download the embedding needs.
 * :mod:`~pmedm_vb.embed.units` -- the target arrays, one row per unit, cached.

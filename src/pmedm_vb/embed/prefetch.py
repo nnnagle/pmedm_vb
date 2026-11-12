@@ -5,7 +5,8 @@ separate so neither changes the other. Run it on a login node or dtn1/dtn2;
 batch jobs then set :data:`~pmedm_vb.data.cache.OFFLINE_ENV` and read only the
 cache, so anything missed here fails there at once, by name.
 
-What is fetched, for a configuration's targets and inputs together:
+What is fetched, for a configuration's targets, inputs and carried ``tables``
+together:
 
 * the PUMS housing and person files and the data dictionary (the dictionary
   also serves the occupation and industry crosswalks of ``C24010``/``C24030``);
@@ -58,6 +59,6 @@ def prefetch_embedding(config: EmbedConfig, *, values: bool = True) -> list[Path
         if values:
             for table in tables:
                 paths.append(download_values(area, table, geography=SCORING_GEOGRAPHY))
-        built = resolve(area, config.ids)
+        built = resolve(area, (*config.ids, *config.tables))
         step.detail = f"{len(paths)} files, {len(built)} tables and attributes built"
     return paths

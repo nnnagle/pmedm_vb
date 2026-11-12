@@ -19,6 +19,13 @@ their weights summed, gives the same answer for less work. The map from each
 unit (``SERIALNO``) to its merged row is kept, so positions can be handed back
 per unit.
 
+**Masking metadata.** For a configuration whose targets are all attribute
+targets (:mod:`pmedm_vb.embed.attribute_targets`, configuration v2), the
+metadata records ``masking: "attribute"`` and, per target, ``masks``: the
+targets held out together with it in check 1 (itself and every attribute
+depending on it). Otherwise ``masking`` is ``"entry"``, the v1 rule of
+independent (row, target) entries.
+
 The arrays are written under ``$PMEDM_VB_DATA/processed/embed/targets/``, in a
 directory named after the configuration and a hash of what determines them
 (area, vintage and the ordered target list), so a configuration that changes
@@ -39,6 +46,7 @@ import pandas as pd
 from pmedm_vb.assemble.constraints import ConstraintTable
 from pmedm_vb.assemble.households import build_units
 from pmedm_vb.config import ensure_dir, processed_dir
+from pmedm_vb.embed.attribute_targets import ATTRIBUTE_TARGETS, mask_closure
 from pmedm_vb.embed.config import EmbedConfig, resolve, table_kind
 from pmedm_vb.progress import logger, save_npz, stage, write_text
 
@@ -151,11 +159,14 @@ def build_targets(config: EmbedConfig) -> TargetArrays:
     if (person_row < 0).any():
         raise ValueError("person records whose SERIALNO is not a unit")
 
+    attribute_masking = all(t in ATTRIBUTE_TARGETS for t in tables)
+    closure = mask_closure(list(tables))
     blocks, meta_targets, start = [], [], 0
     with stage("count target categories") as step:
         for target_id, table in tables.items():
             block = _table_counts(table, units, persons, person_row)
             blocks.append(block)
+            spec = ATTRIBUTE_TARGETS.get(target_id)
             meta_targets.append({
                 "id": target_id,
                 "kind": table_kind(target_id),
@@ -163,6 +174,8 @@ def build_targets(config: EmbedConfig) -> TargetArrays:
                 "categories": [c.name for c in table.categories],
                 "start": start,
                 "end": start + block.shape[1],
+                "derived_from": dict(spec.derived_from) if spec else {},
+                "masks": closure[target_id],
             })
             start += block.shape[1]
         counts = np.concatenate(blocks, axis=1)
@@ -201,6 +214,7 @@ def build_targets(config: EmbedConfig) -> TargetArrays:
         "n_rows": int(rows),
         "n_categories": int(counts.shape[1]),
         "gq_types": list(GQ_TYPES),
+        "masking": "attribute" if attribute_masking else "entry",
         "targets": meta_targets,
     }
     return TargetArrays(

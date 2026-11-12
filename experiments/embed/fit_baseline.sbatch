@@ -13,7 +13,7 @@
 
 # Fit the encoder-free baseline on one GPU; arguments go to fit_baseline.py:
 #
-#   sbatch experiments/embed/fit_baseline.sbatch --config experiments/embed/stage1_v1.json \
+#   sbatch experiments/embed/fit_baseline.sbatch --config experiments/embed/stage1_v2.json \
 #       --out /lustre/isaac24/proj/UTK0533/pmedm_vb_runs/embed/baseline --d 8 --gamma 0 0.5 1 \
 #       --ridge 1e-4 1e-3 1e-2
 #
