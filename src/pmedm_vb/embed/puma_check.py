@@ -33,6 +33,25 @@ recovered from.
             exactly (independent of the constraint set; what the
             representation could reach if the tables identified θ exactly).
 
+**Feature maps h** (:func:`feature_maps`; ``phi``, ``both`` and ``oracle`` are
+run for each requested h, labelled ``phi``/``both``/``oracle`` for linear and
+with a suffix otherwise, so results for different h never mix):
+
+``linear``     φ itself: the two group-quarters indicators and z1..zd;
+``quadratic``  linear plus every square and cross-product of z (not of the
+               indicators), d(d+1)/2 more (``_quad``);
+``decoder``    the indicators plus the run's calibrated decoder's predicted
+               category probabilities for a set of attributes, one category
+               per attribute dropped (``_dec``).
+
+A linear tilt exp(−θ′φ) is monotone along every direction of φ: it cannot
+raise an interior region of φ-space, change the dispersion of positions, or
+represent interactions. Squares and cross-products can; decoder probabilities
+give each category's region of φ-space, interior ones included, its own
+coefficient. Non-indicator features are design-weighted standardised over
+the support (:mod:`pmedm_vb.embed.tilt`, *feature scale*), for every h
+including linear, so the prior sd τ means the same thing across h.
+
 ``x``, ``phi`` and ``both`` share one MAP objective (Gaussian error on the
 cells with the replicate SEs, prior sd τ = 3 on β); see
 :func:`~pmedm_vb.embed.tilt.fit_tilt`. The PMEDM's own penalized dual for one
@@ -74,7 +93,8 @@ from pmedm_vb.assemble.households import build_units
 from pmedm_vb.config import StudyArea
 from pmedm_vb.data.pums import load_pums, weight_columns
 from pmedm_vb.embed.config import EmbedConfig, resolve, table_kind
-from pmedm_vb.embed.tilt import fit_oracle, fit_tilt
+from pmedm_vb.embed.model import EMPTY_LOGIT
+from pmedm_vb.embed.tilt import Features, fit_oracle, fit_tilt
 from pmedm_vb.embed.units import GQ_TYPES, _table_counts
 from pmedm_vb.progress import logger, stage
 
@@ -131,6 +151,22 @@ RARE = (
 )
 
 TILTS = ("none", "x", "phi", "both", "oracle")
+
+#: Feature maps h, with the suffix their tilts carry.
+FEATURE_MAPS = {"linear": "", "quadratic": "_quad", "decoder": "_dec"}
+
+#: Tilts that depend on h; ``none`` and ``x`` do not.
+H_TILTS = ("phi", "both", "oracle")
+
+#: Default attributes of the decoder feature map: S0's attributes and the
+#: householder's race and Hispanic origin.
+DECODER_ATTRIBUTES = ("age_sex", "race_ethnicity", "income", "tenure", "household_type",
+                      "household_size", "householder_race_ethnicity")
+
+
+def tilt_label(tilt: str, h: str) -> str:
+    """``phi``, ``both``, ``oracle`` carry h's suffix; ``none`` and ``x`` none."""
+    return tilt + FEATURE_MAPS[h] if tilt in H_TILTS else tilt
 
 
 def unit_type_table() -> ConstraintTable:
@@ -313,6 +349,127 @@ def load_phi(path: Path, units: pd.Index, columns=None) -> tuple[np.ndarray, lis
     return phi, list(columns), binary
 
 
+@dataclass
+class FeatureMap:
+    """One feature map h(φ) over the statewide units."""
+
+    name: str
+    F: np.ndarray
+    columns: list[str]
+    binary: np.ndarray
+
+
+def quadratic_features(phi: np.ndarray, columns: list[str], binary: np.ndarray) -> FeatureMap:
+    """φ plus every square and cross-product of its non-indicator columns."""
+    z = np.flatnonzero(~binary)
+    products, names = [], []
+    for a, j in enumerate(z):
+        for k in z[a:]:
+            products.append(phi[:, j] * phi[:, k])
+            names.append(f"{columns[j]}*{columns[k]}")
+    F = np.column_stack([phi, *products]) if products else phi
+    return FeatureMap("quadratic", F, [*columns, *names],
+                      np.concatenate([binary, np.zeros(len(names), dtype=bool)]))
+
+
+def decoder_features(run: Path, phi: np.ndarray, columns: list[str], binary: np.ndarray,
+                     weight: np.ndarray, attributes=DECODER_ATTRIBUTES) -> FeatureMap:
+    """The group-quarters indicators plus the run's calibrated decoder's
+    predicted category probabilities p_ak(φ) for ``attributes`` (``"all"``:
+    every target).
+
+    The calibrated decoder (``W_cal``, ``b_cal``, ``O_cal`` in ``decoder.npz``)
+    acts on the whitened coordinates that ``phi_units.parquet`` holds, so the
+    probabilities are those check 1 scores. They are computed for every unit,
+    including units outside an attribute's universe (a group-quarters person's
+    tenure probabilities, say): they are features of the position, not
+    targets. Per attribute, empty categories and the one with the largest
+    weighted mean probability (the reference) are dropped, since an
+    attribute's probabilities sum to one.
+    """
+    run = Path(run)
+    decoder = np.load(run / "decoder.npz")
+    meta = _targets_meta(run)
+    by_id = {t["id"]: t for t in meta["targets"]}
+    if attributes == "all" or attributes == ("all",) or attributes == ["all"]:
+        attributes = tuple(by_id)
+    missing = [a for a in attributes if a not in by_id]
+    if missing:
+        raise ValueError(f"decoder attributes not in the run's targets: {missing}")
+    gq_cols = [j for j, c in enumerate(columns) if c in ("gq_institutional", "gq_noninstitutional")]
+    z_cols = [j for j in range(len(columns)) if not binary[j]]
+    gq = np.zeros((len(phi), 2))
+    for j in gq_cols:
+        gq[:, 0 if columns[j] == "gq_institutional" else 1] = phi[:, j]
+    z = phi[:, z_cols]
+    W, b, O = decoder["W_cal"], decoder["b_cal"], decoder["O_cal"]
+    empty = decoder["empty"].astype(bool)
+    if W.shape[1] != z.shape[1]:
+        raise ValueError(f"decoder has {W.shape[1]} coordinates, positions have {z.shape[1]}")
+    blocks, names = [phi[:, gq_cols]], [columns[j] for j in gq_cols]
+    for attribute in attributes:
+        t = by_id[attribute]
+        start, end = int(t["start"]), int(t["end"])
+        logits = z @ W[start:end].T + b[start:end] + gq @ O[start:end].T \
+            + EMPTY_LOGIT * empty[start:end]
+        logits -= logits.max(1, keepdims=True)
+        prob = np.exp(logits)
+        prob /= prob.sum(1, keepdims=True)
+        mean = weight @ prob / weight.sum()
+        keep = ~empty[start:end]
+        keep[int(np.argmax(np.where(keep, mean, -1.0)))] = False
+        blocks.append(prob[:, keep])
+        names += [f"{attribute}.{c}" for c, k in zip(t["categories"], keep) if k]
+    F = np.column_stack(blocks)
+    return FeatureMap("decoder", F, names,
+                      np.array([j < len(gq_cols) for j in range(F.shape[1])]))
+
+
+def _targets_meta(run: Path) -> dict:
+    """The target metadata (ids, categories, column ranges) the run was fitted
+    on, from the cached target arrays its ``version.json`` names."""
+    import json
+
+    from pmedm_vb.config import processed_dir
+
+    version = json.loads((run / "version.json").read_text())
+    name = json.loads((run / "config.json").read_text())["name"]
+    path = processed_dir() / "embed" / "targets" / f"{name}_{version['targets_key']}" / "meta.json"
+    if not path.exists():
+        raise FileNotFoundError(f"target metadata for {run} not found at {path}")
+    return json.loads(path.read_text())
+
+
+def feature_maps(h: tuple[str, ...], phi: np.ndarray, columns: list[str], binary: np.ndarray,
+                 *, run: Path | None = None, weight: np.ndarray | None = None,
+                 decoder_attributes=DECODER_ATTRIBUTES) -> dict[str, FeatureMap]:
+    """The requested feature maps, keyed by name (see the module notes)."""
+    unknown = [x for x in h if x not in FEATURE_MAPS]
+    if unknown:
+        raise ValueError(f"unknown feature maps {unknown}; known: {list(FEATURE_MAPS)}")
+    out = {}
+    for name in h:
+        if name == "linear":
+            out[name] = FeatureMap("linear", phi, list(columns), np.asarray(binary))
+        elif name == "quadratic":
+            out[name] = quadratic_features(phi, columns, np.asarray(binary))
+        else:
+            if run is None or weight is None:
+                raise ValueError("the decoder feature map needs the run directory and weights")
+            out[name] = decoder_features(Path(run), phi, columns, np.asarray(binary), weight,
+                                         decoder_attributes)
+    return out
+
+
+def support_scale(F: np.ndarray, binary: np.ndarray, q: np.ndarray) -> np.ndarray:
+    """Design-weighted sd of each column over the support (weights ``q``, zero
+    off the support); 1 for indicators and for columns constant there."""
+    w = q / q.sum()
+    mean = w @ F
+    sd = np.sqrt(np.maximum(w @ np.square(F) - np.square(mean), 0.0))
+    return np.where(binary | (sd <= 1e-12), 1.0, sd)
+
+
 # --------------------------------------------------------------------------
 # Targets and scores
 # --------------------------------------------------------------------------
@@ -448,10 +605,21 @@ def published_tables(area: StudyArea) -> pd.DataFrame | None:
 # --------------------------------------------------------------------------
 
 
-def check_puma(data: CheckData, puma: str, phi: np.ndarray, phi_binary: np.ndarray,
+def check_puma(data: CheckData, puma: str, maps: dict[str, FeatureMap],
                published: pd.DataFrame | None, *, tau: float = 3.0,
-               sets: tuple[str, ...] = ("S0", "S1", "S2")) -> dict[str, pd.DataFrame]:
-    """Every tilt for every constraint set for PUMA ``puma``."""
+               sets: tuple[str, ...] = ("S0", "S1", "S2"),
+               tilts: tuple[str, ...] = TILTS, skip: frozenset = frozenset(),
+               standardise: bool = True, solver: str = "auto") -> dict[str, pd.DataFrame]:
+    """Every requested tilt for every constraint set and feature map for PUMA
+    ``puma``. ``skip`` holds ``"tilt_label|set"`` keys already done, which are
+    not refitted. ``standardise=False`` leaves the prior on the raw feature
+    scale (the behaviour before feature maps were added). ``solver``:
+    ``"auto"`` fits ``x`` and the linear tilts by L-BFGS, as before feature
+    maps were added, and the quadratic and decoder tilts by
+    Levenberg-Marquardt, which converges where L-BFGS stalls on their many
+    nearly collinear features (same objective and minimiser:
+    :func:`~pmedm_vb.embed.tilt.fit_tilt`); ``"lbfgs"`` or ``"lm"`` use one
+    solver throughout."""
     in_p = data.puma == puma
     if not in_p.any():
         raise ValueError(f"no units in PUMA {puma}")
@@ -459,38 +627,77 @@ def check_puma(data: CheckData, puma: str, phi: np.ndarray, phi_binary: np.ndarr
     N = float(data.weight[in_p].sum())
     floor = float(data.weight[in_p].mean())
     continuity = 0.5 * floor
-    Phi = sp.csr_matrix(phi)
+    q_support = np.where(in_p, 0.0, data.weight)
 
+    # (tilt label, h or None, tilt) for everything still to do in some set.
+    work = []
+    for tilt in tilts:
+        for h in (maps if tilt in H_TILTS else [None]):
+            label = tilt if h is None else tilt_label(tilt, h)
+            todo = [s_ for s_ in sets if f"{label}|{s_}" not in skip]
+            if todo:
+                work.append((label, h, tilt, todo))
     scores, misfits, rare = [], [], []
+    if not work:
+        return {"scores": pd.DataFrame(), "misfit": pd.DataFrame(), "rare": pd.DataFrame()}
 
-    def record(set_name, tilt_name, p, X, y, se, info):
-        base = {"puma": puma, "set": set_name, "tilt": tilt_name}
+    def record(set_name, label, p, X, y, se, info):
+        base = {"puma": puma, "set": set_name, "tilt": label}
         scores.extend({**base, **r} for r in score_tables(data, p, N, in_p, continuity))
         rare.extend({**base, **r} for r in rare_groups(data, p, N, in_p, published, puma))
         misfits.append({**base, **misfit(X, y, se, p, N), **info})
 
-    mu = phi[in_p].T @ data.weight[in_p] / N
-    start = time.perf_counter()
-    oracle, error = fit_oracle(log_q, phi, mu, binary=phi_binary)
-    oracle_info = {"iterations": oracle.iterations, "converged": oracle.converged,
-                   "seconds": time.perf_counter() - start,
-                   "oracle_max_moment_error": float(np.max(np.abs(error)))}
-    base_p = np.where(in_p, 0.0, data.weight)
-    base_p = base_p / base_p.sum()
+    scales = {h: (support_scale(m.F, m.binary, q_support) if standardise
+                  else np.ones(m.F.shape[1])) for h, m in maps.items()}
+    oracles = {}
+    for label, h, tilt, _ in work:
+        if tilt != "oracle":
+            continue
+        m = maps[h]
+        mu = m.F[in_p].T @ data.weight[in_p] / N
+        start = time.perf_counter()
+        fit, error = fit_oracle(log_q, m.F, mu, binary=m.binary)
+        scaled = np.abs(error) / scales[h] if standardise else np.abs(error)
+        oracles[h] = (fit, {"iterations": fit.iterations, "converged": fit.converged,
+                            "seconds": time.perf_counter() - start,
+                            "oracle_max_moment_error": float(np.max(np.abs(error))),
+                            "oracle_max_moment_error_sd": float(np.max(scaled)),
+                            "message": fit.message})
+        logger.info("PUMA %s oracle h=%s: %d iterations, max moment error %.2e sd (%s)",
+                    puma, h, fit.iterations, oracles[h][1]["oracle_max_moment_error_sd"],
+                    fit.message)
 
+    base_p = q_support / q_support.sum()
     for set_name in sets:
         tables = data.sets.constraint[set_name]
         X, y, se = targets(data, tables, in_p, floor)
-        record(set_name, "none", base_p, X, y, se, {"iterations": 0, "converged": True, "seconds": 0.0})
-        record(set_name, "oracle", oracle.p, X, y, se, oracle_info)
-        for tilt_name, F in (("x", X), ("phi", Phi), ("both", sp.hstack([X, Phi]).tocsr())):
+        for label, h, tilt, todo in work:
+            if set_name not in todo:
+                continue
+            if tilt == "none":
+                record(set_name, label, base_p, X, y, se,
+                       {"iterations": 0, "converged": True, "seconds": 0.0})
+                continue
+            if tilt == "oracle":
+                fit, info = oracles[h]
+                record(set_name, label, fit.p, X, y, se, info)
+                continue
+            if tilt == "x":
+                F, scale = Features([X]), None
+            elif tilt == "phi":
+                F, scale = Features([maps[h].F]), scales[h]
+            else:
+                F = Features([X, maps[h].F])
+                scale = np.concatenate([np.ones(X.shape[1]), scales[h]])
+            method = solver if solver != "auto" else (
+                "lm" if h in ("quadratic", "decoder") else "lbfgs")
             start = time.perf_counter()
-            fit = fit_tilt(log_q, F, X, y, se, N, tau=tau)
-            record(set_name, tilt_name, fit.p, X, y, se,
+            fit = fit_tilt(log_q, F, X, y, se, N, tau=tau, scale=scale, method=method)
+            record(set_name, label, fit.p, X, y, se,
                    {"iterations": fit.iterations, "converged": fit.converged,
-                    "seconds": time.perf_counter() - start})
+                    "seconds": time.perf_counter() - start, "solver": method})
             logger.info("PUMA %s %s %s: %d iterations, %.1fs, rms z %.2f", puma, set_name,
-                        tilt_name, fit.iterations, misfits[-1]["seconds"], misfits[-1]["rms_z"])
+                        label, fit.iterations, misfits[-1]["seconds"], misfits[-1]["rms_z"])
     return {"scores": pd.DataFrame(scores), "misfit": pd.DataFrame(misfits),
             "rare": pd.DataFrame(rare)}
 

@@ -16,6 +16,11 @@
 #       --run /lustre/isaac24/proj/UTK0533/pmedm_vb_runs/embed/stage1_v2/d8_g0.5_r0.01 \
 #       --out /lustre/isaac24/proj/UTK0533/pmedm_vb_runs/embed/puma_check --workers 8
 #
+# Richer feature maps beside a finished linear run (same --run and --out; only
+# the new tilt/set pairs are fitted and appended):
+#
+#   sbatch experiments/embed/puma_check.sbatch ... --h quadratic decoder --tilts phi both oracle --workers 8
+#
 # --workers should match --cpus-per-task: each worker is one process on one core
 # (the fits are sparse, single-threaded), so BLAS threading is pinned to 1.
 # Finished PUMAs are skipped, so a timed-out job can be resubmitted as it was.
