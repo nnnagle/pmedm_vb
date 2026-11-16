@@ -52,11 +52,20 @@ coefficient. Non-indicator features are design-weighted standardised over
 the support (:mod:`pmedm_vb.embed.tilt`, *feature scale*), for every h
 including linear, so the prior sd τ means the same thing across h.
 
-``x``, ``phi`` and ``both`` share one MAP objective (Gaussian error on the
-cells with the replicate SEs, prior sd τ = 3 on β); see
-:func:`~pmedm_vb.embed.tilt.fit_tilt`. The PMEDM's own penalized dual for one
-zone is not run: the solvers need the zone structure and VRE ``Sigma`` of a
-real PMEDM input, which this check does not build.
+``x``, ``phi`` and ``both`` share one objective (Gaussian error on the
+cells with the replicate SEs, prior sd τ on β, and optionally the entropy
+penalty α n KL(p ‖ q)); see :func:`~pmedm_vb.embed.tilt.fit_tilt`. Each is
+fitted at every requested penalty setting (α, τ) and labelled ``_a<α>_t<τ>``,
+except α = 0, τ = 3 (no suffix: every result from before the penalty was
+added). ``n`` is P's number of sample units, so α = 1 is the PMEDM's own
+weighting of entropy against misfit, and ``x`` at α = 1 with τ → ∞ is the
+PMEDM's maximum-entropy solution for one zone (with a finite τ the prior is
+on β rather than on the dual multipliers). Every fit records KL(p ‖ q), how
+far it moved the support's weights. With α > 0, ``both`` is in theory ``x``
+again: the entropy-penalised optimum over *all* distributions on the support
+is an ``x`` tilt (the PMEDM's primal solution), so adding h(φ) to the
+features cannot lower the objective except through the prior, and the fits
+agree to three decimals on a trial PUMA. Only ``phi`` is informative there.
 
 **Constraint sets** are nested (:data:`S0`, :data:`S1_ADD`, S2 = S1 plus the
 added tables of the configuration less :data:`S2_EXCLUDE` and the scoring
@@ -94,7 +103,7 @@ from pmedm_vb.config import StudyArea
 from pmedm_vb.data.pums import load_pums, weight_columns
 from pmedm_vb.embed.config import EmbedConfig, resolve, table_kind
 from pmedm_vb.embed.model import EMPTY_LOGIT
-from pmedm_vb.embed.tilt import Features, fit_oracle, fit_tilt
+from pmedm_vb.embed.tilt import Features, fit_oracle, fit_tilt, kl_to_base
 from pmedm_vb.embed.units import GQ_TYPES, _table_counts
 from pmedm_vb.progress import logger, stage
 
@@ -158,15 +167,55 @@ FEATURE_MAPS = {"linear": "", "quadratic": "_quad", "decoder": "_dec"}
 #: Tilts that depend on h; ``none`` and ``x`` do not.
 H_TILTS = ("phi", "both", "oracle")
 
+#: Tilts fitted to the tables, which take the penalty settings (α, τ); the
+#: oracle matches moments exactly and ``none`` is not fitted.
+FITTED_TILTS = ("x", "phi", "both")
+
+#: The penalty setting whose labels carry no suffix: no entropy term, prior sd
+#: 3 (every result before the entropy penalty was added).
+DEFAULT_PENALTY = (0.0, 3.0)
+
+#: The penalty grid ``--grid default`` runs beside :data:`DEFAULT_PENALTY`:
+#: the entropy weight α around the value that, on a trial PUMA, brought the
+#: quadratic and decoder φ tilts' odds-ratio error down to the ``x`` tilt's
+#: (0.1; α = 1 already raised the constraint misfit to about 2 SE and α = 10
+#: left the support almost untilted), and two tighter priors without the
+#: entropy term.
+PENALTY_GRID = ((0.03, 3.0), (0.1, 3.0), (0.3, 3.0), (1.0, 3.0), (0.0, 1.0), (0.0, 0.3))
+
 #: Default attributes of the decoder feature map: S0's attributes and the
 #: householder's race and Hispanic origin.
 DECODER_ATTRIBUTES = ("age_sex", "race_ethnicity", "income", "tenure", "household_type",
                       "household_size", "householder_race_ethnicity")
 
 
-def tilt_label(tilt: str, h: str) -> str:
-    """``phi``, ``both``, ``oracle`` carry h's suffix; ``none`` and ``x`` none."""
-    return tilt + FEATURE_MAPS[h] if tilt in H_TILTS else tilt
+def tilt_label(tilt: str, h: str, penalty: tuple[float, float] = DEFAULT_PENALTY) -> str:
+    """``phi``, ``both``, ``oracle`` carry h's suffix; ``none`` and ``x`` none.
+    A fitted tilt (``x``, ``phi``, ``both``) at a penalty other than
+    :data:`DEFAULT_PENALTY` also carries ``_a<α>_t<τ>``."""
+    label = tilt + FEATURE_MAPS[h] if tilt in H_TILTS else tilt
+    if tilt in FITTED_TILTS and tuple(map(float, penalty)) != DEFAULT_PENALTY:
+        alpha, tau = penalty
+        label += f"_a{alpha:g}_t{tau:g}"
+    return label
+
+
+def parse_tilt_label(label: str) -> dict:
+    """Inverse of :func:`tilt_label`: ``tilt``, ``h``, ``alpha``, ``tau``
+    (α and τ NaN for ``none`` and the oracles)."""
+    import re
+
+    suffixes = {v: k for k, v in FEATURE_MAPS.items() if v}
+    m = re.fullmatch(r"(none|x|phi|both|oracle)(_quad|_dec)?(?:_a([^_]+)_t([^_]+))?", str(label))
+    if m is None:
+        return {"tilt": label, "h": None, "alpha": np.nan, "tau": np.nan}
+    tilt, suffix, a, t = m.groups()
+    h = suffixes.get(suffix, "linear") if tilt in H_TILTS else None
+    if tilt in FITTED_TILTS:
+        alpha, tau = (float(a), float(t)) if a is not None else DEFAULT_PENALTY
+    else:
+        alpha, tau = np.nan, np.nan
+    return {"tilt": tilt, "h": h, "alpha": alpha, "tau": tau}
 
 
 def unit_type_table() -> ConstraintTable:
@@ -609,7 +658,9 @@ def check_puma(data: CheckData, puma: str, maps: dict[str, FeatureMap],
                published: pd.DataFrame | None, *, tau: float = 3.0,
                sets: tuple[str, ...] = ("S0", "S1", "S2"),
                tilts: tuple[str, ...] = TILTS, skip: frozenset = frozenset(),
-               standardise: bool = True, solver: str = "auto") -> dict[str, pd.DataFrame]:
+               standardise: bool = True, solver: str = "auto",
+               penalties: tuple[tuple[float, float], ...] | None = None,
+               ) -> dict[str, pd.DataFrame]:
     """Every requested tilt for every constraint set and feature map for PUMA
     ``puma``. ``skip`` holds ``"tilt_label|set"`` keys already done, which are
     not refitted. ``standardise=False`` leaves the prior on the raw feature
@@ -619,12 +670,24 @@ def check_puma(data: CheckData, puma: str, maps: dict[str, FeatureMap],
     Levenberg-Marquardt, which converges where L-BFGS stalls on their many
     nearly collinear features (same objective and minimiser:
     :func:`~pmedm_vb.embed.tilt.fit_tilt`); ``"lbfgs"`` or ``"lm"`` use one
-    solver throughout."""
+    solver throughout.
+
+    ``penalties``: (α, τ) pairs for the fitted tilts (``x``, ``phi``,
+    ``both``), each fitted and labelled separately (:func:`tilt_label`);
+    default ``((0, tau),)``. α > 0 adds the entropy penalty α n KL(p ‖ q)
+    with ``n`` P's number of sample units, the PMEDM's own entropy weight
+    (:mod:`pmedm_vb.embed.tilt`); those fits use damped Gauss-Newton (or
+    L-BFGS if ``solver="lbfgs"``). Every fit also records KL(p ‖ q), the
+    distortion of the support's weights."""
+    if penalties is None:
+        penalties = ((0.0, float(tau)),)
+    penalties = tuple((float(a), float(t)) for a, t in penalties)
     in_p = data.puma == puma
     if not in_p.any():
         raise ValueError(f"no units in PUMA {puma}")
     log_q = np.where(in_p, -np.inf, np.log(np.maximum(data.weight, 1e-300)))
     N = float(data.weight[in_p].sum())
+    n_sample = float(in_p.sum())
     floor = float(data.weight[in_p].mean())
     continuity = 0.5 * floor
     q_support = np.where(in_p, 0.0, data.weight)
@@ -633,10 +696,11 @@ def check_puma(data: CheckData, puma: str, maps: dict[str, FeatureMap],
     work = []
     for tilt in tilts:
         for h in (maps if tilt in H_TILTS else [None]):
-            label = tilt if h is None else tilt_label(tilt, h)
-            todo = [s_ for s_ in sets if f"{label}|{s_}" not in skip]
-            if todo:
-                work.append((label, h, tilt, todo))
+            for penalty in (penalties if tilt in FITTED_TILTS else [DEFAULT_PENALTY]):
+                label = tilt_label(tilt, h if h is not None else "linear", penalty)
+                todo = [s_ for s_ in sets if f"{label}|{s_}" not in skip]
+                if todo:
+                    work.append((label, h, tilt, todo, penalty))
     scores, misfits, rare = [], [], []
     if not work:
         return {"scores": pd.DataFrame(), "misfit": pd.DataFrame(), "rare": pd.DataFrame()}
@@ -645,12 +709,13 @@ def check_puma(data: CheckData, puma: str, maps: dict[str, FeatureMap],
         base = {"puma": puma, "set": set_name, "tilt": label}
         scores.extend({**base, **r} for r in score_tables(data, p, N, in_p, continuity))
         rare.extend({**base, **r} for r in rare_groups(data, p, N, in_p, published, puma))
-        misfits.append({**base, **misfit(X, y, se, p, N), **info})
+        misfits.append({**base, **misfit(X, y, se, p, N), "kl_to_base": kl_to_base(log_q, p),
+                        **info})
 
     scales = {h: (support_scale(m.F, m.binary, q_support) if standardise
                   else np.ones(m.F.shape[1])) for h, m in maps.items()}
     oracles = {}
-    for label, h, tilt, _ in work:
+    for label, h, tilt, _, _ in work:
         if tilt != "oracle":
             continue
         m = maps[h]
@@ -671,7 +736,7 @@ def check_puma(data: CheckData, puma: str, maps: dict[str, FeatureMap],
     for set_name in sets:
         tables = data.sets.constraint[set_name]
         X, y, se = targets(data, tables, in_p, floor)
-        for label, h, tilt, todo in work:
+        for label, h, tilt, todo, (alpha, tau_) in work:
             if set_name not in todo:
                 continue
             if tilt == "none":
@@ -689,13 +754,18 @@ def check_puma(data: CheckData, puma: str, maps: dict[str, FeatureMap],
             else:
                 F = Features([X, maps[h].F])
                 scale = np.concatenate([np.ones(X.shape[1]), scales[h]])
-            method = solver if solver != "auto" else (
-                "lm" if h in ("quadratic", "decoder") else "lbfgs")
+            if alpha > 0:
+                method = "lbfgs" if solver == "lbfgs" else "gn"
+            else:
+                method = solver if solver != "auto" else (
+                    "lm" if h in ("quadratic", "decoder") else "lbfgs")
             start = time.perf_counter()
-            fit = fit_tilt(log_q, F, X, y, se, N, tau=tau, scale=scale, method=method)
+            fit = fit_tilt(log_q, F, X, y, se, N, tau=tau_, scale=scale, method=method,
+                           alpha=alpha, n=n_sample)
             record(set_name, label, fit.p, X, y, se,
                    {"iterations": fit.iterations, "converged": fit.converged,
-                    "seconds": time.perf_counter() - start, "solver": method})
+                    "seconds": time.perf_counter() - start, "solver": method,
+                    "alpha": alpha, "tau": tau_, "n_sample": n_sample})
             logger.info("PUMA %s %s %s: %d iterations, %.1fs, rms z %.2f", puma, set_name,
                         label, fit.iterations, misfits[-1]["seconds"], misfits[-1]["rms_z"])
     return {"scores": pd.DataFrame(scores), "misfit": pd.DataFrame(misfits),
@@ -715,7 +785,9 @@ def summarise(scores: pd.DataFrame, misfit_frame: pd.DataFrame, rare: pd.DataFra
     metrics = [c for c in ("tvd", "kl", "lor_mae", "lor_wrms") if c in scores]
     by_table = scores.groupby([*keys, "table"])[metrics].mean().reset_index()
     overall = scores.groupby(keys)[metrics].mean().reset_index()
-    fit = misfit_frame.groupby(keys)[["rms_z", "share_within_1se", "seconds"]].mean().reset_index()
+    fit_columns = [c for c in ("rms_z", "share_within_1se", "kl_to_base", "seconds")
+                   if c in misfit_frame]
+    fit = misfit_frame.groupby(keys)[fit_columns].mean().reset_index()
     overall = overall.merge(fit, on=keys, how="left")
 
     sums = rare.groupby([*keys, "table", "category"])[["truth", "pred"]].sum()

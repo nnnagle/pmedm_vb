@@ -10,6 +10,12 @@ output (default: the run directory's name). ``--h`` picks the feature maps
 (``linear``, ``quadratic``, ``decoder``; the decoder map needs a fit directory)
 and ``--tilts`` the tilts (``none x phi both oracle``); ``phi``, ``both`` and
 ``oracle`` are run once per h, labelled with h's suffix (``phi_quad``...).
+``--alpha`` and ``--tau`` (every α with every τ) or ``--grid a:t ...``
+(``--grid default`` for the standard grid) give
+the penalty settings of the fitted tilts ``x``, ``phi``, ``both``: prior sd τ
+on β and the entropy penalty α n KL(p ‖ q) (:mod:`pmedm_vb.embed.tilt`); each
+setting is labelled ``_a<α>_t<τ>`` except α = 0, τ = 3, the earlier results.
+The oracles do not depend on them and are not refitted. Default sets: S0 S1.
 
 Results go to ``<out>/<label>/<puma>/`` (``scores.csv``, ``misfit.csv``,
 ``rare.csv``), and ``done.json`` records which ``tilt|set`` pairs are done.
@@ -36,8 +42,9 @@ from pmedm_vb.embed.config import load_config
 import pandas as pd
 
 from pmedm_vb.embed.puma_check import (
-    DECODER_ATTRIBUTES, FEATURE_MAPS, TILTS, check_puma, feature_maps, load_check_data, load_phi,
-    published_tables, tilt_label,
+    DECODER_ATTRIBUTES, DEFAULT_PENALTY, FEATURE_MAPS, FITTED_TILTS, PENALTY_GRID, TILTS,
+    check_puma,
+    feature_maps, load_check_data, load_phi, published_tables, tilt_label,
 )
 from pmedm_vb.progress import logger, record_run, stage, write_text
 
@@ -57,9 +64,30 @@ def done_keys(directory: Path) -> set[str]:
     return {f"{t}|{s}" for t in TILTS for s in done.get("sets", [])}
 
 
-def requested_keys(maps, tilts, sets) -> set[str]:
-    labels = {tilt_label(t, h) for t in tilts for h in maps}
+def requested_keys(maps, tilts, sets, penalties=(DEFAULT_PENALTY,)) -> set[str]:
+    labels = {tilt_label(t, h, pen) for t in tilts for h in maps
+              for pen in (penalties if t in FITTED_TILTS else [DEFAULT_PENALTY])}
     return {f"{label}|{s}" for label in labels for s in sets}
+
+
+def parse_penalties(alpha, tau, grid) -> tuple[tuple[float, float], ...]:
+    """(α, τ) pairs: ``--grid a:t ...`` if given (``default`` adds
+    :data:`~pmedm_vb.embed.puma_check.PENALTY_GRID`), else every α with every τ."""
+    if grid:
+        pairs = []
+        for item in grid:
+            if item == "default":
+                pairs.extend(PENALTY_GRID)
+                continue
+            a, _, t = item.partition(":")
+            if not t:
+                raise SystemExit(f"--grid takes alpha:tau pairs, got {item!r}")
+            pairs.append((float(a), float(t)))
+    else:
+        pairs = [(float(a), float(t)) for a in alpha for t in tau]
+    if any(a < 0 or t <= 0 for a, t in pairs):
+        raise SystemExit(f"need alpha >= 0 and tau > 0: {pairs}")
+    return tuple(dict.fromkeys(pairs))
 
 
 def run_puma(puma: str) -> str:
@@ -68,14 +96,14 @@ def run_puma(puma: str) -> str:
     s = _SHARED
     directory = s["root"] / puma
     done = done_keys(directory)
-    if requested_keys(s["maps"], s["tilts"], s["sets"]) <= done:
+    if requested_keys(s["maps"], s["tilts"], s["sets"], s["penalties"]) <= done:
         logger.info("PUMA %s: already done, skipped", puma)
         return puma
     start = time.perf_counter()
     with stage(f"PUMA {puma}"):
-        frames = check_puma(s["data"], puma, s["maps"], s["published"], tau=s["tau"],
+        frames = check_puma(s["data"], puma, s["maps"], s["published"],
                             sets=s["sets"], tilts=s["tilts"], skip=frozenset(done),
-                            solver=s["solver"])
+                            solver=s["solver"], penalties=s["penalties"])
     ensure_dir(directory)
     new = {f"{t}|{st}" for t, st in zip(frames["misfit"]["tilt"], frames["misfit"]["set"])} \
         if len(frames["misfit"]) else set()
@@ -91,7 +119,9 @@ def run_puma(puma: str) -> str:
         write_text(path, frame.to_csv(index=False))
     previous = json.loads((directory / "done.json").read_text()) if (directory / "done.json").exists() else {}
     write_text(directory / "done.json", json.dumps({
-        "keys": sorted(done | new), "tau": s["tau"],
+        "keys": sorted(done | new),
+        "penalties": sorted({tuple(x) for x in previous.get("penalties", [list(DEFAULT_PENALTY)])}
+                            | set(s["penalties"])),
         "seconds": previous.get("seconds", 0.0) + time.perf_counter() - start,
         "h": sorted(set(previous.get("h", ["linear"] if done else [])) | set(s["maps"])),
         "decoder_attributes": s["decoder_attributes"]}, indent=1))
@@ -106,8 +136,16 @@ def main() -> None:
     parser.add_argument("--label", default=None)
     parser.add_argument("--puma", nargs="+", default=None, help="PUMA GEOIDs (default: all)")
     parser.add_argument("--shard", default=None, help="i/n: every n-th PUMA from the i-th (1-based)")
-    parser.add_argument("--sets", nargs="+", default=["S0", "S1", "S2"])
-    parser.add_argument("--tau", type=float, default=3.0, help="prior sd of β")
+    parser.add_argument("--sets", nargs="+", default=["S0", "S1"],
+                        help="constraint sets (default S0 S1; S2's fits are slow)")
+    parser.add_argument("--tau", type=float, nargs="+", default=[3.0],
+                        help="prior sd(s) of β for the fitted tilts")
+    parser.add_argument("--alpha", type=float, nargs="+", default=[0.0],
+                        help="entropy weight(s): alpha * n * KL(p||q), n = P's sample units; "
+                             "every alpha is combined with every tau")
+    parser.add_argument("--grid", nargs="+", default=None, metavar="ALPHA:TAU",
+                        help="explicit (alpha, tau) pairs instead of the alpha x tau product; "
+                             "'default' is " + " ".join(f"{a:g}:{t:g}" for a, t in PENALTY_GRID))
     parser.add_argument("--workers", type=int, default=1, help="PUMAs run at once")
     parser.add_argument("--h", nargs="+", default=["linear"], choices=list(FEATURE_MAPS),
                         help="feature maps for the phi, both and oracle tilts")
@@ -142,8 +180,10 @@ def main() -> None:
         i, n = (int(v) for v in args.shard.split("/"))
         pumas = pumas[i - 1::n]
     logger.info("%d PUMA(s): %s", len(pumas), " ".join(pumas))
+    penalties = parse_penalties(args.alpha, args.tau, args.grid)
+    logger.info("penalty settings (alpha, tau): %s", penalties)
     _SHARED.update(data=data, maps=maps, published=published, root=root, label=label,
-                   tau=args.tau, sets=tuple(args.sets), tilts=tuple(args.tilts),
+                   penalties=penalties, sets=tuple(args.sets), tilts=tuple(args.tilts),
                    decoder_attributes=list(args.decoder_attributes), solver=args.solver)
     if args.workers > 1:
         with multiprocessing.get_context("fork").Pool(args.workers) as pool:

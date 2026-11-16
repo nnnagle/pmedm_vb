@@ -21,6 +21,12 @@
 #
 #   sbatch experiments/embed/puma_check.sbatch ... --h quadratic decoder --tilts phi both oracle --workers 8
 #
+# Penalty settings of the fitted tilts beside a finished run (entropy weight
+# alpha, prior sd tau; the oracles are not refitted):
+#
+#   sbatch experiments/embed/puma_check.sbatch ... --h linear quadratic decoder \
+#       --tilts x phi both --sets S0 S1 --grid default --workers 8
+#
 # --workers should match --cpus-per-task: each worker is one process on one core
 # (the fits are sparse, single-threaded), so BLAS threading is pinned to 1.
 # Finished PUMAs are skipped, so a timed-out job can be resubmitted as it was.
