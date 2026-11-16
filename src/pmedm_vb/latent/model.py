@@ -45,6 +45,14 @@ family:
   and Γ is free. Since ``M′M = I``, ``Σ_b ‖θ̃_b‖² = ‖Γ_θ‖²``, so the prior is
   a plain ridge on Γ.
 
+**Latent-only** (``shared="features"``). The shared block is the area's
+level on the same standardised features instead of x:
+``η_ib = h̃_i′β_A + c_b + h̃_i′θ_b``, with a ridge prior of sd ``τ_shared`` on
+β_A (the x-anchored model has none: its λ is held by the multiplier prior in
+``Σ``). Nothing in the model then refers to a particular table: tables enter
+only through ``Y``, ``Ã`` and ``Σ``. The code treats both alike, the shared
+design ``X`` being either the cell counts or the standardised features.
+
 **Gradient.** With ``E = η`` (zones × units), ``s = (Σ+τ²I)⁻¹ r`` and
 ``G = N Ã s`` laid out as a weight matrix
 (:meth:`~pmedm_vb.solvers.base.ConstraintOperator.adjoint`),
@@ -178,11 +186,17 @@ class LatentModel:
         Entropy weight; the KL term is ``alpha * n * KL(p ‖ q)``.
     tau_theta, tau_intercept:
         Prior sds of the standardised feature coefficients and of ``c_b``.
+    shared:
+        ``"x"`` (x-anchored: λ on the area's constraint cells) or
+        ``"features"`` (latent-only: β_A on the standardised features).
+    tau_shared:
+        Prior sd of β_A when ``shared="features"``.
     """
 
     def __init__(self, inputs: PMEDMInputs, sigma: Sigma, H: np.ndarray, binary: np.ndarray,
                  *, zone_weight: np.ndarray, alpha: float, tau_theta: float = 3.0,
-                 tau_intercept: float = 3.0, names: list[str] | None = None) -> None:
+                 tau_intercept: float = 3.0, names: list[str] | None = None,
+                 shared: str = "x", tau_shared: float = 3.0) -> None:
         self.inputs, self.sigma = inputs, sigma
         self.op = ConstraintOperator(inputs)
         self.N, self.n = float(inputs.N), float(inputs.n)
@@ -191,13 +205,22 @@ class LatentModel:
             self.log_q = np.log(inputs.q)
         if not np.all(np.isfinite(self.log_q)):
             raise ValueError("q has zeros; the latent model expects every pair possible")
-        self.X, self.x_names = shared_counts(inputs)
-        self.XT = self.X.T.tocsr()
         unit_weight = inputs.q.sum(axis=0)
         H = np.zeros((inputs.n_units, 0)) if H is None else np.asarray(H, dtype=np.float64)
-        Hs, kept, _, _ = standardise(H, np.asarray(binary, bool), unit_weight)
+        Hs, kept, _, spread = standardise(H, np.asarray(binary, bool), unit_weight)
+        self.feature_spread = spread[kept]
         names = list(names) if names is not None else [f"h{j}" for j in range(H.shape[1])]
         self.feature_names = [names[j] for j in kept] + ["(intercept)"]
+        if shared == "x":
+            self.X, self.x_names = shared_counts(inputs)
+        elif shared == "features":
+            if Hs.shape[1] == 0:
+                raise ValueError("a latent-only model needs features")
+            self.X, self.x_names = sp.csr_matrix(Hs), [names[j] for j in kept]
+        else:
+            raise ValueError(f"shared must be 'x' or 'features', got {shared!r}")
+        self.shared = shared
+        self.XT = self.X.T.tocsr()
         self.H1 = np.column_stack([Hs, np.ones(inputs.n_units)])
         self.Z, self.U = inputs.q.shape
         self.k1 = self.H1.shape[1]
@@ -209,6 +232,8 @@ class LatentModel:
         prior[-1] = 1.0 / tau_intercept**2
         self.prior_gamma = np.tile(prior, (self.Z - 1, 1))
         self.n_lam = self.X.shape[1]
+        self.prior_lam = (np.full(self.n_lam, 1.0 / tau_shared**2) if shared == "features"
+                          else np.zeros(self.n_lam))
         self.n_params = self.n_lam + (self.Z - 1) * self.k1
 
     # -- parameters ----------------------------------------------------------
@@ -246,7 +271,8 @@ class LatentModel:
         mean_e = float((p * E).sum())
         kl = -mean_e - log_z
         misfit = 0.5 * float(r @ s)
-        prior = 0.5 * float((self.prior_gamma * np.square(gamma)).sum())
+        prior = 0.5 * float((self.prior_gamma * np.square(gamma)).sum()
+                            + (self.prior_lam * np.square(lam)).sum())
         value = misfit + self.entropy * kl + prior
         parts = {"misfit": misfit, "kl": kl, "entropy_term": self.entropy * kl, "prior": prior}
         state = {"p": p, "E": E, "r": r}
@@ -255,7 +281,7 @@ class LatentModel:
         G = self.N * self.op.adjoint(s)
         state["G"] = G
         dE = -p * (G - float((p * G).sum())) + self.entropy * p * (E - mean_e)
-        g_lam = self.XT @ dE.sum(axis=0)
+        g_lam = self.XT @ dE.sum(axis=0) + self.prior_lam * lam
         g_gamma = self.M.T @ (dE @ self.H1) + self.prior_gamma * gamma
         return value, np.concatenate([g_lam, g_gamma.ravel()]), parts, state
 
@@ -328,7 +354,7 @@ class LatentModel:
         S, mean = self.moments(p)
         H += self.entropy * (S - np.outer(mean, mean))
         H[np.diag_indices_from(H)] += np.concatenate(
-            [np.zeros(self.n_lam), self.prior_gamma.ravel()])
+            [self.prior_lam, self.prior_gamma.ravel()])
         if exact:
             H += self.residual_curvature(state, mean)
         return H
@@ -367,7 +393,7 @@ class LatentModel:
         A = S - np.outer(mean, mean) / w.sum()
         rhs = rhs - mean * float((w * eta).sum()) / w.sum()
         A[np.diag_indices_from(A)] += 1e-3 * np.concatenate(
-            [np.full(self.n_lam, 1e-8), self.prior_gamma.ravel()])
+            [np.maximum(self.prior_lam, 1e-8), self.prior_gamma.ravel()])
         return np.linalg.solve(A, rhs)
 
     # -- fitting -------------------------------------------------------------

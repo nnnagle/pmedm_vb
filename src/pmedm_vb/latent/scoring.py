@@ -79,4 +79,21 @@ def score_region(data: CheckData, problem: RegionProblem, p: np.ndarray, model: 
             "spread": pd.DataFrame(spread), "summary": pd.DataFrame([summary])}
 
 
-__all__ = ["RARE", "allocation_accuracy", "score_region"]
+def transfer_misfit(other: RegionProblem, p: np.ndarray, model: str, fit_set: str,
+                    scored_set: str) -> pd.DataFrame:
+    """Misfit of ``p`` to another table set's cells, per zone: the transfer
+    test. ``other`` is the region's problem for the scored set (same units,
+    in the same order); its SEs are the replicate SEs of those cells without
+    the PMEDM's prior."""
+    region = other.region
+    N = other.inputs.N
+    se = np.sqrt(other.inputs.sigma_v).reshape(len(other.cells), len(region.pumas))
+    rows = []
+    for b, puma in enumerate(region.pumas):
+        rows.append({"region": region.id, "zone": puma, "model": model, "fit_set": fit_set,
+                     "scored_set": scored_set,
+                     **misfit(other.inputs.X_B, other.inputs.Y_B[b], se[:, b], p[b], N)})
+    return pd.DataFrame(rows)
+
+
+__all__ = ["RARE", "allocation_accuracy", "score_region", "transfer_misfit"]

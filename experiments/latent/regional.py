@@ -23,7 +23,32 @@ For every region (:mod:`pmedm_vb.latent.regions`), fits and scores:
 ``latent_a<α>``               the latent model, h = the decoder features of φ
                               (``HANDOFF_stage2.md``);
 ``latent_race_a<α>``          the same with each household's race/ethnicity
-                              member shares appended to h.
+                              member shares appended to h;
+``lonly_a<α>``                the latent-only model: no x term, the area's
+                              level β_A on the same features
+                              (``LatentModel(shared="features")``); the
+                              primary model;
+``lonly_race_a<α>``           latent-only with the race/ethnicity shares;
+``pmedm_latentview_k<κ>``     the latent-view PMEDM (:mod:`pmedm_vb.latent.views`):
+                              the PMEDM above, same solver and settings, with
+                              each unit's cell counts replaced by their
+                              least-squares views on the all-attribute
+                              decoder features, ``x̂ = [1, h(φ)] G`` (G fitted
+                              statewide per table set), and ``κ`` times the
+                              approximation-error variance added to the cells'
+                              variances.
+
+A suffix ``@B`` fits the model to table set B instead of A
+(:func:`~pmedm_vb.latent.regions.transfer_sets`; A is the check's S1 set).
+Every model, whichever set it is fitted to, is scored against the truth and
+for **transfer**: its misfit to the other set's cells (``transfer.csv``).
+
+The default plan (``--models``) is: on A, ``none``, ``pmedm``,
+``intercepts_a0.1``, ``latent_a0.1`` (x-anchored), ``lonly_a0.03``,
+``lonly_a0.1``, ``lonly_a0.3`` and ``lonly_race_a0.1``; on B, ``none@B``,
+``pmedm@B``, ``latent_a0.1@B`` and ``lonly_a0.1@B``; and the latent-view PMEDM
+at κ = 0 and 1 on each set. Earlier names (any variant and α) remain valid.
+The views' R² per table go to ``<out>/views_r2.csv``.
 
 Every latent model is fitted from two starts, ``η = 0`` and the projection of
 the PMEDM's solution onto the family
@@ -53,8 +78,9 @@ import pandas as pd
 from pmedm_vb.embed.config import load_config
 from pmedm_vb.embed.puma_check import DECODER_ATTRIBUTES, decoder_features, load_check_data, load_phi
 from pmedm_vb.latent.model import LatentModel, area_sigma
-from pmedm_vb.latent.regions import build_region, load_regions, race_composition
-from pmedm_vb.latent.scoring import score_region
+from pmedm_vb.latent.regions import build_region, load_regions, race_composition, transfer_sets
+from pmedm_vb.latent.scoring import score_region, transfer_misfit
+from pmedm_vb.latent.views import fit_views, latent_view_inputs
 from pmedm_vb.progress import logger, record_run, stage, write_text
 from pmedm_vb.solvers.map_dual import solve_map
 
@@ -62,10 +88,36 @@ from pmedm_vb.solvers.map_dual import solve_map
 _SHARED: dict = {}
 
 
+VARIANTS = ("intercepts", "latent", "latent_race", "lonly", "lonly_race")
+
+DEFAULT_MODELS = ("none", "pmedm", "intercepts_a0.1", "latent_a0.1", "lonly_a0.03", "lonly_a0.1",
+                  "lonly_a0.3", "lonly_race_a0.1",
+                  "pmedm_latentview_k0", "pmedm_latentview_k1",
+                  "none@B", "pmedm@B", "latent_a0.1@B", "lonly_a0.1@B",
+                  "pmedm_latentview_k0@B", "pmedm_latentview_k1@B")
+
+
 def model_names(alphas, variants, pmedm: bool) -> list[str]:
     names = ["none"] + (["pmedm"] if pmedm else [])
     names += [f"{v}_a{a:g}" for v in variants for a in alphas]
     return names
+
+
+def parse_model(name: str) -> tuple[str, str, float | None]:
+    """``"lonly_a0.1@B"`` -> ``("lonly", "B", 0.1)``; ``"none"`` -> ``("none", "A", None)``;
+    ``"pmedm_latentview_k1"`` -> ``("latentview", "A", 1.0)`` (κ in α's place)."""
+    base, _, fit_set = name.partition("@")
+    fit_set = fit_set or "A"
+    if fit_set not in ("A", "B"):
+        raise ValueError(f"unknown table set in {name!r}")
+    if base in ("none", "pmedm"):
+        return base, fit_set, None
+    if base.startswith("pmedm_latentview_k"):
+        return "latentview", fit_set, float(base[len("pmedm_latentview_k"):])
+    variant, alpha = base.rsplit("_a", 1)
+    if variant not in VARIANTS:
+        raise ValueError(f"unknown variant in {name!r}")
+    return variant, fit_set, float(alpha)
 
 
 def run_region(region_id: str) -> str:
@@ -75,59 +127,76 @@ def run_region(region_id: str) -> str:
     out.mkdir(parents=True, exist_ok=True)
     done_path = out / "done.json"
     done = set(json.loads(done_path.read_text())) if done_path.exists() else set()
-    wanted = model_names(args.alpha, args.variants, not args.no_pmedm)
+    wanted = args.models
     todo = [m for m in wanted if m not in done]
     if not todo:
         logger.info("region %s: all models done, skipped", region_id)
         return region_id
 
-    problem = build_region(data, region, args.set)
-    inputs = problem.inputs
-    sigma = area_sigma(inputs, sigma_alpha=args.sigma_alpha, prior_sd=args.prior_sd)
-    se_cells = np.sqrt(inputs.sigma_v)
-    H_dec = s["features"].F[problem.units]
+    sets = s["sets"]
+    problems = {k: build_region(data, region, tables=sets[k]) for k in ("A", "B")}
+    inputs_a = problems["A"].inputs
+    sigmas = {k: area_sigma(pr.inputs, sigma_alpha=args.sigma_alpha, prior_sd=args.prior_sd)
+              for k, pr in problems.items()}
+    units = problems["A"].units
+    H_dec = s["features"].F[units]
     names_dec, binary_dec = s["features"].columns, s["features"].binary
-    shares, share_names = race_composition(data, problem.units)
-    logger.info("region %s: %d zones, %s units, %d cells", region_id, inputs.n_zones,
-                f"{inputs.n_units:,}", len(problem.cells))
+    shares, share_names = race_composition(data, units)
+    logger.info("region %s: %d zones, %s units, %d cells in A, %d in B", region_id,
+                inputs_a.n_zones, f"{inputs_a.n_units:,}", len(problems["A"].cells),
+                len(problems["B"].cells))
 
-    start = time.perf_counter()
-    pmedm = solve_map(inputs, alpha=args.sigma_alpha, taper=None,
-                      hierarchy=f"none+prior{args.prior_sd:g}", max_iter=200)
-    pmedm_seconds = time.perf_counter() - start
+    fit_sets = sorted({parse_model(m)[1] for m in todo})
+    pmedm, pmedm_seconds = {}, {}
+    for k in fit_sets:
+        t0 = time.perf_counter()
+        pmedm[k] = solve_map(problems[k].inputs, alpha=args.sigma_alpha, taper=None,
+                             hierarchy=f"none+prior{args.prior_sd:g}", max_iter=200)
+        pmedm_seconds[k] = time.perf_counter() - t0
 
-    frames = {k: [] for k in ("scores", "rare", "misfit", "spread", "summary", "fits")}
+    frames = {k: [] for k in ("scores", "rare", "misfit", "spread", "summary", "fits", "transfer")}
     for model in todo:
+        variant, fit_set, alpha = parse_model(model)
+        problem, sigma = problems[fit_set], sigmas[fit_set]
+        inputs = problem.inputs
+        other = "B" if fit_set == "A" else "A"
         start = time.perf_counter()
-        info = {"region": region_id, "model": model}
-        if model == "none":
+        info = {"region": region_id, "model": model, "fit_set": fit_set}
+        if variant == "none":
             p = inputs.q
             info.update(converged=True, iterations=0)
-        elif model == "pmedm":
-            p = pmedm.W / inputs.N
-            info.update(converged=bool(pmedm.converged), iterations=int(pmedm.n_iter),
-                        objective=float(pmedm.objective))
-            start -= pmedm_seconds
+        elif variant == "pmedm":
+            p = pmedm[fit_set].W / inputs.N
+            info.update(converged=bool(pmedm[fit_set].converged),
+                        iterations=int(pmedm[fit_set].n_iter),
+                        objective=float(pmedm[fit_set].objective))
+            start -= pmedm_seconds[fit_set]
+        elif variant == "latentview":
+            view_inputs = latent_view_inputs(problem, s["views"][fit_set], s["features_all"][units],
+                                             kappa=alpha)
+            res = solve_map(view_inputs, alpha=args.sigma_alpha, taper=None,
+                            hierarchy=f"none+prior{args.prior_sd:g}", max_iter=200)
+            p = res.W / inputs.N
+            info.update(converged=bool(res.converged), iterations=int(res.n_iter),
+                        objective=float(res.objective), kappa=alpha)
         else:
-            variant, alpha = model.rsplit("_a", 1)
-            alpha = float(alpha)
+            shared = "features" if variant.startswith("lonly") else "x"
             if variant == "intercepts":
                 H, binary, names = np.zeros((inputs.n_units, 0)), np.zeros(0, bool), []
-            elif variant == "latent":
+            elif variant in ("latent", "lonly"):
                 H, binary, names = H_dec, binary_dec, names_dec
-            elif variant == "latent_race":
+            else:
                 H = np.column_stack([H_dec, shares])
                 binary = np.concatenate([binary_dec, np.zeros(shares.shape[1], bool)])
                 names = [*names_dec, *share_names]
-            else:
-                raise ValueError(f"unknown variant {variant!r}")
             m = LatentModel(inputs, sigma, H, binary, zone_weight=problem.zone_weight,
                             alpha=alpha, tau_theta=args.tau_theta,
-                            tau_intercept=args.tau_intercept, names=names)
+                            tau_intercept=args.tau_intercept, names=names,
+                            shared=shared, tau_shared=args.tau_shared)
             # Two starts, the better kept: the objective is not convex.
             fits = {
                 "zero": m.fit(solver=args.solver, label=f"region {region_id} {model} from 0"),
-                "pmedm": m.fit(solver=args.solver, init=m.project(pmedm.W / inputs.N),
+                "pmedm": m.fit(solver=args.solver, init=m.project(pmedm[fit_set].W / inputs.N),
                                label=f"region {region_id} {model} from PMEDM"),
             }
             best = min(fits, key=lambda k: fits[k].objective)
@@ -141,10 +210,15 @@ def run_region(region_id: str) -> str:
                         **{f"part_{k}": v for k, v in fit.parts.items()})
             np.savez_compressed(out / f"theta_{model}.npz", theta=fit.theta, lam=fit.lam,
                                 features=np.array(fit.feature_names, dtype=object),
+                                spread=m.feature_spread, shared=np.array(m.shared),
                                 zones=np.array(region.pumas, dtype=object))
         info["seconds"] = time.perf_counter() - start
+        se_cells = np.sqrt(inputs.sigma_v)
         scored = score_region(data, problem, p, model, se_cells)
+        scored["transfer"] = transfer_misfit(problems[other], p, model, fit_set, other)
         for k, v in scored.items():
+            if "fit_set" not in v:
+                v["fit_set"] = fit_set
             frames[k].append(v)
         frames["fits"].append(pd.DataFrame([info]))
         logger.info("region %s %s: allocation accuracy %.3f, %.1fs", region_id, model,
@@ -170,16 +244,15 @@ def main() -> None:
     parser.add_argument("--regions", required=True, type=Path)
     parser.add_argument("--run", required=True, type=Path, help="stage 1 run directory (φ)")
     parser.add_argument("--out", required=True, type=Path)
-    parser.add_argument("--alpha", type=float, nargs="+", default=[0.03, 0.1, 0.3])
-    parser.add_argument("--variants", nargs="+", default=["intercepts", "latent", "latent_race"],
-                        choices=["intercepts", "latent", "latent_race"])
-    parser.add_argument("--no-pmedm", action="store_true", help="skip today's PMEDM")
+    parser.add_argument("--models", nargs="+", default=list(DEFAULT_MODELS),
+                        help="models to fit (see the module docstring)")
     parser.add_argument("--region", nargs="+", default=None, help="subset of region ids")
-    parser.add_argument("--set", default="S1", help="constraint set of the check (default S1)")
     parser.add_argument("--sigma-alpha", type=float, default=0.01)
     parser.add_argument("--prior-sd", type=float, default=3.0)
     parser.add_argument("--tau-theta", type=float, default=3.0)
     parser.add_argument("--tau-intercept", type=float, default=3.0)
+    parser.add_argument("--tau-shared", type=float, default=3.0,
+                        help="prior sd of the latent-only model's area-level coefficients")
     parser.add_argument("--solver", default="auto", choices=["auto", "newton", "gn", "lbfgs"])
     parser.add_argument("--decoder-attributes", nargs="+", default=list(DECODER_ATTRIBUTES))
     parser.add_argument("--workers", type=int, default=1)
@@ -199,7 +272,25 @@ def main() -> None:
         phi, columns, binary = load_phi(args.run, data.units.index)
         features = decoder_features(args.run, phi, columns, binary, data.weight,
                                     tuple(args.decoder_attributes))
-    _SHARED.update(data=data, args=args, regions=regions, features=features)
+    for m in args.models:
+        parse_model(m)
+    sets = transfer_sets(data)
+    logger.info("table set A: %s", ", ".join(sets["A"]))
+    logger.info("table set B: %s", ", ".join(sets["B"]))
+    views, features_all = {}, None
+    if any(parse_model(m)[0] == "latentview" for m in args.models):
+        with stage("latent views of table sets A and B"):
+            features_all = decoder_features(args.run, phi, columns, binary, data.weight, "all").F
+            r2 = []
+            for k in ("A", "B"):
+                views[k] = fit_views(data, sets[k], features_all)
+                r2.append(views[k].r2.assign(table_set=k))
+                logger.info("views of set %s: R² by table %s", k, ", ".join(
+                    f"{t} {v:.2f}" for t, v in zip(views[k].r2["table"], views[k].r2["r2"])))
+            write_text(args.out / "views_r2.csv",
+                       pd.concat(r2, ignore_index=True).to_csv(index=False))
+    _SHARED.update(data=data, args=args, regions=regions, features=features, sets=sets,
+                   views=views, features_all=features_all)
     if args.workers > 1 and len(chosen) > 1:
         context = multiprocessing.get_context("fork")
         with ProcessPoolExecutor(max_workers=args.workers, mp_context=context) as pool:

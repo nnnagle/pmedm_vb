@@ -26,7 +26,23 @@ For a region with PUMAs P_1..P_Z:
   shrinkage ``alpha`` (``sigma_alpha``) and multiplier prior apply on top
   (:func:`~pmedm_vb.latent.model.area_sigma`).
 * **Zone weights** for the sum-to-zero constraint: each zone's observed unit
-  total (its ``unit_type`` cells).
+  total (its ``unit_type`` cells), computed from the zone's own records
+  whichever table set is fitted -- a zone's population is known in practice.
+
+**Transfer table sets** (:func:`transfer_sets`). Two disjoint sets of
+tables, one fitted and the other predicted:
+
+* **A** -- the check's S1 set: the one-way margins of S0 plus the PMEDM's
+  remaining constraint tables.
+* **B** -- the added tables of the check's S2 set (S2 less S1) that bring in
+  at least one attribute A does not contain
+  (:data:`~pmedm_vb.embed.attribute_targets.TABLE_ATTRIBUTES`). Added tables
+  that only cross A's attributes with each other (household type by size,
+  tenure by size, tenure by householder age, age of householder by income,
+  employment status) are left out: predicting them from A tests A's
+  crosses, not transfer to new attributes. B still shares some attributes
+  with A through crosses (tenure by year built, say), which is what a new
+  table set looks like in practice.
 """
 
 from __future__ import annotations
@@ -42,6 +58,7 @@ import scipy.sparse as sp
 from pmedm_vb.assemble.design import design_weights
 from pmedm_vb.assemble.inputs import PMEDMInputs
 from pmedm_vb.data.variance import SDR_FACTOR
+from pmedm_vb.embed.attribute_targets import ATTRIBUTE_TARGETS, TABLE_ATTRIBUTES
 from pmedm_vb.embed.puma_check import CheckData
 
 
@@ -69,8 +86,30 @@ class RegionProblem:
     cells: list[str]           # constraint cell names, X_B's columns
 
 
-def build_region(data: CheckData, region: Region, set_name: str = "S1") -> RegionProblem:
-    tables = data.sets.constraint[set_name]
+def _attributes(table: str) -> set[str]:
+    if table == "unit_type":
+        return set()
+    if table in ATTRIBUTE_TARGETS:
+        return {table}
+    return set(TABLE_ATTRIBUTES[table])
+
+
+def transfer_sets(data: CheckData) -> dict[str, tuple[str, ...]]:
+    """``{"A": S1 tables, "B": added tables with an attribute outside A}``."""
+    a = tuple(data.sets.constraint["S1"])
+    a_attributes = set().union(*(_attributes(t) for t in a))
+    added = [t for t in data.sets.constraint["S2"] if t not in a]
+    b = tuple(t for t in added if _attributes(t) - a_attributes)
+    if set(a) & set(b):
+        raise ValueError("table sets A and B overlap")
+    return {"A": a, "B": b}
+
+
+def build_region(data: CheckData, region: Region, set_name: str = "S1",
+                 tables: tuple[str, ...] | None = None) -> RegionProblem:
+    """A region's problem for a constraint set of the check (``set_name``) or
+    an explicit list of tables (``tables``)."""
+    tables = tuple(tables) if tables is not None else data.sets.constraint[set_name]
     pumas = list(region.pumas)
     in_region = np.isin(data.puma, pumas)
     units = np.flatnonzero(in_region)
@@ -101,9 +140,9 @@ def build_region(data: CheckData, region: Region, set_name: str = "S1") -> Regio
     floor = np.tile(np.square(floors), C)
     sigma_v = np.maximum(replicate_var, floor)
 
-    unit_names = [c.name for c in data.tables["unit_type"].categories]
-    unit_cols = [cells.index(f"unit_type:{c}") for c in unit_names]
-    zone_weight = Y_B[:, unit_cols].sum(axis=1)
+    # Every unit has exactly one unit type, so this is the zone's unit total
+    # (the sum of its unit_type cells), whichever tables are fitted.
+    zone_weight = np.bincount(zone_of_unit, weights=weight, minlength=Z)
 
     frame = pd.DataFrame({
         "SERIALNO": data.units.index[units].astype(str),
