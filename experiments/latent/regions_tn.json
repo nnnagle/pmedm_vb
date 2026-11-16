@@ -1,0 +1,240 @@
+{
+  "state": "47",
+  "puma_vintage": 2020,
+  "boundaries": "tl_2024_47_puma20.zip",
+  "regions": [
+    {
+      "id": "memphis_core",
+      "name": "Memphis core",
+      "pumas": [
+        "4702501",
+        "4702502",
+        "4702507",
+        "4702508"
+      ],
+      "puma_names": [
+        "Memphis City (Central Riverside) PUMA",
+        "Memphis City (Central Midtown) PUMA",
+        "Memphis City (Southeast) PUMA",
+        "Memphis City (Southwest) PUMA"
+      ],
+      "rationale": "Memphis city PUMAs: Central Riverside, Central Midtown, Southeast, Southwest."
+    },
+    {
+      "id": "memphis_ring",
+      "name": "Memphis suburbs and Tipton-Fayette",
+      "pumas": [
+        "4702503",
+        "4702504",
+        "4702505",
+        "4702506",
+        "4702600"
+      ],
+      "puma_names": [
+        "Memphis (North) & Bartlett (Southwest) cities PUMA",
+        "Shelby County (North)--Bartlett (North & East), Millington & Lakeland cities PUMA",
+        "Shelby County (East)--Memphis city (East) & Arlington town (South) PUMA",
+        "Shelby County (Southeast)--Collierville town & Germantown city PUMA",
+        "Tipton & Fayette Counties PUMA"
+      ],
+      "rationale": "North and east Shelby (Bartlett, Millington, Lakeland, Arlington, Collierville, Germantown) with the Tipton and Fayette counties PUMA."
+    },
+    {
+      "id": "nashville_core",
+      "name": "Nashville-Davidson",
+      "pumas": [
+        "4702401",
+        "4702402",
+        "4702403",
+        "4702404",
+        "4702405",
+        "4702406"
+      ],
+      "puma_names": [
+        "Nashville/Davidson County--Downtown, East & North Nashville PUMA",
+        "Nashville/Davidson County--South & Southeast Nashville PUMA",
+        "Nashville/Davidson County--Donelson, Hermitage & Old Hickory PUMA",
+        "Nashville/Davidson County (North) PUMA",
+        "Nashville/Davidson County--Antioch, South Nashville PUMA",
+        "Nashville/Davidson County--West Nashville, Green Hills & Bellevue PUMA"
+      ],
+      "rationale": "The six Nashville/Davidson County PUMAs."
+    },
+    {
+      "id": "nashville_south_west",
+      "name": "Williamson, Maury and Dickson",
+      "pumas": [
+        "4702101",
+        "4702102",
+        "4702200",
+        "4702300"
+      ],
+      "puma_names": [
+        "Williamson County--Brentwood & Franklin cities, Nolensville town (west) PUMA",
+        "Williamson County--Thompson Station town & Fairview city PUMA",
+        "Maury County--Columbia & Spring Hill cities PUMA",
+        "Dickson, Cheatham & Hickman Counties PUMA"
+      ],
+      "rationale": "Southern and western suburbs: Williamson County (2), Maury County, and Dickson-Cheatham-Hickman."
+    },
+    {
+      "id": "nashville_east",
+      "name": "Rutherford, Wilson and Sumner (Hendersonville)",
+      "pumas": [
+        "4702001",
+        "4702002",
+        "4702003",
+        "4701900",
+        "4700501"
+      ],
+      "puma_names": [
+        "Murfreesboro city PUMA",
+        "Rutherford County--Smyrna town & La Vergne city PUMA",
+        "Rutherford County (North, East and South) PUMA",
+        "Wilson County--Lebanon & Mount Juliet cities PUMA",
+        "Hendersonville, Gallatin & Goodlettsville cities PUMA"
+      ],
+      "rationale": "Eastern and northern suburbs: Rutherford County (3), Wilson County, and Hendersonville-Gallatin."
+    },
+    {
+      "id": "clarksville",
+      "name": "Clarksville and northwest Middle Tennessee",
+      "pumas": [
+        "4700301",
+        "4700302",
+        "4700401",
+        "4700200"
+      ],
+      "puma_names": [
+        "Montgomery County--Clarksville city (South) PUMA",
+        "Clarksville city (North) PUMA",
+        "Robertson & Sumner Counties--Springfield & Portland cities PUMA",
+        "Henry, Carol & Humphreys Counties--Paris city PUMA"
+      ],
+      "rationale": "Montgomery County (2) with Robertson-Sumner (Springfield, Portland) and Henry-Carroll-Humphreys."
+    },
+    {
+      "id": "knoxville_core",
+      "name": "Knox County",
+      "pumas": [
+        "4701501",
+        "4701502",
+        "4701503",
+        "4701504"
+      ],
+      "puma_names": [
+        "Knoxville city (Central) PUMA",
+        "Knox County (Southwest) PUMA",
+        "Knox County (Northwest) PUMA",
+        "Knox County (North, East & South) PUMA"
+      ],
+      "rationale": "The four Knox County PUMAs."
+    },
+    {
+      "id": "knoxville_ring",
+      "name": "Knoxville ring",
+      "pumas": [
+        "4701600",
+        "4701700",
+        "4703700",
+        "4701400"
+      ],
+      "puma_names": [
+        "Blount County--Maryville & Alcoa cities PUMA",
+        "Anderson, Roane & Morgan Counties--Oak Ridge city PUMA",
+        "Loudon & Monroe Counties--Lenoir City PUMA",
+        "Sevier & Cocke Counties--Sevierville city PUMA"
+      ],
+      "rationale": "Blount, Anderson-Roane-Morgan, Loudon-Monroe and Sevier-Cocke."
+    },
+    {
+      "id": "chattanooga",
+      "name": "Chattanooga and southeast",
+      "pumas": [
+        "4703401",
+        "4703402",
+        "4703403",
+        "4703600",
+        "4703500"
+      ],
+      "puma_names": [
+        "Chattanooga city (South & Central) PUMA",
+        "Hamilton County (South)--Chattanooga (North) & Red Bank cities PUMA",
+        "Hamilton County (North)--Soddy-Daisy city PUMA",
+        "Bradley & Polk Counties--Cleveland city PUMA",
+        "McMinn, Rhea & Bledsoe Counties--Athens city PUMA"
+      ],
+      "rationale": "Hamilton County (3) with Bradley-Polk (Cleveland) and McMinn-Rhea-Bledsoe."
+    },
+    {
+      "id": "northeast",
+      "name": "Tri-Cities and Morristown",
+      "pumas": [
+        "4701000",
+        "4701101",
+        "4701201",
+        "4700900",
+        "4701300"
+      ],
+      "puma_names": [
+        "Sullivan County--Kingsport & Bristol cities PUMA",
+        "Washington (South) & Carter Counties--Elizabethton city PUMA",
+        "Washington County--Johnson City PUMA",
+        "Greene & Hawkins Counties--Greenville town PUMA",
+        "Hamblen, Jefferson & Grainger Counties--Morristown city PUMA"
+      ],
+      "rationale": "Sullivan, Washington (2) and Greene-Hawkins, with Hamblen-Jefferson-Grainger."
+    },
+    {
+      "id": "west",
+      "name": "West Tennessee",
+      "pumas": [
+        "4700100",
+        "4702700",
+        "4702800",
+        "4702900"
+      ],
+      "puma_names": [
+        "Dyer, Weakely and Obion Counties--Dyersburg, Union City and Martin cities PUMA",
+        "Gibson, Lauderdale & Haywood Counties--Brownsville city PUMA",
+        "Madison & Chester Counties--Jackson city PUMA",
+        "Henderson, Hardin & McNairy Counties PUMA"
+      ],
+      "rationale": "Dyer-Weakley-Obion, Gibson-Lauderdale-Haywood, Madison-Chester (Jackson) and Henderson-Hardin-McNairy."
+    },
+    {
+      "id": "upper_cumberland",
+      "name": "Upper Cumberland and northern Plateau",
+      "pumas": [
+        "4700600",
+        "4700700",
+        "4701800",
+        "4700800"
+      ],
+      "puma_names": [
+        "Macon, Dekalb & Cannon Counties PUMA",
+        "Putnam & Overton Counties--Cookeville city PUMA",
+        "Cumberland, White & Fentress Counties--Crossville city PUMA",
+        "Campbell, Claiborne & Scott Counties PUMA"
+      ],
+      "rationale": "Macon-DeKalb-Cannon, Putnam-Overton, Cumberland-White-Fentress and Campbell-Claiborne-Scott."
+    },
+    {
+      "id": "south_central",
+      "name": "South Central",
+      "pumas": [
+        "4703000",
+        "4703100",
+        "4703200",
+        "4703300"
+      ],
+      "puma_names": [
+        "Lawrence, Giles & Wayne Counties--Lawrenceburg city PUMA",
+        "Bedford, Lincoln & Marshall Counties--Shelbyville & Lewisburg cities PUMA",
+        "Coffee, Franklin & Moore Counties--Tullahoma & Manchester cities PUMA",
+        "Warren, Marion & Sequatchie Counties--McMinnville city PUMA"
+      ],
+      "rationale": "Lawrence-Giles-Wayne, Bedford-Lincoln-Marshall, Coffee-Franklin-Moore and Warren-Marion-Sequatchie."
+    }
+  ]
+}
