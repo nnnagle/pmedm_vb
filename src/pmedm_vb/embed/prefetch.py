@@ -15,7 +15,9 @@ together:
 * the API cell labels of every published table (no key needed);
 * with ``values=True``, every published table's estimates and MOEs at PUMA
   level from the API, which needs ``CENSUS_API_KEY`` -- these score the
-  leave-one-PUMA-out check.
+  leave-one-PUMA-out check;
+* the state's TIGER 2020 PUMA boundaries, for the PUMA cluster maps
+  (:mod:`pmedm_vb.embed.puma_map`).
 
 Every table and attribute is then built once, so a builder that needs
 something not fetched fails here rather than on a compute node.
@@ -30,6 +32,7 @@ from pmedm_vb.data.acs_api import download_labels, download_values
 from pmedm_vb.data.pums import data_dictionary, download_pums
 from pmedm_vb.data.variance import download_replicates
 from pmedm_vb.embed.config import EmbedConfig, resolve
+from pmedm_vb.embed.puma_map import fetch_boundaries
 from pmedm_vb.progress import stage
 
 #: Geography of the API values fetched for scoring.
@@ -59,6 +62,7 @@ def prefetch_embedding(config: EmbedConfig, *, values: bool = True) -> list[Path
         if values:
             for table in tables:
                 paths.append(download_values(area, table, geography=SCORING_GEOGRAPHY))
+        paths.append(fetch_boundaries(area))
         built = resolve(area, (*config.ids, *config.tables))
         step.detail = f"{len(paths)} files, {len(built)} tables and attributes built"
     return paths
