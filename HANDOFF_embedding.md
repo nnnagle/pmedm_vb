@@ -14,6 +14,9 @@ runs, sim04). `main` does not.
 - Codes mainly in Python but is newer to it; a very experienced R programmer.
 - **Clarify before writing code.** Propose a plan and ask about real choices.
 - **No test scripts, example scripts or documentation unless asked.**
+- **When a request isn't advisable, say so and why, and stop there:** "That's
+  not advisable because X; if you want to proceed, we can try to do it
+  safely." Don't give the instructions for doing it in the same breath.
 - **No unverified claims as fact.** Say when something is derived, assumed, or
   only tested on stand-ins. Look literature up before citing it; mark
   from-memory citations as such.
