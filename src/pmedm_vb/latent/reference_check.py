@@ -30,12 +30,13 @@ observed the held-out fold's weighted share.
   the held-out fold), and the Kish effective sample size of ``q^P`` within each
   group (weights ``q^P_i t_i``). The step 1 groups (:data:`RARE_STEP1`) drive
   the decisions; the check's other rare groups are reported too. Pooled over
-  PUMAs: the ratio of predicted to held-out, and the RMS over PUMAs of the log
-  ratio, each PUMA's prediction and truth summed over its folds (the §6
-  criterion). Summed over folds, the own-records baseline reproduces the
-  PUMA's own total almost exactly by construction (each record is in four
-  training sets), so the RMS over (PUMA, fold) pairs of the per-fold log ratio
-  is reported beside it, which keeps the held-out noise.
+  PUMAs: the ratio of predicted to held-out; the RMS over (PUMA, fold) pairs
+  of the per-fold log ratio (the §6 criterion, plan version 2), which keeps
+  the held-out noise; and, reported beside it, the RMS over PUMAs of the log
+  ratio with each PUMA's prediction and truth summed over its folds. Summed
+  over folds, the own-records baseline reproduces the PUMA's own total almost
+  exactly by construction (each record is in four training sets), which is
+  why that version is not the criterion.
 
 **Pooling and decisions** (:func:`pool_settings`, :func:`decide`): see
 ``PLAN_latent_step1.md`` §6 and the docstrings.
@@ -297,8 +298,8 @@ def decide(settings: pd.DataFrame) -> tuple[dict, list[str]]:
     """The §6 decision rules on the pooled settings (:func:`pool_settings`).
 
     * **h:** each basis's best (γ, σ) is the one with the lowest held-out RMS
-      z over all scored cells; at it, RMS z and the rare groups' RMS log ratio
-      are compared across bases, and the basis with the smallest K among those
+      z over all scored cells; at it, RMS z and the rare groups' per-fold RMS
+      log ratio (``rms_log_ratio_fold_rare``) are compared across bases, and the basis with the smallest K among those
       within 10% of the best on both is chosen. If none is within 10% on
       both, the basis with the smallest larger relative excess is taken and
       flagged.
@@ -319,9 +320,9 @@ def decide(settings: pd.DataFrame) -> tuple[dict, list[str]]:
     floor_row = base[base["gamma"] == 0]
     floor = float(floor_row["rms_z_all"].iloc[0]) if len(floor_row) else np.nan
     best = grid.loc[grid.groupby("basis")["rms_z_all"].idxmin()].set_index("basis")
-    z0, r0 = best["rms_z_all"].min(), best["rms_log_ratio_rare"].min()
+    z0, r0 = best["rms_z_all"].min(), best["rms_log_ratio_fold_rare"].min()
     best["rel_z"] = best["rms_z_all"] / z0 - 1
-    best["rel_rare"] = best["rms_log_ratio_rare"] / r0 - 1
+    best["rel_rare"] = best["rms_log_ratio_fold_rare"] / r0 - 1
     eligible = best[(best["rel_z"] <= WITHIN) & (best["rel_rare"] <= WITHIN)]
     flags = []
     if len(eligible):
@@ -332,7 +333,8 @@ def decide(settings: pd.DataFrame) -> tuple[dict, list[str]]:
         flags.append(f"no basis is within 10% of the best on both criteria; took {h}, "
                      "the smallest worse excess (review)")
     lines.append("Choosing h: each basis at its best (gamma, sigma) by RMS z over all cells")
-    show = best[["K", "gamma", "sigma", "rms_z_all", "rms_log_ratio_rare", "rel_z", "rel_rare"]]
+    show = best[["K", "gamma", "sigma", "rms_z_all", "rms_log_ratio_fold_rare",
+                 "rms_log_ratio_rare", "rel_z", "rel_rare"]]
     lines.append(show.round(4).to_string())
     lines.append(f"  within 10% on both: {sorted(eligible.index.tolist()) or 'none'}; "
                  f"chosen h = {h} (smallest K)")
@@ -349,8 +351,8 @@ def decide(settings: pd.DataFrame) -> tuple[dict, list[str]]:
     sigma = float(per_gamma.loc[gamma, "sigma"])
     sigmas = sorted(sub["sigma"].unique())
     lines += ["", f"Choosing gamma and sigma for h = {h}: best sigma per gamma",
-              per_gamma[["sigma", "rms_z_all", "rms_log_ratio_rare", "ess",
-                         "share_outside"]].round(4).to_string(),
+              per_gamma[["sigma", "rms_z_all", "rms_log_ratio_fold_rare", "rms_log_ratio_rare",
+                         "ess", "share_outside"]].round(4).to_string(),
               f"  best gamma {per_gamma['rms_z_all'].idxmin():g} (RMS z {zbest:.4f}); largest "
               f"within 10%: gamma = {gamma:g}, sigma = {sigma:g}"]
     if gamma == 0:

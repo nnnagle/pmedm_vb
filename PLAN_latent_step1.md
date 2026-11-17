@@ -7,6 +7,7 @@
 > | version | date | change |
 > |---|---|---|
 > | 1 | 2026-11-17 | approved as drafted; §9 items accepted as proposed |
+> | 2 | 2026-11-17 | §4.6 and §6: the rare-group criterion is the RMS log ratio over (PUMA, fold) pairs, not over PUMAs with folds summed. Summed over folds, the own-records baseline ($\gamma = 0$) reproduces each PUMA's total almost exactly by construction (every record is in four training sets), so that version hides its fold noise. The summed version is still reported. |
 
 ## 1. Scope and traceability
 
@@ -151,8 +152,10 @@ from the held-out fold.
     sampled case). Summarized as RMS $z$ and the share with $|z| \le 1$.
   - TVD and log-odds-ratio error for two-way tables
     (`embed.puma_check.score_tables`).
-  - Rare groups: the ratio of predicted to held-out, pooled over PUMAs,
-    and the RMS log ratio across PUMAs (`embed.puma_check.rare_groups`).
+  - Rare groups: the ratio of predicted to held-out, pooled over PUMAs;
+    the RMS log ratio over (PUMA, fold) pairs, each held-out fold scored
+    on its own (the criterion in §6); and, reported beside it, the RMS log
+    ratio across PUMAs with folds summed (`embed.puma_check.rare_groups`).
   - Quadrature: Kish effective sample size overall and within each rare
     group.
 * **Secondary, optional:** $q^P$ fitted on all of a PUMA's records,
@@ -176,8 +179,9 @@ from the held-out fold.
 The thresholds are proposals to confirm before the run.
 
 * **Choosing $h$:** at each $h$'s best $(\gamma, \sigma_\theta)$, rank by
-  held-out RMS $z$ over all scored cells, and by RMS log ratio over rare
-  groups. Choose the smallest $K$ within 10% of the best on both.
+  held-out RMS $z$ over all scored cells, and by the rare groups' RMS log
+  ratio over (PUMA, fold) pairs. Choose the smallest $K$ within 10% of the
+  best on both.
 * **Choosing $\gamma$:** for the chosen $h$, the largest $\gamma$ whose RMS
   $z$ is within 10% of the best $\gamma$'s. This prefers variety at equal
   accuracy.
