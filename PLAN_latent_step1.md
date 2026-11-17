@@ -1,9 +1,12 @@
 # Plan, step 1: locating each PUMA in type space
 
-> **Status: draft for review.** Lower-level plan for step 1 of
-> `PLAN_latent.md` (version 1), for the model in `MODEL_latent.qmd`
-> (version 1). Once approved it is fixed like the parent plan, with a
-> change log.
+> **Status: fixed.** Lower-level plan for step 1 of `PLAN_latent.md`
+> (version 1), for the model in `MODEL_latent.qmd` (version 1). Change it
+> only when the plan itself changes, and record each change below.
+>
+> | version | date | change |
+> |---|---|---|
+> | 1 | 2026-11-17 | approved as drafted; §9 items accepted as proposed |
 
 ## 1. Scope and traceability
 
@@ -210,8 +213,9 @@ The thresholds are proposals to confirm before the run.
 * `summary.txt`: per setting, the metrics in §4.6, the baselines, and the
   decisions under §6.
 
-## 9. Open for review
+## 9. Resolved at approval
 
-1. The decision thresholds in §6.
+1. The decision thresholds in §6, as proposed.
 2. 5 folds, stratified by unit type.
-3. Whether to run the secondary check against published PUMA tables.
+3. The secondary check against published PUMA tables is implemented as an
+   option and run when the cached tables are available.
