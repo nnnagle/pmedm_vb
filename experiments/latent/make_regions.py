@@ -24,13 +24,13 @@ from __future__ import annotations
 import argparse
 import json
 import zipfile
-from itertools import combinations
 from pathlib import Path
 
 import numpy as np
 
 from pmedm_vb.config import StudyArea
 from pmedm_vb.embed.puma_map import PALETTE, _read_dbf, cached_boundaries, read_boundaries
+from pmedm_vb.latent.geography import adjacency
 
 #: (id, name, PUMA GEOIDs, rationale). Metro cores are kept apart from their
 #: suburban rings, as block groups of different character sit within one PUMA;
@@ -85,18 +85,6 @@ REGIONS = (
 )
 
 MIN_SIZE, MAX_SIZE = 3, 6
-
-
-def adjacency(rings: dict[str, list[np.ndarray]], shared: int = 2) -> dict[str, set[str]]:
-    """PUMAs whose boundary rings share at least ``shared`` vertices."""
-    vertices = {
-        g: {tuple(v) for ring in r for v in np.round(ring, 7)} for g, r in rings.items()}
-    out = {g: set() for g in rings}
-    for a, b in combinations(rings, 2):
-        if len(vertices[a] & vertices[b]) >= shared:
-            out[a].add(b)
-            out[b].add(a)
-    return out
 
 
 def connected(members: tuple[str, ...], adjacent: dict[str, set[str]]) -> bool:
