@@ -1,13 +1,14 @@
 # Plan, step 2: the collapsed-likelihood engine and the information diagnostic
 
 > **Status: fixed.** Lower-level plan for step 2 of `PLAN_latent.md`
-> (version 1), for the model in `MODEL_latent.qmd` (version 1), building on
+> (version 1), for the model in `MODEL_latent.qmd` (version 2), building on
 > step 1 (`STEP1_latent.qmd`; run of record `latent/step1_sigma`). Change it
 > only when the plan itself changes, and record each change below.
 >
 > | version | date | change |
 > |---|---|---|
 > | 1 | 2026-11-18 | approved as drafted; §9 items accepted as proposed |
+> | 2 | 2026-11-18 | follows model version 2: $\Sigma$ = untapered survey covariance ($\alpha = 0.01$, zero-count floor) plus $\omega^2 I$. Version 1 wrongly described the tract taper as the paper baseline; the taper is dropped. §3: $S$ is block diagonal by tract plus one global low-rank term, handled exactly by the Woodbury identity; the information couples block groups across tracts. |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -35,7 +36,7 @@ Out of scope: fitting $u_b$ or $\tau$ (B3, step 3), the conditional PMEDM
 **PUMAs:** 4701502 first, then the four test PUMAs 4703000, 4702300,
 4702900 and 4701900.
 
-## 2. Model quantities (from `MODEL_latent.qmd`, version 1)
+## 2. Model quantities (from `MODEL_latent.qmd`, version 2)
 
 * Block superpopulation $p_{bi} = q_i\gamma^{d(P,i)}
   \exp\{(\theta_P + u_b)'h(z_i) - A_P(\theta_P + u_b)\}$, with $h$ =
@@ -46,29 +47,45 @@ Out of scope: fitting $u_b$ or $\tau$ (B3, step 3), the conditional PMEDM
   S = \Sigma + \sum_b N_b D_b T'(\mathrm{diag}\,p_b - p_b p_b')T D_b'.
   $$
 * Prior $u_b \mid \tau \sim \mathcal N(0, \tau^2 I_K)$.
+* Table covariance $\Sigma = \Sigma_{\mathrm{survey}} + \omega^2 I$,
+  $\omega = N_P/(n_P s)$, $s = 3$; $\Sigma_{\mathrm{survey}}$ untapered,
+  $\alpha = 0.01$, zero-count variance floor.
 
 $T$ is restricted to the constraint cells (block-group and tract), the
 cells that enter $Y$.
 
 ## 3. Analysis
 
-**$S$ is block diagonal by tract** (derived here, from the existing code's
-structure).
+**$S$ is block diagonal by tract plus one global low-rank term** (derived
+here, from the existing code's structure).
 
-* $\Sigma$ is used as in the paper baseline: `PMEDMInputs.sigma(alpha,
-  taper="tract")`. The replicate covariance is kept only within tracts, so
-  $\Sigma$ is block diagonal by tract (`assemble/sigma.py`, "Tapering").
+* $\Sigma_{\mathrm{survey}} = D + LL'$ (`assemble/sigma.py`): $D$ diagonal,
+  $L$ the scaled replicate deviations over every row, rank at most 80
+  (untapered, so $LL'$ couples all rows).
 * $D_b$ maps block $b$'s cells to its own block-group rows and its tract's
-  rows only. So the realization term is block diagonal by tract too.
-* Hence $S = \mathrm{blockdiag}_t(S_t)$, with $S_t$ covering one tract's rows
-  and its block groups' rows: about $J_T + n_t J_B$ rows (for 4701502,
-  $J_T = 489$, $J_B = 184$, so roughly $10^3$ per tract).
-* $S^{-1}$ and $\log\det S$ are then exact per-tract dense Cholesky
-  factorizations, about $10^9$ flops per tract, and the collapsed likelihood
-  is a sum over tracts. B2 needs no low-rank approximation.
+  rows only, so the realization term $R = \sum_b N_b D_b V_b D_b'$ is block
+  diagonal by tract.
+* Hence $S = B + LL'$ with $B = \mathrm{blockdiag}_t(B_t)$,
+  $B_t = D_t + \omega^2 I + R_t$, covering one tract's rows and its block
+  groups' rows: about $J_T + n_t J_B$ rows (for 4701502, $J_T = 489$,
+  $J_B = 184$, so roughly $10^3$ per tract).
+* Exactly, by the Woodbury identity and the matrix determinant lemma:
+  $$
+  S^{-1} = B^{-1} - B^{-1}L\,K^{-1}L'B^{-1},
+  \qquad K = I + L'B^{-1}L \;(\le 80\times 80),
+  $$
+  $$
+  \log\det S = \sum_t \log\det B_t + \log\det K.
+  $$
+  Per-tract dense Cholesky factorizations (about $10^9$ flops per tract)
+  plus one small $K$. The collapsed likelihood needs no approximation.
+* The block of $S^{-1}$ for tracts $t, t'$ is
+  $[S^{-1}]_{tt'} = \delta_{tt'} B_t^{-1} - (B_t^{-1}L_t)K^{-1}(B_{t'}^{-1}L_{t'})'$,
+  with $L_t$ the rows of $L$ in tract $t$.
 
 **The gradient of $\log\det S$ reduces to per-atom quadratic forms**
-(derived here). With $G_b = D_b' S_t^{-1} D_b$ and $\mu_b = T'p_b$,
+(derived here). With $G_b = D_b' [S^{-1}]_{tt} D_b$ ($t$ = block $b$'s
+tract) and $\mu_b = T'p_b$,
 
 $$
 \frac{\partial}{\partial u_b}\,\tfrac12\log\det S
@@ -85,9 +102,12 @@ the Jacobian of $m$ with respect to $u_b$ is $N_b D_b C$. The mean part of
 the Fisher information is
 
 $$
-I_{bb'} = N_b N_{b'}\, C' D_b' S_t^{-1} D_{b'}\, C
-\quad (b, b' \text{ in the same tract; zero otherwise}).
+I_{bb'} = N_b N_{b'}\, C' D_b' [S^{-1}]_{t t'} D_{b'}\, C
+\quad (t, t' \text{ the tracts of } b, b').
 $$
+
+Through $LL'$, block groups in different tracts share information (the
+low-rank part of $[S^{-1}]_{tt'}$).
 
 * It omits the information from $S$'s dependence on $u$, so it is a lower
   bound on the full Fisher information (both parts are positive
@@ -117,8 +137,11 @@ The diagnostic is reported at $\tau \in \{0.5, 1, 2\}\times\tau_{\mathrm{ref}}$.
 ### 4.1 Area inputs (A3, A4)
 
 * **$Y$, $\Sigma$, nesting:** from `build_puma` for the PUMA's constraint
-  tables (by import). $\Sigma$ = `sigma(alpha, taper="tract")` with the paper
-  baseline's $\alpha$.
+  tables (by import). $\Sigma_{\mathrm{survey}}$ =
+  `sigma(alpha=0.01, taper=None, variance_floor="zero")`; then
+  $\Sigma = \Sigma_{\mathrm{survey}} + \omega^2 I$ with
+  $\omega = N_P/(n_P s)$, $s = 3$, $N_P$ and $n_P$ the PUMA's units and own
+  records (as in the standard PMEDM's multiplier prior, `assemble/prior.py`).
 * **$T$ for the area:** step 1's statewide $T$, restricted to the
   constraint cells, with its columns mapped one to one onto `build_puma`'s
   $X_T$ and $X_B$ columns. Step 1 showed the rows agree exactly for
@@ -136,8 +159,8 @@ The diagnostic is reported at $\tau \in \{0.5, 1, 2\}\times\tau_{\mathrm{ref}}$.
 
 ### 4.2 Collapsed-likelihood engine (B2)
 
-* **Evaluate** $p_b$ for every block, $m$, the per-tract blocks $S_t$, their
-  Cholesky factors, the log-likelihood
+* **Evaluate** $p_b$ for every block, $m$, the per-tract blocks $B_t$, their
+  Cholesky factors, $K$, the log-likelihood
   $-\tfrac12(Y - m)'S^{-1}(Y - m) - \tfrac12\log\det S$, and its gradient
   with respect to $(\theta_P, U)$: the mean part through $C_b$ and the
   $\log\det$ part through §3's quadratic forms.
@@ -147,8 +170,8 @@ The diagnostic is reported at $\tau \in \{0.5, 1, 2\}\times\tau_{\mathrm{ref}}$.
   the log-likelihood; the gradient without the $\log\det$ term; the
   $\log\det$ term; peak memory.
 * **Checks (before ISAAC):**
-  - per-tract assembly of $S$ against a dense brute-force build on a small
-    set of tracts;
+  - assembly of $S$ ($B$ and $LL'$) against a dense brute-force build on a
+    small set of tracts;
   - solve and $\log\det$ against dense NumPy;
   - the full gradient, including the $\log\det$ term, against finite
     differences at a random $(\theta_P, U)$ near the reference;
@@ -158,15 +181,18 @@ The diagnostic is reported at $\tau \in \{0.5, 1, 2\}\times\tau_{\mathrm{ref}}$.
 
 At $u = 0$ for each PUMA:
 
-* $I_{bb}$ per block group and $I_t$ jointly per tract.
+* $I_{bb}$ per block group, $I_t$ jointly per tract, and the full $I$ for
+  the PUMA.
 * Per block group, at each $\tau$: $\mathrm{df}_b(\tau)$, the leading
   eigenvalues of $I_{bb}$, and the number above $\tau^{-2}$. Per tract: the
   joint df divided by the number of block groups, to show what tract rows
-  add.
+  add; and the PUMA's joint df divided by its number of block groups, to
+  show what the cross-tract coupling adds.
 * Share of prior variance removed for these functionals:
   - rare groups: AIAN, NH/PI and NH Asian shares; group quarters by type;
   - common: owner share, age 65+ share, households below poverty.
-* The diagonal of $S$ split into survey $\Sigma$ and realization variance, by
+* The diagonal of $S$ split into survey, model-gap ($\omega^2$) and
+  realization variance, by
   table and level. This checks the parent plan's expectation that survey
   error dominates by roughly the mean weight.
 

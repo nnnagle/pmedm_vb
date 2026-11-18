@@ -11,6 +11,7 @@ date: 2026-11-17
 > | version | date | change |
 > |---|---|---|
 > | 1 | 2026-11-17 | initial specification |
+> | 2 | 2026-11-18 | table covariance $\Sigma$ = survey covariance as in the standard PMEDM (untapered, $\alpha = 0.01$, zero-count variance floor) plus the model-gap term $\omega^2 I$, the standard PMEDM's multiplier prior in covariance form |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -83,8 +84,19 @@ $$
 * $d(P,i)$ is the distance (for example adjacency steps) from PUMA $P$ to
   atom $i$'s PUMA. $\gamma \in (0,1]$ lets atoms from nearby PUMAs count
   more; $\gamma = 1$ uses the full statewide variety.
-* $N_b$ is the number of units in area $b$, treated as known. $\Sigma$ is
-  the survey covariance (full, from replicate weights).
+* $N_b$ is the number of units in area $b$, treated as known.
+* $\Sigma$ is the table covariance, used everywhere below:
+  $$
+  \Sigma = \Sigma_{\mathrm{survey}} + \omega^2 I,
+  \qquad \omega = \frac{N_P}{n_P\, s}, \quad s = 3.
+  $$
+  - $\Sigma_{\mathrm{survey}}$ is the full replicate covariance as in the
+    standard PMEDM: untapered, shrinkage $\alpha = 0.01$, zero-count
+    variance floor (`PMEDMInputs.sigma`).
+  - $\omega^2 I$ is the **model-gap term**: the standard PMEDM's multiplier
+    prior (sd $s = 3$) in covariance form, with $N_P$ the PUMA's units and
+    $n_P$ its records. It recognizes that the model will never reproduce
+    the tables exactly, and keeps $\Sigma$ positive definite.
 * Tables enter only through $T$: a new table adds columns, and $h$,
   $\theta_P$, $u_b$ and $p_b$ keep their meaning.
 
@@ -135,8 +147,8 @@ m = \sum_b N_b D_b T' p_b,
 S = \Sigma + \sum_b N_b D_b T'\big(\mathrm{diag}\,p_b - p_b p_b'\big) T D_b'.
 $$
 
-$S$ adds the variance of realizing $N_b$ individuals to the survey
-covariance. Both $m$ and $S$ depend on the parameters, so
+$S$ adds the variance of realizing $N_b$ individuals to the table
+covariance $\Sigma$. Both $m$ and $S$ depend on the parameters, so
 
 $$
 \log \pi(\theta_P, U, \tau \mid Y, \mathcal P) \approx
@@ -173,6 +185,9 @@ $$
 
 This is the existing PMEDM dual over statewide atoms, with base $p_b$ in
 place of $q$ and entropy weight $N_b$ (from the multinomial, via Stirling).
+Its $\Sigma$ includes $\omega^2 I$, the same covariance inflation as the
+standard PMEDM's multiplier prior (here with entropy weight $N_b$, so not
+literally the same prior on $\lambda$).
 Its size is $B \times M$ pairs per PUMA (about 15 million for 100 block
 groups): GPU scale.
 
