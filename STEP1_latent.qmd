@@ -1,0 +1,229 @@
+---
+title: "Latent-population PMEDM, step 1: the PUMA reference"
+subtitle: "Model, fit and results"
+date: 2026-11-18
+---
+
+Step 1 of `PLAN_latent.md` (version 1), carried out under
+`PLAN_latent_step1.md` (version 2), for the model in `MODEL_latent.qmd`
+(version 1). It fixes the parts of the model that do not use any small-area
+table: the atoms, the basis $h$, the proximity factor $\gamma$, the prior
+scale $\sigma_\theta$, and each PUMA's reference distribution $q^P$.
+
+## The model fitted in step 1
+
+### Atoms
+
+The statewide PUMS (Tennessee, 2020–2024): $M = 155{,}047$ units,
+households and group-quarters persons. Each is a joint atom $(z_i, x_i)$
+with normalized statewide design weight $q_i = w_i / \sum_j w_j$.
+
+* $z_i \in \mathbb R^{16}$ is the stage 1 position (run
+  `stage1_v2/d16_g0.5_r0.01`), whitened: design-weighted mean 0,
+  covariance $I$.
+* $x_i$ enters through $T$, the unit's contributions to every published
+  block-group and tract cell (957 cells). $T$ is built from the same cell
+  definitions as `build_puma`, and for PUMA 4701502's records it equals
+  `build_puma`'s $X$ exactly.
+
+### Basis $h$: `kern100`
+
+$K = 102$ features: 100 Gaussian kernels on $z$ plus the two group-quarters
+indicators (institutional, noninstitutional).
+
+$$
+h_k(z) = \exp\!\Big\{-\frac{\lVert z - c_k\rVert^2}{2\ell^2}\Big\},
+\qquad k = 1,\dots,100.
+$$
+
+* The centres $c_k$ are design-weighted k-means of the statewide $z$
+  (weighted k-means++ start, seed 1, at most 100 Lloyd iterations).
+* $\ell$ is the median distance from atoms to their nearest centre.
+* The kernel columns are centred and scaled with the statewide design
+  weights; the indicators stay 0/1.
+* The centres, $\ell$, means and scales are stored in
+  `inputs/bases/kern100.{npz,json}`.
+
+### The PUMA reference
+
+For PUMA $P$,
+
+$$
+q^P_i(\theta_P) = q_i\, \gamma^{\,d(P,i)}
+  \exp\{\theta_P' h(z_i) - A_P(\theta_P)\},
+\qquad
+A_P(\theta) = \log \sum_i q_i\, \gamma^{d(P,i)} e^{\theta' h(z_i)},
+$$
+
+* $d(P,i)$ is the number of adjacency steps from $P$ to atom $i$'s PUMA
+  (58 PUMAs; at most 11 steps apart).
+* **$\gamma = 0.5$.** Atoms count half for each step away from the PUMA.
+
+The tilt depends only on $z$: it moves the mix of types towards the PUMA's
+and leaves the records within each type at their (proximity-weighted)
+statewide variety.
+
+### Fitting $\theta_P$
+
+$\theta_P$ maximizes the PUMA-record pseudo-likelihood plus its prior:
+
+$$
+\ell_P(\theta_P) = n_P \Big[\sum_{i\in\mathcal P} \tilde w_i\,
+  \theta_P' h(z_i) - A_P(\theta_P)\Big]
+  - \frac{\lVert\theta_P\rVert^2}{2\sigma_\theta^2},
+\qquad \sigma_\theta = 1,
+$$
+
+with $\mathcal P$ the PUMA's $n_P$ records and $\tilde w_i$ their
+within-PUMA normalized weights. The objective is concave. It is solved by
+Newton's method with the exact Hessian
+$n_P\,\mathrm{Cov}_{q^P}(h) + I/\sigma_\theta^2$. Without the prior, the
+optimum matches moments: the tilted statewide atoms reproduce the PUMA's own
+weighted mean of $h$. No tables are used.
+
+## How the settings were chosen
+
+### Design
+
+Each PUMA's records were split into 5 folds (random by unit, stratified by
+household vs group quarters). $\theta_P$ was fitted on 4 folds and $q^P$
+scored against the held-out fold, with the held-out fold's atoms removed
+from the support. The scores are shares within the PUMA:
+
+* $z$ = (predicted − held-out) / SE, with SEs from the held-out fold's
+  replicate weights, summarized as RMS $z$ over every cell, fold and PUMA;
+* for rare groups (AIAN, NH/PI and others), the RMS log ratio over
+  (PUMA, fold) pairs and the ratio pooled over PUMAs.
+
+**Grid:** $h \in$ {`dec7`, `dec37`, `quad`, `kern100`, `kern200`},
+$\gamma \in \{0, 0.25, 0.5, 1\}$, $\sigma_\theta \in \{0.3, 0.5, 1, 3, 10\}$.
+The first run used $\sigma_\theta \in \{1, 3, 10\}$. Its best was at the
+grid's edge, so §6 required extending it.
+
+**Baselines:**
+* own records ($\gamma = 0$, the PUMS support): the noise floor;
+* geography only ($\theta = 0$, $\gamma \in \{0.25, 0.5\}$);
+* state average ($\theta = 0$, $\gamma = 1$).
+
+### Basis
+
+Each basis at its best $(\gamma, \sigma_\theta)$ by RMS $z$:
+
+| basis | $K$ | $\gamma$ | $\sigma_\theta$ | RMS $z$ | rare: RMS log ratio |
+|---|---|---|---|---|---|
+| `dec37` | 374 | 0.25 | 0.3 | 1.480 | 0.952 |
+| `dec7` | 103 | 0.25 | 0.3 | 1.484 | 0.927 |
+| `kern100` | 102 | 0.25 | 1 | 1.494 | **0.887** |
+| `kern200` | 202 | 0.25 | 1 | 1.493 | 0.895 |
+| `quad` | 154 | 0.25 | 1 | 1.481 | 0.926 |
+
+All five are within 10% of the best on both criteria. The rule takes the
+smallest $K$: **`kern100`**, which is also best on rare groups. The bases
+differ by under 1% in RMS $z$.
+
+### Types against geography
+
+RMS $z$ of the baselines, by group of cells:
+
+| baseline | B | S1 | T |
+|---|---|---|---|
+| state average ($\gamma = 1$) | 2.52 | 2.97 | 2.41 |
+| geography only, $\gamma = 0.5$ | 2.10 | 2.26 | 2.03 |
+| geography only, $\gamma = 0.25$ | 1.75 | 1.90 | 1.77 |
+| own records ($\gamma = 0$) | 1.46 | 1.55 | 1.58 |
+
+At $\gamma = 0.25$, adding the type tilt lowers RMS $z$ from about 1.75–1.90
+(geography only) to 1.49 overall. Nearby PUMAs alone are a poor stand-in
+for a PUMA; locating it in type space is what makes other PUMAs' atoms
+usable.
+
+### Proximity $\gamma$ and prior scale $\sigma_\theta$
+
+For `kern100`, the best $\sigma_\theta$ at each $\gamma$:
+
+| $\gamma$ | $\sigma_\theta$ | RMS $z$ | rare: RMS log ratio | ESS | mass outside the PUMA |
+|---|---|---|---|---|---|
+| 0 | — | 1.536 | 0.873 | 1,063 | 0 |
+| 0.25 | 1 | 1.494 | 0.887 | 6,173 | 0.63 |
+| 0.5 | 1 | 1.551 | 0.845 | 17,249 | 0.83 |
+| 1 | 3 | 1.668 | 0.827 | 48,423 | 0.97 |
+
+* Common cells are best at $\gamma = 0.25$; full statewide pooling costs
+  9%. So $x$ given $z$ does differ by place.
+* Rare groups improve with more variety, by about 5% from $\gamma = 0$ to 1.
+* The effective sample size grows 6-fold at $\gamma = 0.25$ and 16-fold at
+  0.5; within rare groups, from 23 to 156 and 399.
+* The rule takes the largest $\gamma$ within 10% of the best: **$\gamma =
+  0.5$**, with **$\sigma_\theta = 1$**, an interior point of the extended
+  grid.
+
+### Stop rule
+
+Every basis passes. Its RMS $z$ is within 50% of the noise floor (limit
+2.30), and the pooled AIAN and NH/PI ratios are 0.96–1.07, inside
+$[0.8, 1.25]$. The basis locates the PUMAs' rare types without systematic
+shrinkage.
+
+## Final fits
+
+$\theta_P$ fitted on all of each PUMA's records with `kern100`,
+$\gamma = 0.5$, $\sigma_\theta = 1$:
+
+* all 58 converged in 4–7 Newton steps; largest moment error 0.003 (nonzero
+  because of the prior);
+* effective sample size 4,100 to 33,800 (median 17,200);
+* 61–90% of each PUMA's reference mass on atoms outside the PUMA.
+
+### Rare groups, and the published PUMA tables
+
+In sample, the pooled ratio of predicted to the PUMAs' own records is
+0.97–1.05, except two small poverty-by-race cells (1.10, 1.13).
+
+Against the published PUMA-level ACS tables, as RMS $z$ in published-SE
+units over PUMAs:
+
+| group | reference $q^P$ | PUMA's own PUMS |
+|---|---|---|
+| ages 80+ (four cells) | 1.1–1.6 | 0.6–0.9 |
+| NH AIAN | 3.3 | 2.6 |
+| NH/PI | 3.8 | 2.7 |
+| other race | 1.6 | 1.1 |
+| poverty-by-race cells | 0.3–2.3 | 0.2–1.5 |
+| NH Asian | 10.3 | 2.6 |
+| group quarters (B26001) | 16.5 | 15.9 |
+
+* For most groups the reference is 1.3–1.8 times the PUMS's own discrepancy:
+  the cost of borrowing atoms, of the same order as the cross-fitted
+  results.
+* Group quarters disagree badly in both columns: a mismatch between the
+  PUMS and B26001 (universe or definitions), not the model.
+
+## Open notes
+
+* **NH Asian is misallocated across PUMAs** (10.3 against the PUMS's 2.6)
+  although its statewide total is right (pooled 1.04). A plausible cause is
+  that Asian residents are concentrated in particular metro PUMAs and
+  borrowing at $\gamma = 0.5$ spreads that concentration. Asian is not among
+  the groups that drive the §6 decisions (AIAN and NH/PI). Not
+  investigated.
+* **`dec7` and `dec37` were best at $\sigma_\theta = 0.3$**, the extended
+  grid's edge. This cannot change the choice: their gains were about 0.003
+  in RMS $z$, they remain 4–7% worse on rare groups, and `kern100` has the
+  smallest $K$.
+* **RMS $z$ is about 1.5 even for the own-records baseline,** partly by
+  construction: the SE covers the held-out fold's noise but not the training
+  folds'.
+
+## Record
+
+* **Code:** `99f7c48` (step 1 build), `4a37d1d` (plan version 2 and the
+  collector), `c4dbb54` (extended grid).
+* **Runs** (under `/lustre/isaac24/proj/UTK0533/pmedm_vb_runs/latent/`):
+  - `step1`: first grid, $\sigma_\theta \in \{1, 3, 10\}$;
+  - `step1_sigma`: extended grid and final fits, the run of record.
+* **Handed to step 2,** from `step1_sigma`:
+  - `final/reference.npz`: $\hat\theta_P$ and $q^P$ for every PUMA;
+  - `decisions.json`: $h$ = `kern100`, $\gamma = 0.5$, $\sigma_\theta = 1$;
+  - `inputs/bases/kern100.{npz,json}`: the basis;
+  - `inputs/T/`: $T$ and its cell names;
+  - `inputs/distances.csv`: PUMA distances.
