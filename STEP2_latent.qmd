@@ -1,0 +1,193 @@
+---
+title: "Latent-population PMEDM, step 2: the collapsed likelihood and what the tables identify"
+subtitle: "Engine, diagnostic and results"
+date: 2026-11-18
+---
+
+Step 2 of `PLAN_latent.md` (version 1), carried out under
+`PLAN_latent_step2.md` (version 2), for the model in `MODEL_latent.qmd`
+(version 2). It fits nothing. It builds the collapsed-likelihood engine and
+measures, at the step 1 reference ($u_b = 0$), how much the published
+block-group and tract tables can say about each block group's deviation
+from its PUMA. PUMAs: 4701502 and the four test PUMAs 4701900, 4702300,
+4702900 and 4703000.
+
+"Derived here" marks derivations made for this project, not taken from the
+literature.
+
+## What was evaluated
+
+### Model quantities
+
+From step 1: $h$ = `kern100` ($K = 102$), $\gamma = 0.5$, $\hat\theta_P$
+from `latent/step1_sigma`. For block group $b$,
+
+$$
+p_{bi} = q_i\,\gamma^{d(P,i)}\exp\{(\theta_P + u_b)'h(z_i) - A_P(\theta_P + u_b)\},
+$$
+
+and the collapsed likelihood $Y \mid \theta_P, U \dot\sim \mathcal N(m, S)$,
+
+$$
+m = \sum_b N_b D_b T'p_b,
+\qquad
+S = \Sigma + \sum_b N_b D_b T'(\mathrm{diag}\,p_b - p_bp_b')TD_b'.
+$$
+
+### Table covariance (model version 2)
+
+$$
+\Sigma = \Sigma_{\mathrm{survey}} + \omega^2 I,
+\qquad \omega = \frac{N_P}{n_P\,s},\quad s = 3.
+$$
+
+* $\Sigma_{\mathrm{survey}}$: the standard PMEDM's replicate covariance,
+  untapered, $\alpha = 0.01$, zero-count variance floor.
+* $\omega^2 I$: the model-gap term, the standard PMEDM's multiplier prior
+  in covariance form. $N_P$ and $n_P$ are the PUMA's units and own records
+  as in the standard PMEDM.
+
+| PUMA | tracts | block groups | rows | $N_P$ | $n_P$ | $\omega$ |
+|---|---|---|---|---|---|---|
+| 4701502 | 24 | 59 | 22,592 | 43,380 | 2,329 | 6.21 |
+| 4701900 | 28 | 77 | 27,860 | 60,800 | 2,688 | 7.54 |
+| 4702300 | 27 | 68 | 25,715 | 49,870 | 2,749 | 6.05 |
+| 4702900 | 34 | 95 | 34,106 | 50,220 | 3,723 | 4.50 |
+| 4703000 | 29 | 79 | 28,717 | 47,390 | 3,141 | 5.03 |
+
+### Area inputs
+
+* $Y$ and $\Sigma_{\mathrm{survey}}$ from `build_puma` for the "all" table
+  set: 489 tract cells and 184 block-group cells per area.
+* $T$: step 1's statewide contributions, mapped one to one onto
+  `build_puma`'s cells (exactly equal on each PUMA's own records).
+* $N_b$ (working rule): households are the block group's owner plus renter
+  total (B25003). Group-quarters persons are the tract's total (B26001),
+  split across its block groups by occupied units. $\sum_b N_b / N_P$ is
+  0.993–1.005. Two block groups have $N_b = 0$ and are left out of the
+  summaries.
+
+### Structure of $S$ (derived here)
+
+$S = B + LL'$:
+* $B = \mathrm{blockdiag}_t(D_t + \omega^2 I + R_t)$ covers one tract's rows
+  and its block groups' rows (at most about 1,400 rows per tract);
+* $L$ holds the scaled replicate deviations over every row (rank at most
+  80), coupling all tracts.
+
+$S^{-1}$ and $\log\det S$ are exact by the Woodbury identity and the matrix
+determinant lemma, on per-tract Cholesky factors and one $80\times 80$
+matrix. The gradient of $\log\det S$ reduces to one quadratic form per atom,
+using each tract's block of $S^{-1}$.
+
+Before running on ISAAC, everything was checked against dense brute force
+with the real $T$ and stand-in $Y$ and $\Sigma$:
+* $S$: to $10^{-11}$;
+* solve, $\log\det$ and quadratic form: $10^{-11}$ or better;
+* the full gradient against finite differences: $10^{-9}$ to
+  $3\times 10^{-7}$;
+* the information below against its finite-difference version:
+  $4\times 10^{-9}$.
+
+## Results
+
+### Compute
+
+One full evaluation (log-likelihood and gradient, including the $\log\det$
+term) takes 2.7–5.2 s per PUMA on one ISAAC node (18 workers); peak memory
+4.6–5.9 GB.
+
+### What the tables identify
+
+At $u = 0$, the mean part of the Fisher information for block group $b$ is
+
+$$
+I_{bb'} = N_bN_{b'}\,C'D_b'[S^{-1}]_{tt'}D_{b'}C,
+\qquad C = \mathrm{Cov}_{q^P}(t, h),
+$$
+
+a lower bound on the full information. Against the prior
+$u_b \sim \mathcal N(0, \tau^2 I)$, the effective number of identified
+directions is $\mathrm{df}_b(\tau) = \mathrm{tr}[I_{bb}(I_{bb} +
+\tau^{-2}I)^{-1}] \in [0, 102]$.
+
+The scale $\tau_{\mathrm{ref}} = 0.284$ comes from the spread of
+$\hat\theta_P$ across the 58 PUMAs.
+
+| $\tau$ | median $\mathrm{df}_b$ | 10% | 90% | directions above $\tau^{-2}$ (median) |
+|---|---|---|---|---|
+| $0.5\,\tau_{\mathrm{ref}}$ | 15.5 | 12.2 | 18.4 | 16 |
+| $\tau_{\mathrm{ref}}$ | 21.0 | 17.0 | 25.4 | 18 |
+| $2\,\tau_{\mathrm{ref}}$ | 29.4 | 22.9 | 36.6 | 25 |
+
+* 376 populated block groups across the five PUMAs. Even the smallest
+  ($N_b = 110$) has $\mathrm{df}_b \approx 11$ at $\tau_{\mathrm{ref}}$;
+  df grows with $N_b$.
+* The leading eigenvalue of $I_{bb}$ has median 6,800 against a prior
+  precision of 12.4 at $\tau_{\mathrm{ref}}$.
+* Tract rows and the cross-tract coupling through $LL'$ add essentially
+  nothing per block group: joint df per block group is within a few
+  percent of each block group's own df.
+
+The tables determine a block group's type mix along about 20 directions. The
+prior ($\theta_P$ and the shrinkage) governs the remaining 80 or so; that is
+where pooling and noise reduction act.
+
+### Shares the tables pin down
+
+The share of prior variance removed, $1 - a'(I_{bb} + \tau^{-2}I)^{-1}a /
+(\tau^2 a'a)$ with $a = \partial(\text{share})/\partial u_b$; median over
+block groups at $\tau_{\mathrm{ref}}$, with the 10% quantile in brackets:
+
+| share | removed |
+|---|---|
+| owners (of households) | 0.996 (0.991) |
+| age 65+ (of persons) | 0.994 (0.988) |
+| families below poverty | 0.984 (0.970) |
+| institutional group quarters (of units) | 0.979 (0.927) |
+| NH Asian (of persons) | 0.972 (0.946) |
+| NH AIAN (of persons) | 0.960 (0.938) |
+| noninstitutional group quarters (of units) | 0.924 (0.909) |
+| NH/PI (of persons) | 0.887 (0.759) |
+
+NH/PI is the weakest. Its 10% quantile falls to 0.68 at
+$0.5\,\tau_{\mathrm{ref}}$.
+
+### Survey error, model gap and realization variance
+
+Diagonal of $S$, per cell:
+
+* Survey variance exceeds realization variance by a median of 14–18 times,
+  close to the mean weight (13.5–22.6), as the parent plan expected.
+* The model-gap term $\omega^2$ (20–57) is the same order as realization
+  variance, and larger in 36–70% of cells.
+* The exception is the group-quarters table (B26001, tract), where survey
+  and realization variance are about equal (median ratio 1.16).
+
+## Decisions (`PLAN_latent_step2.md` §6)
+
+* **Computability:** slowest full evaluation 5.2 s against 60 s.
+  **Step 3 uses the exact collapsed likelihood.**
+* **Identification of $u_b$:** median $\mathrm{df}_b(\tau_{\mathrm{ref}})$ =
+  21 over 376 block groups. **Well identified: step 3 as planned.**
+
+## Notes
+
+* **The working rule for $N_b$** reproduces each PUMA's total to within
+  1%. Group quarters are split within tracts by occupied units, since
+  `build_puma` carries no block-group unit totals.
+* **"Households below poverty"** was replaced by families below poverty
+  (B17010): there is no household-level poverty table in the set.
+* **The tract taper** in plan version 1 was a mistake (it is not the paper
+  baseline); version 2 and model version 2 use the untapered covariance.
+
+## Record
+
+* **Code:** `13a9c8d` (first build), `81328c5` (model version 2, plan
+  version 2), `1b0ce3f` (step 2 following version 2).
+* **Run of record:** `/lustre/isaac24/proj/UTK0533/pmedm_vb_runs/latent/step2`.
+* **Handed to step 3:**
+  - the decisions: exact collapsed likelihood; $u_b$ well identified;
+  - the engine (`latent/collapsed.py`), area inputs (`latent/area.py`) and
+    diagnostic (`latent/information.py`);
+  - $\tau_{\mathrm{ref}} = 0.284$ as the scale for step 3's $\tau$.
