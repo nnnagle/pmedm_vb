@@ -1,9 +1,13 @@
 # Plan, step 3: MAP on the regional run, against the standard PMEDM
 
-> **Status: draft for review.** Lower-level plan for step 3 of
-> `PLAN_latent.md` (version 1), for the model in `MODEL_latent.qmd`
-> (version 2), building on step 1 (`STEP1_latent.qmd`) and step 2
-> (`STEP2_latent.qmd`). Once approved it is fixed, with a change log.
+> **Status: fixed.** Lower-level plan for step 3 of `PLAN_latent.md`
+> (version 1), for the model in `MODEL_latent.qmd` (version 2), building on
+> step 1 (`STEP1_latent.qmd`) and step 2 (`STEP2_latent.qmd`). Change it
+> only when the plan itself changes, and record each change below.
+>
+> | version | date | change |
+> |---|---|---|
+> | 1 | 2026-11-18 | approved as drafted; §9 items accepted as proposed |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -209,7 +213,7 @@ Thresholds are proposals to confirm at review.
 * `summary.txt`: the ladder in both modes, by metric and region; $\tau$
   selection; timings and evaluation counts.
 
-## 9. Open for review
+## 9. Resolved at approval (as proposed)
 
 1. The thresholds in §6: 5% on joint structure, 10% on rare groups.
 2. Leave-zone-out as the primary mode.
