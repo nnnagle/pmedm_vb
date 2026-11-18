@@ -1,9 +1,13 @@
 # Plan, step 2: the collapsed-likelihood engine and the information diagnostic
 
-> **Status: draft for review.** Lower-level plan for step 2 of
-> `PLAN_latent.md` (version 1), for the model in `MODEL_latent.qmd`
-> (version 1), building on step 1 (`STEP1_latent.qmd`; run of record
-> `latent/step1_sigma`). Once approved it is fixed, with a change log.
+> **Status: fixed.** Lower-level plan for step 2 of `PLAN_latent.md`
+> (version 1), for the model in `MODEL_latent.qmd` (version 1), building on
+> step 1 (`STEP1_latent.qmd`; run of record `latent/step1_sigma`). Change it
+> only when the plan itself changes, and record each change below.
+>
+> | version | date | change |
+> |---|---|---|
+> | 1 | 2026-11-18 | approved as drafted; §9 items accepted as proposed |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -220,9 +224,10 @@ Thresholds are proposals to confirm at review.
 * `summary.txt`: timings, the diagnostic per PUMA and block group, the
   variance reductions, the split of $S$, and the decisions.
 
-## 9. Open for review
+## 9. Resolved at approval
 
-1. The thresholds in §6: 60 s per evaluation; df bands at 1 and 5.
+1. The thresholds in §6, as proposed: 60 s per evaluation; df bands at 1
+   and 5.
 2. The working rule for $N_b$ in §4.1.
 3. The $\tau$ scale from step 1's spread of $\hat\theta_P$, and the grid
    $\{0.5, 1, 2\}\times\tau_{\mathrm{ref}}$.
