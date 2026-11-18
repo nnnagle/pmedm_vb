@@ -1,5 +1,5 @@
 """The collapsed likelihood of the block parameters (step 2, piece B2 of
-``PLAN_latent.md``; ``PLAN_latent_step2.md`` §3, §4.2).
+``PLAN_latent.md``; ``PLAN_latent_step2.md`` version 2, §3, §4.2).
 
 From ``MODEL_latent.qmd`` (notation kept), integrating the realized
 populations out:
@@ -7,13 +7,23 @@ populations out:
 * ``p_bi = q_i γ^{d(P,i)} exp{θ_b' h(z_i) - A_P(θ_b)}``, ``θ_b = θ_P + u_b``;
 * ``Y | θ_P, U ~ N(m, S)``, ``m = Σ_b N_b D_b T' p_b`` and
   ``S = Σ + Σ_b N_b D_b V_b D_b'``, ``V_b = T'(diag p_b - p_b p_b')T``;
-* ``L(θ_P, U) = -½ (Y - m)' S⁻¹ (Y - m) - ½ log det S`` (no constant).
+* ``L(θ_P, U) = -½ (Y - m)' S⁻¹ (Y - m) - ½ log det S`` (no constant);
+* ``Σ = Σ_survey + ω² I`` (:mod:`pmedm_vb.latent.area`).
 
-**Structure** (§3). ``Σ`` is tapered by tract and ``D_b`` reaches only block
-``b``'s own rows and its tract's, so ``S = blockdiag_t(S_t)``: each tract's
-block is assembled densely in the local layout of
-:meth:`~pmedm_vb.latent.area.AreaInputs.tract_rows`, factorized by Cholesky,
-and ``L`` is a sum over tracts. No low-rank approximation.
+**Structure** (§3). ``Σ_survey = D + LL'`` with ``L`` the scaled replicate
+deviations over every row (untapered, rank ≤ 80), and ``D_b`` reaches only
+block ``b``'s own rows and its tract's, so the realization term ``R`` is block
+diagonal by tract. Hence ``S = B + LL'``, ``B = blockdiag_t(B_t)``,
+``B_t = D_t + ω² I + R_t``, each ``B_t`` assembled densely in the local
+layout of :meth:`~pmedm_vb.latent.area.AreaInputs.tract_rows` and factorized
+by Cholesky. Exactly (Woodbury identity, matrix determinant lemma), with
+``X_t = B_t⁻¹ L_t`` and ``K = I + Σ_t L_t' X_t`` (``80 × 80``):
+
+    S⁻¹ = B⁻¹ - B⁻¹ L K⁻¹ L' B⁻¹,       log det S = Σ_t log det B_t + log det K,
+    [S⁻¹]_{tt'} = δ_{tt'} B_t⁻¹ - X_t K⁻¹ X_{t'}'.
+
+No approximation. (The model's ``L``, the log-likelihood, and this ``L``, the
+replicate factor, share a letter; the code calls the factor ``Lr``.)
 
 **Base cells.** ``T`` enters through the base cells (``T0``, ``M × J0``;
 :mod:`pmedm_vb.latent.area`): ``t_i = E t0_i`` with ``E`` the 0/1 map from
@@ -34,7 +44,7 @@ product with ``B`` columns, split over threads by rows.
 **Gradient** (derived here; §3 gives the ``log det`` part). With
 ``r = S⁻¹(Y - m)``, ``w_b = E'D_b' r`` (block ``b``'s residual weights on the
 base cells), ``a_i = t0_i' w_b``, ``ā_b = μ_b' w_b`` (``μ_b = T0' p_b``) and
-``G_b = E' D_b' S⁻¹ D_b E``:
+``G_b = E' D_b' [S⁻¹]_{tt} D_b E`` (``t`` block ``b``'s tract):
 
     ∂L/∂u_b = N_b Cov_{p_b}(h, φ_b),
     φ_bi = a_i + ½(a_i² - 2 a_i ā_b)                   [quadratic form: mean and S]
@@ -43,13 +53,15 @@ base cells), ``a_i = t0_i' w_b``, ``ā_b = μ_b' w_b`` (``μ_b = T0' p_b``) and
 and ``∂L/∂θ_P = Σ_b ∂L/∂u_b``. The first line comes from ``dm`` and from
 ``S``'s dependence in the quadratic form (``½ r' dS r``), the second from
 ``-½ tr(S⁻¹ dS)``; both use ``dp_bi = p_bi (h_i - h̄_b)' du_b`` and
-``tr(G dV_b) = Σ_i dp_bi (t_i'G t_i - 2 t_i'G μ_b)``. ``G_b`` needs
-``S_t⁻¹``, formed from the Cholesky factor (LAPACK ``potri``).
+``tr(G dV_b) = Σ_i dp_bi (t_i'G t_i - 2 t_i'G μ_b)``. Since ``dS`` is block
+diagonal by tract, only the tract blocks ``[S⁻¹]_{tt}`` enter; ``B_t⁻¹``
+comes from the Cholesky factor (LAPACK ``potri``).
 
 **Timings** (:attr:`Evaluation.timings`, seconds): ``build`` (``p``, ``m``,
-``S_t``), ``factor`` (Cholesky), ``loglik`` (solves and ``log det``),
-``gradient`` (without the ``log det`` term), ``logdet_gradient`` (the
-``log det`` term, including ``S_t⁻¹``) and ``total``.
+``B_t``), ``factor`` (Cholesky of every ``B_t``, ``X_t`` and ``K``), ``loglik``
+(solves and ``log det``), ``gradient`` (without the ``log det`` term),
+``logdet_gradient`` (the ``log det`` term, including ``[S⁻¹]_{tt}``) and
+``total``.
 """
 
 from __future__ import annotations
@@ -220,7 +232,9 @@ class Evaluation:
     m: np.ndarray
     mu: np.ndarray                  # (J0, B) T0' p_b
     p: np.ndarray                   # (M, B)
-    factors: list                   # Cholesky factor of S_t per tract
+    factors: list                   # Cholesky factor of B_t per tract
+    X: list                         # B_t⁻¹ L_t per tract (None without a replicate factor)
+    K_factor: tuple | None          # Cholesky factor of K = I + L'B⁻¹L
     realization_diag: np.ndarray    # diag of Σ_b N_b D_b V_b D_b' over the stacked rows
     grad_U: np.ndarray | None = None
     grad_U_quad: np.ndarray | None = None
@@ -249,13 +263,18 @@ class CollapsedLikelihood:
         self.N = area.N_b.astype(float)
         self.src = area.sources
         self.ts, self.bs = area.columns.tract_src, area.columns.bg_src
+        sigma = area.sigma
+        if sigma.is_tapered:
+            raise ValueError("the engine expects the untapered Sigma (model version 2)")
+        self.d = sigma.d                # D + ω² (Sigma.d carries prior_var)
+        self.Lr = sigma.b               # (n_rows, 80) or None
         self.tracts = []
         for t in range(area.n_tracts):
             rows = area.tract_rows(t)
             members = area.tract_members(t)
             self.tracts.append({"rows": rows, "members": members,
                                 "local": [area.local_positions(j) for j in range(len(members))],
-                                "sigma": area.sigma.block_dense(rows)})
+                                "Lr": None if self.Lr is None else self.Lr[rows]})
 
     # -- pieces --------------------------------------------------------------
 
@@ -300,12 +319,25 @@ class CollapsedLikelihood:
         pF = p * F
         return (self.H.T @ pF - (self.H.T @ p) * pF.sum(axis=0)[None, :]).T
 
+    @staticmethod
+    def tract_inverse(factor, Xt, K_factor) -> np.ndarray:
+        """``[S⁻¹]_{tt} = B_t⁻¹ - X_t K⁻¹ X_t'``."""
+        c, lower = factor
+        inverse, info = lapack.dpotri(c, lower=lower)
+        if info != 0:
+            raise np.linalg.LinAlgError(f"potri failed ({info})")
+        inverse = np.tril(inverse) + np.tril(inverse, -1).T if lower else \
+            np.triu(inverse) + np.triu(inverse, 1).T
+        if K_factor is not None:
+            inverse -= Xt @ cho_solve(K_factor, Xt.T, check_finite=False)
+        return inverse
+
     # -- evaluation ----------------------------------------------------------
 
     def evaluate(self, theta_P, U=None, *, gradient: bool = True,
                  keep_S: bool = False) -> Evaluation:
         """``L`` at ``(θ_P, U)`` and, with ``gradient``, its gradient (module
-        notes). ``keep_S`` stores each ``S_t`` (for checks) in
+        notes). ``keep_S`` stores each ``B_t`` (for checks) in
         ``timings['S']``."""
         area, pairs, N = self.area, self.pairs, self.N
         clock = time.perf_counter
@@ -319,7 +351,7 @@ class CollapsedLikelihood:
         realization = np.zeros(area.n_rows)
         blocks, kept = [], []
         for tract in self.tracts:
-            S = tract["sigma"].copy()
+            S = np.diag(self.d[tract["rows"]])
             for j, b in enumerate(tract["members"]):
                 if N[b] <= 0:
                     continue
@@ -327,7 +359,7 @@ class CollapsedLikelihood:
                 V -= np.outer(mu[:, b], mu[:, b])
                 local = tract["local"][j]
                 S[np.ix_(local, local)] += N[b] * V[np.ix_(self.src, self.src)]
-            realization[tract["rows"]] = np.diag(S) - np.diag(tract["sigma"])
+            realization[tract["rows"]] = np.diag(S) - self.d[tract["rows"]]
             blocks.append(S)
         times["build"] = clock() - t0
 
@@ -338,22 +370,37 @@ class CollapsedLikelihood:
                 kept.append(S.copy())
             factors.append(cho_factor(S, lower=True, overwrite_a=True, check_finite=False))
         del blocks
+        X, K_factor = [None] * len(factors), None
+        if self.Lr is not None:
+            K = np.eye(self.Lr.shape[1])
+            for k, (tract, factor) in enumerate(zip(self.tracts, factors)):
+                X[k] = cho_solve(factor, tract["Lr"], check_finite=False)
+                K += tract["Lr"].T @ X[k]
+            K_factor = cho_factor(K, lower=True, check_finite=False)
         times["factor"] = clock() - t0
 
         t0 = clock()
         quad = logdet = 0.0
-        residual = []
+        residual, Lz = [], 0.0
         for tract, factor in zip(self.tracts, factors):
             e = area.Y[tract["rows"]] - m[tract["rows"]]
-            r = cho_solve(factor, e, check_finite=False)
-            quad += float(e @ r)
+            z = cho_solve(factor, e, check_finite=False)
+            quad += float(e @ z)
             logdet += 2.0 * float(np.log(np.diag(factor[0])).sum())
-            residual.append(r)
+            residual.append(z)
+            if K_factor is not None:
+                Lz = Lz + tract["Lr"].T @ z
+        if K_factor is not None:
+            c = cho_solve(K_factor, Lz, check_finite=False)
+            quad -= float(Lz @ c)
+            logdet += 2.0 * float(np.log(np.diag(K_factor[0])).sum())
+            residual = [z - Xt @ c for z, Xt in zip(residual, X)]
         loglik = -0.5 * quad - 0.5 * logdet
         times["loglik"] = clock() - t0
 
         ev = Evaluation(loglik=loglik, quad=quad, logdet=logdet, m=m, mu=mu, p=p,
-                        factors=factors, realization_diag=realization, timings=times)
+                        factors=factors, X=X, K_factor=K_factor,
+                        realization_diag=realization, timings=times)
         if keep_S:
             times["S"] = kept
         if not gradient:
@@ -377,13 +424,8 @@ class CollapsedLikelihood:
         t0 = clock()
         packed = np.zeros((pairs.n_pairs, area.B))
         Gmu = np.zeros((pairs.J0, area.B))
-        for tract, factor in zip(self.tracts, factors):
-            c, lower = factor
-            inverse, info = lapack.dpotri(c, lower=lower)
-            if info != 0:
-                raise np.linalg.LinAlgError(f"potri failed ({info})")
-            inverse = np.tril(inverse) + np.tril(inverse, -1).T if lower else \
-                np.triu(inverse) + np.triu(inverse, 1).T
+        for tract, factor, Xt in zip(self.tracts, factors, X):
+            inverse = self.tract_inverse(factor, Xt, K_factor)
             for j, b in enumerate(tract["members"]):
                 if N[b] <= 0:
                     continue

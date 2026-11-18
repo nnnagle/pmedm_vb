@@ -1,5 +1,6 @@
 """Step 2 of the latent-population PMEDM: the collapsed-likelihood engine and the
-information diagnostic (``PLAN_latent_step2.md``; model ``MODEL_latent.qmd``).
+information diagnostic (``PLAN_latent_step2.md`` version 2; model
+``MODEL_latent.qmd`` version 2).
 
     python experiments/latent/step2_engine.py --config experiments/embed/stage1_v2.json \
         --run $PMEDM_VB_RUNS/embed/stage1_v2/d16_g0.5_r0.01 \
@@ -18,9 +19,10 @@ from ``--run``) and must be step 1's, in order.
 under ``<out>/<puma>/``:
 
 * ``area.json``: the §4.1 checks (column mapping one to one, ``T`` against
-  ``X`` on the PUMA's own records, ``Σ``'s tract groups, ``Σ_b N_b`` against
-  the PUMA's ``N``) and the reference check (``p_b`` at ``u = 0`` against
-  step 1's stored ``q^P``);
+  ``X`` on the PUMA's own records, the tracts' layouts partitioning the rows,
+  ``Σ_b N_b`` against the PUMA's ``N``), ``ω`` with the ``N`` and ``n`` it
+  uses, and the reference check (``p_b`` at ``u = 0`` against step 1's
+  stored ``q^P``);
 * ``timings.csv``: ``--evals`` evaluations of the log-likelihood and its
   gradient, the first at the reference (``θ_P = θ̂_P``, ``u = 0``), the
   others at ``u_b ~ N(0, (0.1 τ_ref)² I)``; seconds for building ``p``, ``m``
@@ -30,12 +32,16 @@ under ``<out>/<puma>/``:
   group-quarters persons), the trace and five leading eigenvalues of
   ``I_bb``, and at each ``τ ∈ {0.5, 1, 2} × τ_ref`` the df and the number of
   eigenvalues above ``τ⁻²``;
-* ``tracts.csv``: per tract, the joint df divided by its number of block
-  groups, beside the mean of its block groups' df;
+* ``tracts.csv``: per tract, the joint df of its block of ``I`` divided by
+  its number of block groups, beside the mean of its block groups' df;
+* ``puma.csv``: the joint df of the full ``I`` divided by the number of block
+  groups, beside the mean of the block groups' df (what the cross-tract
+  coupling adds);
 * ``functionals.csv``: per block group, functional and ``τ``, the share of
   prior variance removed by the tables (:data:`FUNCTIONALS`);
-* ``s_split.csv``: ``diag S`` split into survey (``Σ``) and realization
-  variance, by level and table, with the PUMA's mean weight ``N / n``;
+* ``s_split.csv``: ``diag S`` split into survey (``Σ_survey``), model-gap
+  (``ω²``) and realization variance, by level and table, with the PUMA's mean
+  weight ``N / n``;
 * ``done.json`` (a PUMA with it is skipped, so a job can be resubmitted).
 
 ``<out>/settings.json`` holds ``τ_ref`` (step 1's spread of ``θ̂_P``), the
@@ -67,10 +73,12 @@ from pmedm_vb.latent.collapsed import CollapsedLikelihood, PairOperator, default
 from pmedm_vb.latent.geography import atom_distance
 from pmedm_vb.latent.information import (
     block_covariances,
+    columns_of,
     degrees_of_freedom,
     eigenvalues,
+    joint_eigenvalues,
+    puma_information,
     share_gradient,
-    tract_information,
     variance_removed,
 )
 from pmedm_vb.latent.reference import log_base
@@ -136,8 +144,11 @@ def peak_gb() -> float:
 
 
 def s_split(A, ev) -> pd.DataFrame:
-    """``diag S`` = survey + realization variance, by level and table."""
-    rows = A.row_labels().assign(survey=A.sigma.diagonal(), realization=ev.realization_diag)
+    """``diag S`` = survey + model gap (``ω²``) + realization variance, by
+    level and table."""
+    omega2 = A.sigma.prior_var
+    rows = A.row_labels().assign(survey=A.sigma.diagonal() - omega2,
+                                 realization=ev.realization_diag)
     out = []
     for keys, frame in [*rows.groupby(["level", "table"], sort=False),
                         *((k, f.assign(table="(all)")) for k, f in
@@ -148,13 +159,16 @@ def s_split(A, ev) -> pd.DataFrame:
         out.append({
             "level": level, "table": table, "cells": len(frame),
             "cells_realization_zero": int((~positive).sum()),
-            "survey_mean": frame["survey"].mean(), "realization_mean": frame["realization"].mean(),
+            "survey_mean": frame["survey"].mean(), "model_gap": omega2,
+            "realization_mean": frame["realization"].mean(),
             "ratio_of_means": frame["survey"].mean() / frame["realization"].mean()
             if frame["realization"].mean() > 0 else np.nan,
             "ratio_median": ratio.median() if len(ratio) else np.nan,
             "ratio_q10": ratio.quantile(0.1) if len(ratio) else np.nan,
             "ratio_q90": ratio.quantile(0.9) if len(ratio) else np.nan,
             "share_survey_larger": float((frame["survey"] > frame["realization"]).mean()),
+            "share_model_gap_larger_than_realization":
+                float((omega2 > frame["realization"]).mean()),
         })
     return pd.DataFrame(out)
 
@@ -169,7 +183,8 @@ def run_puma(puma: str, s: dict, args) -> None:
     start = time.perf_counter()
     with stage(f"PUMA {puma}: area inputs"):
         A = area_inputs(s["area"], puma, s["tables"], s["contributions"], alpha=args.alpha,
-                        variance_floor=args.variance_floor, zones=s["zones"])
+                        variance_floor=args.variance_floor, prior_sd=args.prior_sd,
+                        zones=s["zones"])
     if s.get("pairs") is None or not np.array_equal(s["base_columns"], A.columns.base_columns):
         with stage("pair operator") as step:
             s["pairs"] = PairOperator(s["contributions"].T[:, A.columns.base_columns],
@@ -210,12 +225,16 @@ def run_puma(puma: str, s: dict, args) -> None:
 
     with stage(f"PUMA {puma}: information diagnostic"):
         C = block_covariances(engine, ev0, engine.thetas(theta, None))
-        info = tract_information(engine, ev0, C)
+        I_full = puma_information(engine, ev0, C)
+        K = engine.K
+        info = []
+        for t in range(A.n_tracts):
+            cols = columns_of(A.tract_members(t), K)
+            info.append(I_full[np.ix_(cols, cols)])
         grads = {name: (kind, *share_gradient(g, n, p0, H))
                  for name, (kind, g, n) in s["functionals"].items()}
         taus = {f"{m:g}x": m * tau_ref for m in TAU_MULTIPLES}
         bg_rows, tract_rows, fun_rows = [], [], []
-        K = engine.K
         for t, I_t in enumerate(info):
             members = A.tract_members(t)
             dfs = {label: [] for label in taus}
@@ -247,6 +266,17 @@ def run_puma(puma: str, s: dict, args) -> None:
                 row[f"joint_df_per_bg_{label}"] = degrees_of_freedom(joint, tau) / members.size
                 row[f"mean_df_{label}"] = float(np.mean(dfs[label])) if dfs[label] else np.nan
             tract_rows.append(row)
+        joint = joint_eigenvalues(I_full)
+        del I_full
+        populated = A.N_b > 0
+        puma_row = {"puma": puma, "B": A.B, "n_bg_populated": int(populated.sum()),
+                    "BK": A.B * K}
+        for label, tau in taus.items():
+            df_b = np.array([r[f"df_{label}"] for r in bg_rows])
+            puma_row[f"joint_df_per_bg_{label}"] = degrees_of_freedom(joint, tau) / A.B
+            puma_row[f"mean_df_{label}"] = float(df_b[populated].mean()) if populated.any() \
+                else np.nan
+    write_text(out / "puma.csv", pd.DataFrame([puma_row]).to_csv(index=False))
     write_text(out / "blockgroups.csv", pd.DataFrame(bg_rows).to_csv(index=False))
     write_text(out / "tracts.csv", pd.DataFrame(tract_rows).to_csv(index=False))
     write_text(out / "functionals.csv", pd.DataFrame(fun_rows).to_csv(index=False))
@@ -266,9 +296,11 @@ def main() -> None:
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--puma", nargs="+", default=list(PUMAS))
     parser.add_argument("--alpha", type=float, default=0.01,
-                        help="Sigma shrinkage (the paper baseline's alpha)")
-    parser.add_argument("--variance-floor", default=None,
-                        help="PMEDMInputs.sigma's variance_floor (default none)")
+                        help="Sigma_survey shrinkage (the standard PMEDM's)")
+    parser.add_argument("--variance-floor", default="zero",
+                        help="PMEDMInputs.sigma's variance_floor ('zero', 'none' or a number)")
+    parser.add_argument("--prior-sd", type=float, default=3.0,
+                        help="s in omega = N / (n s), the model-gap term")
     parser.add_argument("--evals", type=int, default=2,
                         help="engine evaluations per PUMA (the first at u = 0)")
     parser.add_argument("--seed", type=int, default=1)
@@ -317,8 +349,9 @@ def main() -> None:
         if s.get("pairs") is not None:
             write_text(args.out / "settings.json", json.dumps({
                 "h": step1.h, "gamma": step1.gamma, "sigma_theta": step1.sigma,
-                "tables": step1.tables, "alpha": args.alpha, "taper": "tract",
-                "variance_floor": args.variance_floor, "tau_ref": s["tau_ref"],
+                "tables": step1.tables, "alpha": args.alpha, "taper": None,
+                "variance_floor": args.variance_floor, "prior_sd_s": args.prior_sd,
+                "tau_ref": s["tau_ref"],
                 "tau_ref_pumas": len(step1.pumas), "tau_multiples": list(TAU_MULTIPLES),
                 "K": int(H.shape[1]), "M": int(H.shape[0]), "step1": str(step1.root),
                 "run": str(args.run), "step1_notes": step1.notes,

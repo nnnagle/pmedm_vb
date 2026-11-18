@@ -1,5 +1,5 @@
 """Pool step 2's per-PUMA outputs and apply the §6 decision rules
-(``PLAN_latent_step2.md``).
+(``PLAN_latent_step2.md`` version 2).
 
     python experiments/latent/collect_step2.py --root $PMEDM_VB_RUNS/latent/step2
 
@@ -10,11 +10,11 @@ those with ``done.json``) as ``step2_engine.py`` writes them. Writes under
 * ``summary.txt``: settings and ``τ_ref``; the §4.1 checks per PUMA; the
   engine's timings and peak memory; the information diagnostic per PUMA
   (quantiles of ``df_b`` at each ``τ``, eigenvalues above ``τ⁻²``, what tract
-  rows add) and per block group; the variance removed for the §4.3
-  functionals; the survey vs realization split of ``diag S``; and the §6
-  decisions;
-* ``blockgroups.csv``, ``tracts.csv``, ``functionals.csv``, ``timings.csv``,
-  ``s_split.csv`` (all PUMAs) and ``decisions.json``.
+  rows and the cross-tract coupling add) and per block group; the variance
+  removed for the §4.3 functionals; the survey, model-gap (``ω²``) and
+  realization split of ``diag S``; and the §6 decisions;
+* ``blockgroups.csv``, ``tracts.csv``, ``puma.csv``, ``functionals.csv``,
+  ``timings.csv``, ``s_split.csv`` (all PUMAs) and ``decisions.json``.
 
 **Decision rules** (§6, thresholds fixed at approval):
 
@@ -106,6 +106,7 @@ def main() -> None:
     settings = json.loads((root / "settings.json").read_text())
     timings, bgs = read(root, "timings"), read(root, "blockgroups")
     tracts, funs, split = read(root, "tracts"), read(root, "functionals"), read(root, "s_split")
+    puma_df = read(root, "puma")
     if bgs.empty:
         raise SystemExit(f"no finished PUMAs under {root}")
     pumas = sorted(bgs["puma"].unique())
@@ -114,10 +115,11 @@ def main() -> None:
     labels = [c[len("df_"):] for c in bgs.columns if c.startswith("df_")]
 
     out = ["Step 2: collapsed-likelihood engine and information diagnostic",
-           "(PLAN_latent_step2.md version 1; MODEL_latent.qmd version 1)", ""]
+           "(PLAN_latent_step2.md version 2; MODEL_latent.qmd version 2)", ""]
     out += ["== Settings ==",
             *(f"{k}: {settings[k]}" for k in ("h", "gamma", "sigma_theta", "tables", "alpha",
-                                               "taper", "variance_floor", "K", "M")),
+                                               "taper", "variance_floor", "prior_sd_s", "K",
+                                               "M")),
             f"tau_ref = {settings['tau_ref']:.4g} (from {settings['tau_ref_pumas']} PUMAs' "
             f"theta_P); tau grid {', '.join(f'{m:g} x' for m in settings['tau_multiples'])}",
             f"pair operator: {json.dumps(settings['pair_operator'])}",
@@ -130,18 +132,20 @@ def main() -> None:
         "T_vs_X_own": a.get("own_rows_max_abs_T_minus_X", np.nan),
         "sum_N_b": a["N_b_sum"], "N_puma": a["N_puma"], "ratio": a["N_b_sum_over_N_puma"],
         "gq": a["gq_total"], "bg_N0": a["n_block_groups_N_zero"],
+        "N": a["N_puma"], "n": a["n_puma"], "omega": a["omega"],
         "p_vs_qP": a["max_abs_p_minus_stored_qP"]} for p, a in areas.items()]).set_index("puma")
     out += ["== Area inputs (4.1 checks) ==",
             "one_to_one: T's constraint cells map one to one onto build_puma's columns; "
             "T_vs_X_own: max |T - X| on the PUMA's own records; ratio: sum_b N_b / PUMA N "
-            "(PUMS weights); p_vs_qP: max |p_b(u=0) - step 1's q^P|.",
+            "(PUMS weights); p_vs_qP: max |p_b(u=0) - step 1's q^P|; omega = N / (n s), "
+            "with N and n the PUMA's units and own records (build_puma).",
             fmt(area_rows, 4), ""]
 
     tcols = ["build_s", "factor_s", "loglik_s", "gradient_s", "logdet_gradient_s", "total_s",
              "peak_gb"]
     out += ["== Engine timings (seconds; peak memory of the process in GB) ==",
             "gradient = without the log det term; logdet_gradient = the log det term "
-            "(including S_t^-1).",
+            "(including the tract blocks of S^-1).",
             fmt(timings.set_index(["puma", "evaluation"])[
                 ["B", "n_tracts", "n_rows", "max_tract_rows", *tcols, "workers"]]), ""]
 
@@ -170,7 +174,10 @@ def main() -> None:
     tract_cols = [c for c in tracts.columns if c.startswith(("joint_df_per_bg_", "mean_df_"))]
     out += ["What tract rows add: per tract, the joint df over its block groups divided by "
             "their number, beside the mean of the block groups' own df (medians over tracts):",
-            fmt(tracts.groupby("puma")[tract_cols].median()), ""]
+            fmt(tracts.groupby("puma")[tract_cols].median()), "",
+            "What the cross-tract coupling adds: the joint df of the PUMA's full I divided by "
+            "its number of block groups, beside the mean of the block groups' own df:",
+            fmt(puma_df.set_index("puma")), ""]
 
     vr = funs[funs["N_b"] > 0].groupby(["kind", "functional", "tau_multiple"])[
         "variance_removed"].describe(percentiles=[0.1, 0.5, 0.9])[["10%", "50%", "90%"]]
@@ -186,16 +193,17 @@ def main() -> None:
     out += ["Median share removed at tau_ref, by PUMA:", fmt(per_puma), ""]
 
     allrows = split[split["table"] == "(all)"].set_index(["puma", "level"])
-    out += ["== diag S: survey (Sigma) vs realization variance ==",
+    out += ["== diag S: survey (Sigma_survey) + model gap (omega^2) + realization variance ==",
             "ratio = survey / realization per cell (cells with realization > 0); mean_weight = "
             "the PUMA's N / n.",
-            fmt(allrows[["cells", "cells_realization_zero", "survey_mean", "realization_mean",
-                         "ratio_of_means", "ratio_median", "ratio_q10", "ratio_q90",
-                         "share_survey_larger", "mean_weight"]]), "",
+            fmt(allrows[["cells", "cells_realization_zero", "survey_mean", "model_gap",
+                         "realization_mean", "ratio_of_means", "ratio_median", "ratio_q10",
+                         "ratio_q90", "share_survey_larger",
+                         "share_model_gap_larger_than_realization", "mean_weight"]]), "",
             "By level and table (median over PUMAs):",
             fmt(split[split["table"] != "(all)"].groupby(["level", "table"])[
-                ["survey_mean", "realization_mean", "ratio_median", "share_survey_larger"]]
-                .median()), ""]
+                ["survey_mean", "model_gap", "realization_mean", "ratio_median",
+                 "share_survey_larger"]].median()), ""]
 
     out += ["== Decisions (section 6) ==", *decision_lines, ""]
     bg_cols = ["puma", "block_group", "N_b", "households", "gq", "trace_I", "eig1",
@@ -204,7 +212,8 @@ def main() -> None:
         index=False, float_format=lambda x: f"{x:.3g}"), ""]
 
     write_text(root / "summary.txt", "\n".join(out))
-    for name, frame in (("blockgroups", bgs), ("tracts", tracts), ("functionals", funs),
+    for name, frame in (("blockgroups", bgs), ("tracts", tracts), ("puma", puma_df),
+                        ("functionals", funs),
                         ("timings", timings), ("s_split", split)):
         write_text(root / f"{name}.csv", frame.to_csv(index=False))
     write_text(root / "decisions.json", json.dumps(decision, indent=1))

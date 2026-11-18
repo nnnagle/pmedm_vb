@@ -1,12 +1,19 @@
 """A PUMA's area inputs for the collapsed likelihood (step 2, pieces A3 and A4
-of ``PLAN_latent.md``; ``PLAN_latent_step2.md`` §4.1).
+of ``PLAN_latent.md``; ``PLAN_latent_step2.md`` version 2, §4.1).
 
 **Published tables (A3).** ``Y``, ``Σ`` and the nesting come from
 :func:`~pmedm_vb.assemble.build.build_puma` over the PUMA's constraint tables
 (imported, unchanged). ``Y`` is the stacked vector ``[vec(Y_T); vec(Y_B)]``,
-column-major, and ``Σ = PMEDMInputs.sigma(alpha, taper="tract")``: the
-replicate covariance is kept only within tracts, so ``Σ`` is block diagonal by
-tract (``assemble/sigma.py``, "Tapering").
+column-major. The table covariance (``MODEL_latent.qmd`` version 2) is
+
+    Σ = Σ_survey + ω² I,    ω = N_P / (n_P s),  s = 3,
+
+with ``Σ_survey = PMEDMInputs.sigma(alpha=0.01, taper=None,
+variance_floor="zero")``, the standard PMEDM's (untapered: ``D + LL'`` with
+``L`` the scaled replicate deviations over every row), and ``ω²`` the
+standard PMEDM's multiplier prior in covariance form
+(:func:`~pmedm_vb.assemble.prior.prior_variance` with the PUMA build's ``N``
+and ``n``, its units and own records), carried as ``Sigma.prior_var``.
 
 **Contributions.** Step 1's statewide ``T`` (:class:`~pmedm_vb.latent.atoms.Contributions`)
 is restricted to the constraint cells and its columns mapped one to one onto
@@ -57,6 +64,7 @@ import scipy.sparse as sp
 from pmedm_vb.assemble.allcells import table_leaves
 from pmedm_vb.assemble.build import build_puma
 from pmedm_vb.assemble.inputs import PMEDMInputs
+from pmedm_vb.assemble.prior import prior_variance, with_prior
 from pmedm_vb.assemble.sigma import Sigma
 from pmedm_vb.latent.atoms import GQ_COLUMNS, Atoms, Contributions
 from pmedm_vb.latent.basis import KERNEL_CENTRES, kernel_features, raw_features
@@ -165,7 +173,7 @@ class AreaInputs:
     bg_cells: list[str]
     columns: ColumnMap
     Y: np.ndarray                 # stacked [vec(Y_T); vec(Y_B)]
-    sigma: Sigma
+    sigma: Sigma                  # Σ_survey + ω² I (prior_var = ω²)
     households: np.ndarray
     gq: np.ndarray
     N_puma: float                 # build_puma's N (the PUMA's PUMS weight total)
@@ -232,12 +240,13 @@ class AreaInputs:
         return pd.DataFrame(rows, columns=["level", "table", "cell", "geoid"])
 
 
-def area_inputs(area, puma: str, tables, contributions: Contributions, *, alpha: float,
-                variance_floor=None, zones: pd.DataFrame | None = None) -> AreaInputs:
+def area_inputs(area, puma: str, tables, contributions: Contributions, *, alpha: float = 0.01,
+                variance_floor="zero", prior_sd: float = 3.0,
+                zones: pd.DataFrame | None = None) -> AreaInputs:
     """Build PUMA ``puma``'s area inputs and run the §4.1 checks: the column
     mapping one to one (and ``T``'s rows equal to ``X`` for the PUMA's own
-    records), the tapered ``Σ`` block diagonal by tract, and ``Σ_b N_b``
-    against the PUMA's ``N``."""
+    records), the tracts' local layouts partitioning the rows, and
+    ``Σ_b N_b`` against the PUMA's ``N``."""
     problem = build_puma(area, str(puma), tables, zones=zones)
     columns = map_columns(contributions, problem.tract_constraints, problem.bg_constraints)
     checks = dict(columns.checks)
@@ -256,7 +265,8 @@ def area_inputs(area, puma: str, tables, contributions: Contributions, *, alpha:
             diff = max(diff, float(abs(T[:, cols] - sp.csr_matrix(X)).max()))
         checks["own_rows_max_abs_T_minus_X"] = diff
     bg_tract = problem.zone_tracts()
-    sigma = problem.sigma(alpha, taper="tract", variance_floor=variance_floor)
+    omega2 = prior_variance(prior_sd, problem.n, problem.N)
+    sigma = with_prior(problem.sigma(alpha, taper=None, variance_floor=variance_floor), omega2)
     groups = problem.constraint_tracts()
     households, gq = block_group_units(problem, bg_tract)
     out = AreaInputs(
@@ -271,15 +281,16 @@ def area_inputs(area, puma: str, tables, contributions: Contributions, *, alpha:
     N_sum = float(out.N_b.sum())
     checks.update({
         "n_tracts": out.n_tracts, "n_block_groups": out.B, "n_rows": out.n_rows,
-        "alpha": alpha, "taper": "tract", "variance_floor": variance_floor,
-        "tract_rows_partition_sigma_groups": bool(partition),
+        "alpha": alpha, "taper": None, "variance_floor": variance_floor,
+        "prior_sd_s": prior_sd, "omega": float(np.sqrt(omega2)), "omega2": float(omega2),
+        "tract_rows_partition_rows": bool(partition),
         "households_total": float(households.sum()), "gq_total": float(gq.sum()),
         "N_b_sum": N_sum, "N_puma": out.N_puma, "n_puma": out.n_puma,
         "N_b_sum_over_N_puma": N_sum / out.N_puma if out.N_puma > 0 else float("nan"),
         "n_block_groups_N_zero": int((out.N_b <= 0).sum()),
     })
     if not partition:
-        raise ValueError("the tract layout does not match Sigma's tract groups")
+        raise ValueError("the tracts' local layouts do not partition the rows")
     return out
 
 
