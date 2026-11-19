@@ -8,6 +8,7 @@
 > | version | date | change |
 > |---|---|---|
 > | 1 | 2026-11-18 | approved as drafted; §9 items accepted as proposed |
+> | 2 | 2026-11-19 | §4.3: the collapsed posterior over $U$ has local optima (different optimizers stop at different objectives) and plain L-BFGS needs thousands of evaluations. Added a diagnostic run (§4.3a) that separates the two sources of non-convexity, a rule choosing the MAP method from it (§4.3b), and the MAP defined as the lowest exact objective over a set of starts. §5 compute updated. |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -92,15 +93,68 @@ play the block groups'.
 
 ### 4.3 MAP for $U$ (B3)
 
-* **For each $\tau \in \{0.5, 1, 2\}\times\tau_{\mathrm{ref}}$**
-  ($\tau_{\mathrm{ref}} = 0.284$, step 2): maximize the exact collapsed log
-  posterior over $U$ with $\theta_A$ fixed at its records fit. L-BFGS from
-  $U = 0$, gradient from the engine. Zones × $K$ is at most 612 parameters.
-* **Choosing $\tau$ without truth:** the Laplace approximation of the
-  marginal likelihood $p(Y \mid \tau)$ at each MAP, with a Gauss–Newton
-  Hessian (the mean-part information of step 2 plus $\tau^{-2}I$). The
-  evidence-chosen $\tau$ is the primary; the best $\tau$ by truth is
-  reported beside it, as a check on the rule.
+The collapsed log posterior over $U$ is not convex, for two reasons
+(derived here):
+
+1. **The tilt and the tables use different features.** $p_b \propto
+   q^A\exp\{u_b'h\}$ tilts on $h(z)$, while the tables measure $x$ through
+   $T$, so the mean $m(U) = \sum_b N_b D_b T'p_b(U)$ is nonlinear in $U$.
+2. **The covariance moves with $U$.** $S(U)$ includes the realization
+   variance under $p_b(U)$, so $-\tfrac12\log\det S(U)$ and $S(U)^{-1}$ depend
+   on $U$.
+
+The only convex term, the prior on $U$ (precision 3–50), is small against
+the data's curvature (eigenvalues up to about $4\times 10^5$). Version 1's
+build found different optimizers stopping at different objectives (for
+example 9,122 and 9,146 on one region at $0.5\,\tau_{\mathrm{ref}}$).
+
+**In all cases:** the MAP for each $\tau \in \{0.5, 1,
+2\}\times\tau_{\mathrm{ref}}$ ($\tau_{\mathrm{ref}} = 0.284$) is the
+**lowest exact collapsed objective over a set of starts** (§4.3b), with
+$\theta_A$ fixed at its records fit. The spread of the starts' final
+objectives is reported per region and $\tau$.
+
+#### 4.3a Diagnostic (run first)
+
+* **Regions:** `knoxville_core` and `upper_cumberland`, leave-zone-out
+  mode, the real $\varphi$.
+* **For each $\tau$, eight fits:**
+  - on the exact objective: plain L-BFGS with memory 10, plain L-BFGS with
+    memory 20, L-BFGS preconditioned by a Gauss–Newton Hessian refreshed
+    every 30 iterations, and plain L-BFGS (memory 10) started from the
+    previous $\tau$'s solution (none for the first $\tau$);
+  - the same four on the **fixed-$S$ objective**, with $S$ held at its value
+    at $U = 0$ (this removes source 2).
+* **Reported for each fit:** final objective (exact, and fixed-$S$ where
+  relevant), largest gradient component, evaluations, time, and the
+  distance between solutions ($\lVert\Delta U\rVert$ and the largest change
+  in fitted zone shares on the scoring tables).
+* The ladder and scoring are not run in the diagnostic.
+
+#### 4.3b Choosing the MAP method (fixed before results)
+
+Fits **agree** when their final objectives are within 1 log-likelihood unit
+of each other, for every region and $\tau$.
+
+* **If the fixed-$S$ fits agree and the exact fits do not,** the local optima
+  come from source 2. The set of starts for the full run is: the fixed-$S$
+  solution, then polished on the exact objective with plain L-BFGS (memory
+  10); and plain L-BFGS (memory 10) on the exact objective from $U = 0$.
+* **If the fixed-$S$ fits also disagree,** they come from source 1, which is
+  structural. The set of starts is all four exact fits of §4.3a.
+* **If the exact fits already agree,** the set is plain L-BFGS (memory 10)
+  from $U = 0$ and from the previous $\tau$'s solution.
+
+The chosen set is recorded with the diagnostic's numbers before the full
+run. The code carries all three sets behind one option, so the full run
+needs no code change.
+
+#### 4.3c Choosing $\tau$ without truth
+
+* The Laplace approximation of the marginal likelihood $p(Y \mid \tau)$ at
+  each MAP, with a Gauss–Newton Hessian (the mean-part information of step 2
+  plus $\tau^{-2}I$). The evidence-chosen $\tau$ is the primary; the best
+  $\tau$ by truth is reported beside it, as a check on the rule.
 * **Checks:** gradient at the optimum (largest component); MAP objective
   not above its value at $U = 0$.
 
@@ -156,16 +210,20 @@ A ladder, so each difference has one cause:
 
 ## 5. Compute
 
-CPU on ISAAC. Per region: $\theta_A$ in seconds; the $U$ MAP at about 1 s
-per evaluation, a few hundred evaluations per $\tau$; the conditional PMEDM
-over (zones × 155,047) pairs in seconds to minutes. The full run (13
-regions, 2 support modes, the ladder) is estimated at 1–3 hours on one
-16-core node, to be checked on the smoke run.
+CPU on ISAAC.
+
+* **Diagnostic (§4.3a):** 2 regions × 3 values of $\tau$ × 8 fits, run in
+  parallel; about 1–1.5 hours on one 16-core node. Plain L-BFGS needs about
+  1,500–8,700 evaluations per $\tau$ at about 0.3 s each for a 4-zone region.
+* **Full run:** per region, $\theta_A$ in seconds, the $U$ MAP over the
+  chosen set of starts, and the conditional PMEDM over (zones × 155,047)
+  pairs in seconds. 13 regions, 2 support modes and the ladder: about
+  3–6 hours on one 16-core node, within one 24-hour job.
 
 **GPU** is not needed in step 3. It matters at block-group scale (step 6).
 There, step 2's 3–5 s per evaluation suggests the MAP is about 15 minutes per
 PUMA on CPU (some 200 evaluations). The decision is left to step 6, using
-step 3's measured evaluation counts.
+step 3's measured evaluation counts (larger than step 2 assumed).
 
 ## 6. Decision rules (fixed before results)
 
