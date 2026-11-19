@@ -18,7 +18,10 @@
 #       --config experiments/embed/stage1_v2.json \
 #       --regions experiments/latent/regions_tn.json \
 #       --run $R/embed/stage1_v2/d16_g0.5_r0.01 --step1 $R/latent/step1_sigma \
-#       --out $R/latent/step3 --workers 8 --threads 2
+#       --out $R/latent/step3 --map-starts <fixedS|all4|plain2> --workers 16 --threads 1
+#
+# --map-starts is the set of starts chosen from the diagnostic
+# (step3_diagnostic.sbatch, collect_step3_diagnostic.py; PLAN_latent_step3.md §4.3b).
 #
 # Work units (region x support mode) already recorded with a done.json are
 # skipped, so a timed-out job can be resubmitted unchanged. The output

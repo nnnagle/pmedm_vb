@@ -1,5 +1,5 @@
 """Pool step 3 across regions and support modes, apply the §6 decision rules,
-and write a summary the user can copy (``PLAN_latent_step3.md`` version 1,
+and write a summary the user can copy (``PLAN_latent_step3.md`` version 2,
 §6 and §8).
 
     python experiments/latent/collect_step3.py --root $PMEDM_VB_RUNS/latent/step3
@@ -176,9 +176,11 @@ def main() -> None:
 
     by_region = ladder(frames, keys=("mode", "region", "model"))
     tau = frames["tau"].merge(best, on=["region", "mode"], how="left")
-    tau_view = tau[["mode", "region", "tau_multiple", "log_evidence", "chosen", "objective",
-                    "objective_at_zero", "grad_max", "iterations", "evaluations",
-                    "seconds_per_evaluation", "seconds", "converged"]]
+    tau_view = tau[[c for c in (
+        "mode", "region", "tau_multiple", "log_evidence", "chosen", "map_starts", "start",
+        "n_starts", "spread", "objective", "objective_at_zero", "grad_max", "iterations",
+        "evaluations", "evaluations_all_starts", "seconds_per_evaluation", "seconds_all_starts",
+        "converged") if c in tau]]
     choice = tau[tau["chosen"]][["mode", "region", "tau_multiple"]].rename(
         columns={"tau_multiple": "chosen_by_evidence"}).merge(
         best[["mode", "region", "best_tau_multiple"]], on=["mode", "region"])
@@ -216,8 +218,9 @@ def main() -> None:
                  "lor_mae)", choice.to_string(index=False), "",
                  "   agreement: " + (f"{(choice['chosen_by_evidence'] == choice['best_tau_multiple']).mean():.0%}"
                                      if len(choice) else "n/a"), "",
-                 "   per tau: MAP objective F against F(U = 0), largest gradient component, "
-                 "L-BFGS iterations and evaluations, seconds",
+                 "   per tau: the MAP's start, the spread of the starts' final exact objectives, "
+                 "MAP objective F against F(U = 0), largest gradient component, iterations and "
+                 "evaluations (the MAP's start; all starts), seconds",
                  tau_view.round(4).to_string(index=False), ""]
         if refs:
             text += ["4. Region references (theta_A on all the region's records)",
@@ -248,12 +251,12 @@ def main() -> None:
                  f"gradient component {frames['tau']['grad_max'].max():.2e}", ""]
         if timings:
             t = pd.DataFrame(timings)
-            evals = frames["tau"]["evaluations"]
+            evals = frames["tau"].get("evaluations_all_starts", frames["tau"]["evaluations"])
             text += ["6. Timings",
                      f"   units {len(t)}; seconds per unit: median {t['seconds'].median():.0f}, "
                      f"max {t['seconds'].max():.0f}, total {t['seconds'].sum():.0f}; "
                      f"peak memory per process {t['peak_gb'].max():.1f} GB",
-                     f"   MAP evaluations per tau: median {evals.median():.0f}, max {evals.max()}; "
+                     f"   MAP evaluations per tau (all starts): median {evals.median():.0f}, max {evals.max()}; "
                      f"seconds per evaluation: median "
                      f"{frames['tau']['seconds_per_evaluation'].median():.2f}",
                      t[["region", "mode", "Z", "rows", "seconds", "peak_gb", "threads"]]

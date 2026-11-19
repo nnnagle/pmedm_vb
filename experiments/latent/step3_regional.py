@@ -1,12 +1,12 @@
 """Step 3 of the latent-population PMEDM: MAP on the regional run, against the
-standard PMEDM (``PLAN_latent_step3.md`` version 1; model ``MODEL_latent.qmd``
+standard PMEDM (``PLAN_latent_step3.md`` version 2; model ``MODEL_latent.qmd``
 version 2).
 
     python experiments/latent/step3_regional.py --config experiments/embed/stage1_v2.json \
         --regions experiments/latent/regions_tn.json \
         --run $PMEDM_VB_RUNS/embed/stage1_v2/d16_g0.5_r0.01 \
         --step1 $PMEDM_VB_RUNS/latent/step1_sigma --out $PMEDM_VB_RUNS/latent/step3 \
-        --workers 8 --threads 2
+        --map-starts <fixedS|all4|plain2> --workers 16 --threads 1
     python experiments/latent/collect_step3.py --root $PMEDM_VB_RUNS/latent/step3
 
 The region plays the PUMA's part and its PUMAs (zones) the block groups'
@@ -36,7 +36,11 @@ then ``own``; §3), the ladder of §4.5:
                 base ``p_b = q^A`` (``U = 0``), weight ``N_b``;
 ``latent_t<m>`` the conditional PMEDM at the MAP ``Û`` for ``τ = m τ_ref``
                 (:mod:`pmedm_vb.latent.map_fit`; ``--tau-multiples``,
-                ``τ_ref = 0.284`` from step 2);
+                ``τ_ref = 0.284`` from step 2): the lowest exact objective
+                over the set of starts ``--map-starts`` (§4.3b: ``fixedS``,
+                ``all4`` or ``plain2``, chosen from the diagnostic,
+                ``step3_diagnostic.py``), the ``τ`` in increasing order so
+                that a start can begin from the previous ``τ``'s MAP;
 ``latent``      the same at the ``τ`` chosen by Laplace evidence (a copy of
                 that ``latent_t<m>``'s rows);
 ``latent_n``    as ``latent``, entropy weight ``n_A`` (``κ_b = n_A N_b / N_A``).
@@ -56,8 +60,10 @@ Each unit writes ``<out>/<region>/<mode>/``: ``scores``, ``rare``,
 ``misfit``, ``spread``, ``summary``, ``transfer`` (as the regional run),
 ``fits.csv`` (per variant: convergence, iterations, seconds, and for the
 conditional PMEDM the duality gap and KKT residual), ``tau.csv`` (per ``τ``:
-the MAP's objective against ``U = 0``, largest gradient component,
-iterations, evaluations, seconds per evaluation, Laplace evidence, chosen),
+the MAP's start, objective against ``U = 0``, largest gradient component,
+iterations, evaluations, seconds per evaluation, Laplace evidence, chosen,
+and the spread of the starts' final exact objectives with their total
+evaluations), ``starts.csv`` (every start's fit),
 ``map.npz`` (``θ̂_A``, ``Û`` per ``τ``, evidence), ``realized.npz`` (``r̂_b``
 per variant in float32 and the multipliers; the standard PMEDM's ``W / N``),
 ``timings.json`` and ``done.json``; a unit with ``done.json`` is skipped, so a
@@ -87,7 +93,7 @@ from pmedm_vb.latent.area import load_basis, load_step1
 from pmedm_vb.latent.atoms import load_atoms
 from pmedm_vb.latent.collapsed import PairOperator
 from pmedm_vb.latent.conditional import solve_conditional
-from pmedm_vb.latent.map_fit import choose_tau, fit_map, laplace_evidence
+from pmedm_vb.latent.map_fit import START_SETS, choose_tau, fit_starts, laplace_evidence
 from pmedm_vb.latent.region_engine import (
     RegionLikelihood,
     region_area,
@@ -251,21 +257,31 @@ def run_unit(unit: tuple[str, str]) -> tuple[str, str, float]:
     score("latent_u0", share[:, None] * res.r, True)
     score("latent_u0:p", share[:, None] * p0, True)
 
-    map_fits, bases = [], {}
+    map_fits, bases, start_rows, spreads, previous = [], {}, [], [], None
+    gtol_kw = {"gtol": args.map_gtol, "max_iter": args.map_max_iter}
     for m in args.tau_multiples:
         tau = m * args.tau_ref
         t0 = time.perf_counter()
-        with stage(f"region {region_id} {mode}: MAP at tau = {m:g} tau_ref") as step:
-            fit = fit_map(engine, ref.theta, tau, gtol=args.map_gtol, max_iter=args.map_max_iter)
+        with stage(f"region {region_id} {mode}: MAP at tau = {m:g} tau_ref, "
+                   f"starts {args.map_starts}") as step:
+            fit, starts = fit_starts(engine, ref.theta, tau, args.map_starts, previous, **gtol_kw)
             laplace_evidence(engine, ref.theta, fit)
-            step.detail = (f"{fit.evaluations} evaluations, {fit.seconds:.0f}s, gradient "
-                           f"{fit.grad_max:.1e}, F {fit.objective:.2f} vs {fit.objective_at_zero:.2f} "
-                           f"at U = 0, log evidence {fit.log_evidence:.2f}")
+            values = [f.objective for f in starts]
+            spreads.append({"n_starts": len(starts), "spread": max(values) - min(values),
+                            "evaluations_all_starts": sum(f.evaluations for f in starts),
+                            "seconds_all_starts": sum(f.seconds for f in starts)})
+            step.detail = (f"MAP from {fit.start}; F by start "
+                           + ", ".join(f"{f.start} {f.objective:.2f}" for f in starts)
+                           + f"; spread {spreads[-1]['spread']:.2f}; F(0) {fit.objective_at_zero:.2f}"
+                           f"; gradient {fit.grad_max:.1e}; log evidence {fit.log_evidence:.2f}")
+        start_rows += [{**tag, "tau_multiple": m, **f.info(), "selected": f is fit}
+                       for f in starts]
         times[f"map_t{m:g}"] = time.perf_counter() - t0
         if not fit.converged:
             logger.warning("region %s %s tau %g: MAP not converged (%s, gradient %.2e)",
                            region_id, mode, m, fit.message, fit.grad_max)
         map_fits.append(fit)
+        previous = fit.U
         p_b = engine.probabilities(ref.theta, fit.U).T
         bases[m] = p_b
         model = tau_label(m)
@@ -274,8 +290,9 @@ def run_unit(unit: tuple[str, str]) -> tuple[str, str, float]:
         score(f"{model}:p", share[:, None] * p_b, True)
     chosen = choose_tau(map_fits)
     m_star = args.tau_multiples[chosen]
-    tau_rows = [{**tag, "tau_multiple": m, **f.info(), "chosen": k == chosen}
-                for k, (m, f) in enumerate(zip(args.tau_multiples, map_fits))]
+    tau_rows = [{**tag, "tau_multiple": m, "map_starts": args.map_starts, **f.info(), **sp_,
+                 "chosen": k == chosen}
+                for k, (m, f, sp_) in enumerate(zip(args.tau_multiples, map_fits, spreads))]
     # `latent` is the evidence-chosen τ: a copy of its rows.
     for k in FRAMES:
         extra = []
@@ -292,6 +309,7 @@ def run_unit(unit: tuple[str, str]) -> tuple[str, str, float]:
         write_text(out / f"{k}.csv", pd.concat(parts, ignore_index=True).to_csv(index=False))
     write_text(out / "fits.csv", pd.DataFrame(fits).to_csv(index=False))
     write_text(out / "tau.csv", pd.DataFrame(tau_rows).to_csv(index=False))
+    write_text(out / "starts.csv", pd.DataFrame(start_rows).to_csv(index=False))
     save_npz(out / "map.npz", theta=ref.theta, tau_multiples=np.array(args.tau_multiples),
              tau=np.array([f.tau for f in map_fits]), U=np.array([f.U for f in map_fits]),
              log_evidence=np.array([f.log_evidence for f in map_fits]), chosen=np.array(chosen),
@@ -302,7 +320,8 @@ def run_unit(unit: tuple[str, str]) -> tuple[str, str, float]:
     write_text(out / "timings.json", json.dumps({
         **tag, "seconds": seconds, "parts": times, "peak_gb": peak_gb(), "Z": Z,
         "rows": int(area.n_rows), "threads": args.threads,
-        "map_evaluations": [f.evaluations for f in map_fits],
+        "map_starts": args.map_starts,
+        "map_evaluations": [r["evaluations_all_starts"] for r in spreads],
         "map_seconds_per_evaluation": [f.info()["seconds_per_evaluation"] for f in map_fits]},
         indent=1))
     write_text(out / "done.json", json.dumps({"seconds": seconds, "chosen_tau_multiple": m_star}))
@@ -324,6 +343,9 @@ def main() -> None:
     parser.add_argument("--tau-multiples", type=float, nargs="+", default=list(TAU_MULTIPLES))
     parser.add_argument("--sigma-alpha", type=float, default=0.01)
     parser.add_argument("--prior-sd", type=float, default=3.0, help="s in omega = N / (n s)")
+    parser.add_argument("--map-starts", required=True, choices=list(START_SETS),
+                        help="the MAP's set of starts (PLAN_latent_step3.md §4.3b), chosen from "
+                             "the diagnostic (step3_diagnostic.py)")
     parser.add_argument("--map-gtol", type=float, default=1e-4,
                         help="L-BFGS stop: largest gradient component")
     parser.add_argument("--map-max-iter", type=int, default=20000)
@@ -371,7 +393,7 @@ def main() -> None:
         "sigma_alpha": args.sigma_alpha, "taper": None, "variance_floor": None,
         "prior_sd_s": args.prior_sd, "modes": args.modes, "tables_A": list(sets["A"]),
         "tables_B": list(sets["B"]), "step1": str(step1.root), "run": str(args.run),
-        "map_gtol": args.map_gtol, "map_max_iter": args.map_max_iter,
+        "map_starts": args.map_starts, "map_gtol": args.map_gtol, "map_max_iter": args.map_max_iter,
         "cond_tol": args.cond_tol, "pair_operator": pairs.summary(),
         "step1_notes": step1.notes}, indent=1, default=str))
     _SHARED.update(data=data, args=args, regions=regions, chosen=chosen, step1=step1, H=H,
