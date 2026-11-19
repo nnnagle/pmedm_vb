@@ -9,6 +9,7 @@
 > |---|---|---|
 > | 1 | 2026-11-18 | approved as drafted; §9 items accepted as proposed |
 > | 2 | 2026-11-19 | §4.3: the collapsed posterior over $U$ has local optima (different optimizers stop at different objectives) and plain L-BFGS needs thousands of evaluations. Added a diagnostic run (§4.3a) that separates the two sources of non-convexity, a rule choosing the MAP method from it (§4.3b), and the MAP defined as the lowest exact objective over a set of starts. §5 compute updated. |
+> | 3 | 2026-11-19 | §4.3a: Levenberg–Marquardt added to the diagnostic on both objectives (the problem is a penalized nonlinear regression, for which LM is the standard solver). §4.3b: the case "exact fits agree, fixed-$S$ fits do not" resolved (the exact fits decide); LM replaces plain L-BFGS in the chosen set when it reaches the best objective. |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -118,13 +119,23 @@ objectives is reported per region and $\tau$.
 
 * **Regions:** `knoxville_core` and `upper_cumberland`, leave-zone-out
   mode, the real $\varphi$.
-* **For each $\tau$, eight fits:**
+* **For each $\tau$, ten fits:**
   - on the exact objective: plain L-BFGS with memory 10, plain L-BFGS with
     memory 20, L-BFGS preconditioned by a Gauss–Newton Hessian refreshed
     every 30 iterations, and plain L-BFGS (memory 10) started from the
     previous $\tau$'s solution (none for the first $\tau$);
   - the same four on the **fixed-$S$ objective**, with $S$ held at its value
-    at $U = 0$ (this removes source 2).
+    at $U = 0$ (this removes source 2);
+  - **Levenberg–Marquardt from $U = 0$ on each objective.** Each step solves
+    $(G + \tau^{-2}I + \mu I)\,\Delta = -\nabla F$, with $G = J'S^{-1}J$
+    the mean-part Gauss–Newton matrix of step 2 ($S = S(0)$ for the fixed-$S$
+    objective, $S(U)$ for the exact one) and $\nabla F$ the objective's own
+    gradient. A step is accepted if it lowers that objective; $\mu$ is
+    divided by 10 on acceptance and multiplied by 10 on rejection. Same stop
+    rule as L-BFGS (largest gradient component at most $10^{-4}$), at most
+    500 iterations. On the fixed-$S$ objective this is standard LM for
+    penalized nonlinear least squares; on the exact objective it is a damped
+    quasi-Newton method (it omits the covariance part of the Hessian).
 * **Reported for each fit:** final objective (exact, and fixed-$S$ where
   relevant), largest gradient component, evaluations, time, and the
   distance between solutions ($\lVert\Delta U\rVert$ and the largest change
@@ -142,8 +153,15 @@ of each other, for every region and $\tau$.
   10); and plain L-BFGS (memory 10) on the exact objective from $U = 0$.
 * **If the fixed-$S$ fits also disagree,** they come from source 1, which is
   structural. The set of starts is all four exact fits of §4.3a.
-* **If the exact fits already agree,** the set is plain L-BFGS (memory 10)
-  from $U = 0$ and from the previous $\tau$'s solution.
+* **If the exact fits already agree** (whether or not the fixed-$S$ fits
+  do), the set is plain L-BFGS (memory 10) from $U = 0$ and from the
+  previous $\tau$'s solution. The exact objective defines the MAP, so its
+  agreement decides.
+* **LM:** if exact-objective LM reaches within 1 unit of the lowest exact
+  objective of all fits, for every region and $\tau$, it replaces plain
+  L-BFGS (memory 10) everywhere in the chosen set. On the fixed-$S$
+  objective the same test decides whether LM replaces L-BFGS for the
+  fixed-$S$ fit.
 
 The chosen set is recorded with the diagnostic's numbers before the full
 run. The code carries all three sets behind one option, so the full run
