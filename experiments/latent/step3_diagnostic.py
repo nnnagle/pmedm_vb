@@ -1,5 +1,5 @@
 """Step 3, §4.3a: the MAP diagnostic, run before the full regional run
-(``PLAN_latent_step3.md`` version 2; model ``MODEL_latent.qmd`` version 2).
+(``PLAN_latent_step3.md`` version 3; model ``MODEL_latent.qmd`` version 2).
 
     python experiments/latent/step3_diagnostic.py --config experiments/embed/stage1_v2.json \
         --regions experiments/latent/regions_tn.json \
@@ -12,21 +12,30 @@
 Regions ``knoxville_core`` and ``upper_cumberland`` (``--region``),
 leave-zone-out mode, the real φ; the same inputs as ``step3_regional.py``
 (``θ̂_A`` on the region's records, ``Σ``, the engine). For each
-``τ ∈ {0.5, 1, 2} × τ_ref``, eight fits (:mod:`pmedm_vb.latent.map_fit`):
+``τ ∈ {0.5, 1, 2} × τ_ref``, ten fits (:mod:`pmedm_vb.latent.map_fit`):
 
 * on the exact objective: plain L-BFGS with memory 10 (``exact_m10``) and 20
   (``exact_m20``), L-BFGS preconditioned by the Gauss–Newton Hessian refreshed
   every 30 iterations (``exact_gn``), and plain L-BFGS (memory 10) from the
   previous ``τ``'s solution (``exact_warm``; none for the first ``τ``);
 * the same four on the fixed-S objective (``fixedS_*``; ``S`` held at
-  ``S(0)``).
+  ``S(0)``);
+* Levenberg–Marquardt from ``U = 0`` on each objective (``exact_lm``,
+  ``fixedS_lm``; plan version 3; at most ``--lm-max-iter`` = 500 iterations).
+
+**Resuming a version 2 run.** Every fit is its own pair of files, named by
+fit and ``τ``, and is skipped when its ``.json`` exists. Rerunning this script
+into a folder written by the version 2 diagnostic (commit ``06e28e2``) skips
+its eight fits per region and ``τ`` unchanged, runs only the LM fits, and then
+the comparison over all fits.
 
 **The previous τ's solution** (a choice made here; the plan does not say which
 of the previous ``τ``'s fits): the one with the lowest value of the same
-objective among that ``τ``'s ``m10``, ``m20`` and ``gn`` fits.
+objective among that ``τ``'s ``m10``, ``m20`` and ``gn`` fits (the LM fits
+are not candidates, so version 2's warm starts are unchanged).
 
 **Work.** Phase 1: one unit per (region, objective, optimizer) for ``m10``,
-``m20`` and ``gn``, each over the ``τ`` in increasing order, every fit from
+``m20``, ``gn`` and ``lm``, each over the ``τ`` in increasing order, every fit from
 ``U = 0``. Phase 2: one unit per (region, objective, ``τ`` after the first),
 the warm start. Units run in ``--workers`` processes. Each fit writes
 ``<out>/<region>/<fit>_t<m>.json`` (its :meth:`~pmedm_vb.latent.map_fit.MapFit.info`)
@@ -65,7 +74,7 @@ from pmedm_vb.embed.puma_check import load_check_data
 from pmedm_vb.latent.area import load_basis, load_step1
 from pmedm_vb.latent.atoms import load_atoms
 from pmedm_vb.latent.collapsed import PairOperator
-from pmedm_vb.latent.map_fit import OPTIMIZERS, run_fit
+from pmedm_vb.latent.map_fit import LM_MAX_ITER, OPTIMIZERS, run_fit
 from pmedm_vb.latent.region_engine import (
     RegionLikelihood,
     region_area,
@@ -82,6 +91,8 @@ REGIONS = ("knoxville_core", "upper_cumberland")
 TAU_REF = 0.284
 TAU_MULTIPLES = (0.5, 1.0, 2.0)
 OBJECTIVES = ("exact", "fixedS")
+#: Candidates for the warm start (the previous τ's L-BFGS fits, as in version 2).
+WARM_FROM = ("m10", "m20", "gn")
 
 
 def fit_path(region: str, name: str, m: float) -> Path:
@@ -90,7 +101,7 @@ def fit_path(region: str, name: str, m: float) -> Path:
 
 def save_fit(path: Path, fit, extra: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    save_npz(path.with_suffix(".npz"), U=fit.U)
+    save_npz(path.with_suffix(".npz"), U=fit.U, trace=np.asarray(fit.trace, float))
     write_text(path.with_suffix(".json"), json.dumps({**extra, **fit.info()}, default=float))
 
 
@@ -101,7 +112,8 @@ def load_fit(path: Path) -> tuple[dict, np.ndarray]:
 
 def kwargs() -> dict:
     a = _SHARED["args"]
-    return {"gtol": a.map_gtol, "max_iter": a.max_iter, "refresh": a.refresh}
+    return {"gtol": a.map_gtol, "max_iter": a.max_iter, "refresh": a.refresh,
+            "lm_max_iter": a.lm_max_iter}
 
 
 def phase1(unit: tuple[str, str, str]) -> str:
@@ -132,7 +144,7 @@ def phase2(unit: tuple[str, str, int]) -> str:
     if path.with_suffix(".json").exists():
         return f"{region} {name} {m:g}"
     key = "objective" if objective == "exact" else "fixed_s_objective"
-    candidates = [load_fit(fit_path(region, f"{objective}_{o}", prev)) for o in OPTIMIZERS]
+    candidates = [load_fit(fit_path(region, f"{objective}_{o}", prev)) for o in WARM_FROM]
     info, U0 = min(candidates, key=lambda c: c[0][key])
     with stage(f"{region} {name} tau = {m:g} tau_ref (from {info['fit']} at {prev:g})") as step:
         fit = run_fit(engine, theta, m * args.tau_ref, objective, "m10", U0=U0, **kwargs())
@@ -199,6 +211,8 @@ def main() -> None:
     parser.add_argument("--map-gtol", type=float, default=1e-4)
     parser.add_argument("--max-iter", type=int, default=20000,
                         help="iteration cap per fit (reduce for a smoke run)")
+    parser.add_argument("--lm-max-iter", type=int, default=LM_MAX_ITER,
+                        help="Levenberg-Marquardt iteration cap (500 in the plan)")
     parser.add_argument("--refresh", type=int, default=30,
                         help="Gauss-Newton preconditioner refreshed every this many iterations")
     parser.add_argument("--workers", type=int, default=1)
@@ -242,7 +256,7 @@ def main() -> None:
         "regions": args.region, "mode": args.mode, "tau_ref": args.tau_ref,
         "tau_multiples": args.tau_multiples, "h": step1.h, "gamma": step1.gamma,
         "sigma_theta": step1.sigma, "map_gtol": args.map_gtol, "max_iter": args.max_iter,
-        "refresh": args.refresh, "step1": str(step1.root), "run": str(args.run)}, indent=1))
+        "refresh": args.refresh, "lm_max_iter": args.lm_max_iter, "step1": str(step1.root), "run": str(args.run)}, indent=1))
     _SHARED.update(data=data, args=args, chosen=args.region, refs=refs, engines=engines)
 
     phases = [

@@ -1,12 +1,13 @@
 """Step 3 of the latent-population PMEDM: MAP on the regional run, against the
-standard PMEDM (``PLAN_latent_step3.md`` version 2; model ``MODEL_latent.qmd``
+standard PMEDM (``PLAN_latent_step3.md`` version 3; model ``MODEL_latent.qmd``
 version 2).
 
     python experiments/latent/step3_regional.py --config experiments/embed/stage1_v2.json \
         --regions experiments/latent/regions_tn.json \
         --run $PMEDM_VB_RUNS/embed/stage1_v2/d16_g0.5_r0.01 \
         --step1 $PMEDM_VB_RUNS/latent/step1_sigma --out $PMEDM_VB_RUNS/latent/step3 \
-        --map-starts <fixedS|all4|plain2> --workers 16 --threads 1
+        --map-starts <fixedS|all4|plain2> --optimizer <m10|lm> \
+        --fixed-s-optimizer <m10|lm> --workers 16 --threads 1
     python experiments/latent/collect_step3.py --root $PMEDM_VB_RUNS/latent/step3
 
 The region plays the PUMA's part and its PUMAs (zones) the block groups'
@@ -39,7 +40,9 @@ then ``own``; §3), the ladder of §4.5:
                 ``τ_ref = 0.284`` from step 2): the lowest exact objective
                 over the set of starts ``--map-starts`` (§4.3b: ``fixedS``,
                 ``all4`` or ``plain2``, chosen from the diagnostic,
-                ``step3_diagnostic.py``), the ``τ`` in increasing order so
+                ``step3_diagnostic.py``; with ``--optimizer lm`` and
+                ``--fixed-s-optimizer lm``, §4.3b's LM rule: LM in place of
+                plain L-BFGS memory 10), the ``τ`` in increasing order so
                 that a start can begin from the previous ``τ``'s MAP;
 ``latent``      the same at the ``τ`` chosen by Laplace evidence (a copy of
                 that ``latent_t<m>``'s rows);
@@ -258,12 +261,15 @@ def run_unit(unit: tuple[str, str]) -> tuple[str, str, float]:
     score("latent_u0:p", share[:, None] * p0, True)
 
     map_fits, bases, start_rows, spreads, previous = [], {}, [], [], None
-    gtol_kw = {"gtol": args.map_gtol, "max_iter": args.map_max_iter}
+    gtol_kw = {"gtol": args.map_gtol, "max_iter": args.map_max_iter,
+               "lm_max_iter": args.lm_max_iter, "optimizer": args.optimizer,
+               "fixed_s_optimizer": args.fixed_s_optimizer}
     for m in args.tau_multiples:
         tau = m * args.tau_ref
         t0 = time.perf_counter()
         with stage(f"region {region_id} {mode}: MAP at tau = {m:g} tau_ref, "
-                   f"starts {args.map_starts}") as step:
+                   f"starts {args.map_starts} ({args.optimizer}, fixed-S "
+                   f"{args.fixed_s_optimizer})") as step:
             fit, starts = fit_starts(engine, ref.theta, tau, args.map_starts, previous, **gtol_kw)
             laplace_evidence(engine, ref.theta, fit)
             values = [f.objective for f in starts]
@@ -290,7 +296,9 @@ def run_unit(unit: tuple[str, str]) -> tuple[str, str, float]:
         score(f"{model}:p", share[:, None] * p_b, True)
     chosen = choose_tau(map_fits)
     m_star = args.tau_multiples[chosen]
-    tau_rows = [{**tag, "tau_multiple": m, "map_starts": args.map_starts, **f.info(), **sp_,
+    tau_rows = [{**tag, "tau_multiple": m, "map_starts": args.map_starts,
+                 "map_optimizer": args.optimizer, "map_fixed_s_optimizer": args.fixed_s_optimizer,
+                 **f.info(), **sp_,
                  "chosen": k == chosen}
                 for k, (m, f, sp_) in enumerate(zip(args.tau_multiples, map_fits, spreads))]
     # `latent` is the evidence-chosen τ: a copy of its rows.
@@ -320,7 +328,8 @@ def run_unit(unit: tuple[str, str]) -> tuple[str, str, float]:
     write_text(out / "timings.json", json.dumps({
         **tag, "seconds": seconds, "parts": times, "peak_gb": peak_gb(), "Z": Z,
         "rows": int(area.n_rows), "threads": args.threads,
-        "map_starts": args.map_starts,
+        "map_starts": args.map_starts, "optimizer": args.optimizer,
+        "fixed_s_optimizer": args.fixed_s_optimizer,
         "map_evaluations": [r["evaluations_all_starts"] for r in spreads],
         "map_seconds_per_evaluation": [f.info()["seconds_per_evaluation"] for f in map_fits]},
         indent=1))
@@ -346,6 +355,12 @@ def main() -> None:
     parser.add_argument("--map-starts", required=True, choices=list(START_SETS),
                         help="the MAP's set of starts (PLAN_latent_step3.md §4.3b), chosen from "
                              "the diagnostic (step3_diagnostic.py)")
+    parser.add_argument("--optimizer", default="m10", choices=["m10", "lm"],
+                        help="§4.3b LM rule: lm replaces plain L-BFGS (memory 10) everywhere in "
+                             "the start set")
+    parser.add_argument("--fixed-s-optimizer", default="m10", choices=["m10", "lm"],
+                        help="§4.3b LM rule: the fixed-S fit's optimizer in the fixedS set")
+    parser.add_argument("--lm-max-iter", type=int, default=500)
     parser.add_argument("--map-gtol", type=float, default=1e-4,
                         help="L-BFGS stop: largest gradient component")
     parser.add_argument("--map-max-iter", type=int, default=20000)
@@ -393,7 +408,9 @@ def main() -> None:
         "sigma_alpha": args.sigma_alpha, "taper": None, "variance_floor": None,
         "prior_sd_s": args.prior_sd, "modes": args.modes, "tables_A": list(sets["A"]),
         "tables_B": list(sets["B"]), "step1": str(step1.root), "run": str(args.run),
-        "map_starts": args.map_starts, "map_gtol": args.map_gtol, "map_max_iter": args.map_max_iter,
+        "map_starts": args.map_starts, "optimizer": args.optimizer,
+        "fixed_s_optimizer": args.fixed_s_optimizer, "lm_max_iter": args.lm_max_iter,
+        "map_gtol": args.map_gtol, "map_max_iter": args.map_max_iter,
         "cond_tol": args.cond_tol, "pair_operator": pairs.summary(),
         "step1_notes": step1.notes}, indent=1, default=str))
     _SHARED.update(data=data, args=args, regions=regions, chosen=chosen, step1=step1, H=H,

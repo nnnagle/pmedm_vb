@@ -1,5 +1,5 @@
 """MAP for the zone deviations ``U`` and the choice of ``τ`` (step 3, piece B3 of
-``PLAN_latent.md``; ``PLAN_latent_step3.md`` version 2, §4.3).
+``PLAN_latent.md``; ``PLAN_latent_step3.md`` version 3, §4.3).
 
 With ``θ_A`` fixed at its records fit and ``u_b ~ N(0, τ² I)`` iid, the
 **exact** objective (negative log posterior over ``U``, ``Z × K``) is
@@ -30,14 +30,29 @@ information of step 2, with ``S(U)`` or ``S(0)``).
   ``R'R`` the Gauss–Newton Hessian at ``U_k``, for at most ``refresh``
   iterations, then ``U_k`` and ``R`` are updated; it stops when an inner run
   stops for any reason other than its iteration limit;
-* every run stops when the largest gradient component is at most ``gtol``,
-  the relative change of the objective is below ``ftol``, or the iteration
-  cap is reached.
+* ``lm``: Levenberg–Marquardt (§4.3a, version 3). Each step solves
+  ``(G + τ⁻² I + μ I) Δ = -∇F`` with ``G`` the mean-part Gauss–Newton matrix
+  (``S(U)`` for the exact objective, ``S(0)`` for fixed-S) and ``∇F`` the
+  objective's own gradient; the step is accepted if it lowers that
+  objective, then ``μ`` is divided by 10 and ``G`` recomputed at the new
+  point; otherwise ``μ`` is multiplied by 10. ``μ`` starts at
+  ``LM_MU0 = 10⁻³`` times the mean diagonal of ``G + τ⁻² I`` at the start
+  (chosen here). An iteration is one trial step, accepted or not; at most
+  ``lm_max_iter`` (500). It stops when the largest gradient component is at
+  most ``gtol``, or when ``μ`` exceeds ``10¹⁶`` times its start (no step
+  lowers the objective). The accepted objective values are kept
+  (``MapFit.trace``), so the decrease is monotone by construction;
+* every L-BFGS run stops when the largest gradient component is at most
+  ``gtol``, the relative change of the objective is below ``ftol``, or the
+  iteration cap is reached.
 
 **Starts** (:func:`fit_starts`, §4.3b). A start is ``(name, objective,
 optimizer, origin)``, origin ``zero`` or ``previous`` (the previous ``τ``'s
-MAP); a ``polish`` start fits the fixed-S objective with ``m10`` from 0 and
-then the exact objective with ``m10`` from there. The MAP is the start with
+MAP); a ``polish`` start fits the fixed-S objective from 0 and then the
+exact objective with ``m10`` from there. :func:`start_set` applies §4.3b's
+LM rule: ``optimizer="lm"`` replaces plain L-BFGS (memory 10) everywhere in
+the set (the polish's exact step included), and ``fixed_s_optimizer="lm"``
+replaces it for the fixed-S fit of the ``fixedS`` set. The MAP is the start with
 the lowest exact objective; the spread (largest minus smallest) of the starts'
 final exact objectives is reported. :data:`START_SETS`:
 
@@ -71,7 +86,11 @@ from pmedm_vb.latent.region_engine import information, zone_covariances
 from pmedm_vb.latent.information import puma_information
 
 OBJECTIVES = ("exact", "fixedS")
-OPTIMIZERS = ("m10", "m20", "gn")
+OPTIMIZERS = ("m10", "m20", "gn", "lm")
+
+#: LM: μ's start relative to the mean diagonal of G + τ⁻² I; iteration cap.
+LM_MU0 = 1e-3
+LM_MAX_ITER = 500
 
 #: §4.3b start sets: (name, objective, optimizer, origin); ``polish`` is the
 #: fixed-S fit polished on the exact objective.
@@ -205,6 +224,10 @@ class MapFit:
     origin: str = "zero"
     fixed_s_objective: float = float("nan")    # F_S at Û (fixed-S fits)
     fixed_s_grad_max: float = float("nan")     # largest |∂F_S/∂U| at Û (fixed-S fits)
+    trace: list = field(default_factory=list)   # LM: accepted objective values
+    lm_mu0: float = float("nan")
+    lm_mu_final: float = float("nan")
+    lm_accepted: int = 0
     eval_seconds: list = field(default_factory=list)
     log_evidence: float = float("nan")
     logdet_hessian: float = float("nan")
@@ -225,7 +248,9 @@ class MapFit:
                 "seconds_per_evaluation": float(np.mean(self.eval_seconds))
                 if self.eval_seconds else float("nan"),
                 "log_evidence": self.log_evidence, "logdet_hessian": self.logdet_hessian,
-                "evidence_seconds": self.evidence_seconds}
+                "evidence_seconds": self.evidence_seconds, "lm_mu0": self.lm_mu0,
+                "lm_mu_final": self.lm_mu_final, "lm_accepted": self.lm_accepted,
+                "lm_monotone": bool(np.all(np.diff(self.trace) < 0)) if self.trace else None}
 
 
 def _lbfgs(objective, x0: np.ndarray, memory: int, gtol: float, ftol: float, max_iter: int,
@@ -271,10 +296,50 @@ def _gn_lbfgs(objective, x0: np.ndarray, gtol: float, ftol: float, max_iter: int
     return x, total, success, message
 
 
+def _lm(objective, x0: np.ndarray, gtol: float, max_iter: int, times: list
+        ) -> tuple[np.ndarray, int, bool, str, dict]:
+    shape, x = objective.shape, np.asarray(x0, float).copy()
+    t0 = time.perf_counter()
+    value, grad = objective.value_grad(x.reshape(shape))
+    times.append(time.perf_counter() - t0)
+    grad = grad.ravel()
+    G = objective.gn_hessian(x.reshape(shape))
+    mu0 = LM_MU0 * float(np.mean(np.diag(G)))
+    mu, trace, accepted, it = mu0, [float(value)], 0, 0
+    success, message = False, "max_iter"
+    while True:
+        if np.abs(grad).max() <= gtol:
+            success, message = True, "gradient"
+            break
+        if it >= max_iter:
+            break
+        if mu > 1e16 * mu0:
+            message = "no step lowers the objective"
+            break
+        it += 1
+        A = G.copy()
+        A[np.diag_indices_from(A)] += mu
+        step = -cho_solve((cholesky(A, lower=True), True), grad)
+        cand = x + step
+        t0 = time.perf_counter()
+        c_value, c_grad = objective.value_grad(cand.reshape(shape))
+        times.append(time.perf_counter() - t0)
+        if c_value < value:
+            x, value, grad = cand, c_value, c_grad.ravel()
+            trace.append(float(value))
+            accepted += 1
+            mu /= 10.0
+            G = objective.gn_hessian(x.reshape(shape))
+        else:
+            mu *= 10.0
+    return x, it, success, message, {"trace": trace, "lm_mu0": mu0, "lm_mu_final": mu,
+                                      "lm_accepted": accepted}
+
+
 def run_fit(engine: CollapsedLikelihood, theta: np.ndarray, tau: float, objective: str,
             optimizer: str, *, U0: np.ndarray | None = None, ev0: Evaluation | None = None,
             gtol: float = 1e-4, ftol: float = 1e-14, max_iter: int = 20000,
-            refresh: int = 30) -> MapFit:
+            refresh: int = 30, lm_max_iter: int = LM_MAX_ITER) -> MapFit:
     """One fit (module notes): ``objective`` ``exact`` or ``fixedS``,
     ``optimizer`` ``m10``, ``m20`` or ``gn``, from ``U0`` (default 0). The
     returned fit carries the exact objective and gradient at its solution."""
@@ -287,7 +352,10 @@ def run_fit(engine: CollapsedLikelihood, theta: np.ndarray, tau: float, objectiv
     F0 = exact.value(np.zeros(shape))
     x0 = np.zeros(int(np.prod(shape))) if U0 is None else np.asarray(U0, float).ravel()
     times: list[float] = []
-    if optimizer == "gn":
+    extra: dict = {}
+    if optimizer == "lm":
+        x, nit, success, message, extra = _lm(obj, x0, gtol, lm_max_iter, times)
+    elif optimizer == "gn":
         x, nit, success, message = _gn_lbfgs(obj, x0, gtol, ftol, max_iter, times, refresh)
     else:
         memory = 10 if optimizer == "m10" else 20
@@ -299,7 +367,7 @@ def run_fit(engine: CollapsedLikelihood, theta: np.ndarray, tau: float, objectiv
                  loglik=float(loglik), grad_max=float(np.abs(grad).max()), iterations=nit,
                  evaluations=0, converged=success, message=message, seconds=0.0,
                  fitted_objective=objective, optimizer=optimizer,
-                 origin="zero" if U0 is None else "given", eval_seconds=times)
+                 origin="zero" if U0 is None else "given", eval_seconds=times, **extra)
     if objective == "fixedS":
         fs, gs = obj.value_grad(U)
         fit.fixed_s_objective, fit.fixed_s_grad_max = float(fs), float(np.abs(gs).max())
@@ -313,24 +381,45 @@ def fit_map(engine: CollapsedLikelihood, theta: np.ndarray, tau: float, **kwargs
     return run_fit(engine, theta, tau, "exact", "m10", **kwargs)
 
 
+def start_set(name: str, optimizer: str = "m10", fixed_s_optimizer: str = "m10"
+              ) -> list[tuple]:
+    """The starts of set ``name`` with §4.3b's LM rule applied (module notes):
+    ``(name, objective, optimizer, origin, polish_optimizer)``, the last used
+    only by a ``polish`` start (its exact step)."""
+    if optimizer not in ("m10", "lm") or fixed_s_optimizer not in ("m10", "lm"):
+        raise ValueError("optimizer and fixed_s_optimizer are m10 or lm")
+    out = []
+    for start, objective, opt, origin in START_SETS[name]:
+        if objective == "polish":
+            out.append((start if fixed_s_optimizer == "m10" else f"{start}_lm", objective,
+                        fixed_s_optimizer, origin, optimizer))
+            continue
+        if opt == "m10" and optimizer != "m10":
+            start = start.replace("m10", optimizer) if "m10" in start else f"{start}_{optimizer}"
+            opt = optimizer
+        out.append((start, objective, opt, origin, None))
+    return out
+
+
 def fit_start(engine: CollapsedLikelihood, theta: np.ndarray, tau: float, start: tuple,
               previous: np.ndarray | None, **kwargs) -> MapFit | None:
-    """One start of a §4.3b set (module notes); ``None`` for a ``previous``
-    start without a previous ``τ``."""
-    name, objective, optimizer, origin = start
+    """One start (:func:`start_set`); ``None`` for a ``previous`` start
+    without a previous ``τ``."""
+    name, objective, optimizer, origin, polish = (*start, None)[:5]
     if origin == "previous" and previous is None:
         return None
     U0 = previous if origin == "previous" else None
     if objective == "polish":
         t0 = time.perf_counter()
+        polish = polish or "m10"
         first = run_fit(engine, theta, tau, "fixedS", optimizer, U0=U0, **kwargs)
-        fit = run_fit(engine, theta, tau, "exact", "m10", U0=first.U, **kwargs)
+        fit = run_fit(engine, theta, tau, "exact", polish, U0=first.U, **kwargs)
         fit.evaluations += first.evaluations
         fit.iterations += first.iterations
         fit.eval_seconds = first.eval_seconds + fit.eval_seconds
         fit.fixed_s_objective = first.fixed_s_objective
         fit.seconds = time.perf_counter() - t0
-        fit.fitted_objective, fit.optimizer = "fixedS+exact", "m10"
+        fit.fitted_objective, fit.optimizer = "fixedS+exact", f"{optimizer}+{polish}"
     else:
         fit = run_fit(engine, theta, tau, objective, optimizer, U0=U0, **kwargs)
     fit.start, fit.origin = name, origin
@@ -338,9 +427,11 @@ def fit_start(engine: CollapsedLikelihood, theta: np.ndarray, tau: float, start:
 
 
 def fit_starts(engine: CollapsedLikelihood, theta: np.ndarray, tau: float, starts: str,
-               previous: np.ndarray | None, **kwargs) -> tuple[MapFit, list[MapFit]]:
-    """Every start of set ``starts``; the MAP is the lowest exact objective."""
-    fits = [f for s in START_SETS[starts]
+               previous: np.ndarray | None, *, optimizer: str = "m10",
+               fixed_s_optimizer: str = "m10", **kwargs) -> tuple[MapFit, list[MapFit]]:
+    """Every start of set ``starts`` (with the LM rule's optimizers); the MAP
+    is the lowest exact objective."""
+    fits = [f for s in start_set(starts, optimizer, fixed_s_optimizer)
             if (f := fit_start(engine, theta, tau, s, previous, **kwargs)) is not None]
     best = min(fits, key=lambda f: f.objective)
     return best, fits
