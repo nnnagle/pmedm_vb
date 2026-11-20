@@ -1,0 +1,6 @@
+{
+  "plan": "PLAN_latent_step3b.md version 1, section 4",
+  "rule": "transfer set B (latent.regions.transfer_sets) split by table, alternating in its listed order: tables 1, 3, 5, ... to B1 (choosing tau), tables 2, 4, 6, ... to B2 (scoring transfer); fixed before the run",
+  "B1": ["B25032", "B25020", "B25014", "B25063", "B08134", "B19037", "B25070", "B27010", "B18101", "B05002"],
+  "B2": ["B25036", "B25042", "B25075", "B08303", "B25007", "B09019", "B25091", "B14001", "C16002", "B07003"]
+}

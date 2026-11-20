@@ -36,6 +36,10 @@ base per zone, so the rest of the engine is used as it stands.
 :func:`~pmedm_vb.latent.information.block_covariances` computes one per
 distinct ``θ_b``; with a base per zone two zones can share ``θ_b`` and still
 differ, so each zone is given its own key.
+
+**A separate deviation basis** (:func:`deviation_engine`, step 3b,
+``MODEL_latent.qmd`` version 3): ``θ_A' h`` is folded into the zones' log
+bases and the engine runs on ``g`` with ``θ_P = 0``.
 """
 
 from __future__ import annotations
@@ -121,3 +125,14 @@ def zone_covariances(engine: CollapsedLikelihood, ev: Evaluation) -> list[np.nda
 def information(engine: CollapsedLikelihood, ev: Evaluation) -> np.ndarray:
     """The mean-part Fisher information of ``U`` (``ZK × ZK``) at ``ev``."""
     return puma_information(engine, ev, zone_covariances(engine, ev))
+
+
+def deviation_engine(area: AreaInputs, H: np.ndarray, theta: np.ndarray, G: np.ndarray,
+                     logb_zones: np.ndarray, pairs: PairOperator) -> RegionLikelihood:
+    """The engine for zone deviations on their own basis ``g`` (``MODEL_latent.qmd``
+    version 3; step 3b): ``p_b ∝ exp{log base_b + θ_A'h + u_b'g}``, with
+    ``θ_A'h(z_i)`` folded into each zone's log base. The returned engine is
+    evaluated with ``θ_P = 0`` (``np.zeros(G.shape[1])``) and ``U`` on ``g``;
+    with ``G = H`` it is step 3's engine at ``θ_A`` (step 3 is unchanged)."""
+    offset = np.asarray(H, float) @ np.asarray(theta, float)
+    return RegionLikelihood(area, G, np.asarray(logb_zones, float) + offset[:, None], pairs)
