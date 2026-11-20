@@ -1,12 +1,15 @@
 # Plan, step 3b: the basis of the zone deviations (review of step 3)
 
-> **Status: draft for review.** Step 3 failed its decision rule
+> **Status: fixed.** Step 3 failed its decision rule
 > (`PLAN_latent_step3.md` §6). This is the review it calls for: a test of
 > whether the zone deviations help with a basis of a different scale, before
 > deciding whether they stay in the model. Model: `MODEL_latent.qmd`
-> version 2, with the change in §2 (version 3 on approval). Once approved it
-> is fixed, with a change log; `PLAN_latent.md` gets a version 2 entry
-> adding this step.
+> version 3. Added to `PLAN_latent.md` in its version 2. Change it only when
+> the plan itself changes, and record each change below.
+>
+> | version | date | change |
+> |---|---|---|
+> | 1 | 2026-11-20 | approved as drafted; §8 items accepted as proposed |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -28,7 +31,7 @@ Step 3 (leave-zone-out, all 58 zones):
 (go finer) or too flexible (go coarser), and can $\tau$ be chosen without
 truth?
 
-## 2. Model change (version 3, on approval)
+## 2. Model change (version 3)
 
 The zone deviations get their own basis $g$, separate from the reference's
 $h$:
@@ -103,7 +106,7 @@ about twice as costly; smaller $\tau$ means fewer local optima and fewer
 evaluations (step 3's diagnostic). Leave-zone-out only halves step 3's
 cost. To be estimated on the smoke run; within one 24-hour job, or two.
 
-## 8. Open for review
+## 8. Resolved at approval (as proposed)
 
 1. The bases: `kern30`, `kern100`, `kern200`.
 2. $\tau^g_{\mathrm{ref}}$ from each basis's PUMA tilts, and the grid

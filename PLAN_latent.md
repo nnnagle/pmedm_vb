@@ -8,6 +8,7 @@
 > | version | date | change |
 > |---|---|---|
 > | 1 | 2026-11-17 | initial plan |
+> | 2 | 2026-11-20 | step 3 failed its decision rule; step 3b added as its review: the basis of the zone deviations (`PLAN_latent_step3b.md`), deciding whether they stay before step 4 |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -70,6 +71,7 @@ stop the work before the expensive pieces are built.
 | 1 | A1, A2, A5, A6, B1, D1 | whether $h$ can locate a PUMA in type space (rare groups especially); the cost and gain of statewide variety; $\gamma$ | no (tables only as checks) |
 | 2 | B2 prototype, information diagnostic | whether $S$ is computable at PUMA scale; whether the tables identify $u_b$ | yes |
 | 3 | B3, C1, D2 | MAP accuracy against today's PMEDM, with truth | yes |
+| 3b | B3, C1, D2 with a separate deviation basis | whether the zone deviations stay, and on which basis; $\tau$ chosen by held-out tables | yes |
 | 4 | C2, D2 coverage | whether the posterior is calibrated | yes, with $Y$ drawn with survey error |
 | 5 | C3, C4 | only if step 4 fails for rare groups | yes |
 | 6 | D3 | the real application | yes |

@@ -12,6 +12,7 @@ date: 2026-11-17
 > |---|---|---|
 > | 1 | 2026-11-17 | initial specification |
 > | 2 | 2026-11-18 | table covariance $\Sigma$ = survey covariance as in the standard PMEDM (untapered, $\alpha = 0.01$, zero-count variance floor) plus the model-gap term $\omega^2 I$, the standard PMEDM's multiplier prior in covariance form |
+> | 3 | 2026-11-20 | the block deviations $u_b$ get their own basis $g$ (separate from the PUMA reference's $h$); version 2 is the case $g = h$. Step 3b tests $g$ = `kern30`, `kern100`, `kern200` |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -51,22 +52,22 @@ the target.
 ## Generative model
 
 Tilts depend only on $z$: they change the mix of types and leave the
-records within a type at their statewide variety. Block parameters are
-pooled within the PUMA: $\theta_b = \theta_P + u_b$, with the deviations
-$u_b$ shrunk towards zero.
+records within a type at their statewide variety. Each block's type mix is
+the PUMA's, tilted by a block deviation $u_b$ on its own basis $g$; the
+deviations are pooled within the PUMA by shrinkage towards zero.
 
 $$
 \begin{aligned}
 \theta_P &\sim \mathcal N(0, \Omega)
   && \text{PUMA level (weak prior)}\\
 \tau &\sim \pi(\tau),
-  \qquad u_b \mid \tau \overset{\text{iid}}{\sim} \mathcal N(0, \tau^2 I_K)
+  \qquad u_b \mid \tau \overset{\text{iid}}{\sim} \mathcal N(0, \tau^2 I_{K_g})
   && \text{block deviations, pooled within the PUMA}\\
 q^P_i(\theta_P) &= q_i\, \gamma^{\,d(P,i)}
   \exp\{\theta_P' h(z_i) - A_P(\theta_P)\}
   && \text{PUMA's type distribution on statewide atoms}\\
 p_{bi}(\theta_P, u_b) &= q_i\, \gamma^{\,d(P,i)}
-  \exp\{(\theta_P + u_b)' h(z_i) - A_P(\theta_P + u_b)\}
+  \exp\{\theta_P' h(z_i) + u_b' g(z_i) - A_P(\theta_P, u_b)\}
   && \text{block superpopulation}\\
 C_b \mid \theta_P, u_b &\sim \mathrm{Multinomial}(N_b,\, p_b)
   && \text{realized population}\\
@@ -78,9 +79,11 @@ z_i,\ i \in \mathcal P &\sim q^P(\theta_P)
 \end{aligned}
 $$
 
-* $A_P(\theta) = \log \sum_i q_i \gamma^{d(P,i)} e^{\theta' h(z_i)}$.
-* $h: \mathcal Z \to \mathbb R^K$ is a fixed, table-independent basis on
-  type space.
+* $A_P(\theta, u) = \log \sum_i q_i \gamma^{d(P,i)} e^{\theta' h(z_i) + u'g(z_i)}$,
+  and $A_P(\theta) = A_P(\theta, 0)$.
+* $h: \mathcal Z \to \mathbb R^K$ (the PUMA reference's basis) and
+  $g: \mathcal Z \to \mathbb R^{K_g}$ (the block deviations' basis) are
+  fixed, table-independent bases on type space. Version 2 had $g = h$.
 * $d(P,i)$ is the distance (for example adjacency steps) from PUMA $P$ to
   atom $i$'s PUMA. $\gamma \in (0,1]$ lets atoms from nearby PUMAs count
   more; $\gamma = 1$ uses the full statewide variety.
@@ -225,11 +228,11 @@ $$
 $$
 \log \pi(\theta_P, U \mid C, \tau, \mathcal P) =
   \log\pi(\theta_P) + \sum_b \log\pi(u_b\mid\tau) + \ell_P(\theta_P)
-  + \sum_b \big[(\theta_P + u_b)' H' C_b - N_b A_P(\theta_P + u_b)\big]
+  + \sum_b \big[\theta_P' H' C_b + u_b' G' C_b - N_b A_P(\theta_P, u_b)\big]
   + \text{const},
 $$
 
-  with $H$ the matrix with rows $h(z_i)'$. It is exact for the model, but
+  with $H$ and $G$ the matrices with rows $h(z_i)'$ and $g(z_i)'$. It is exact for the model, but
   may mix slowly when $N_b$ is large, because the parameters and $C$ are
   then tightly coupled.
 
