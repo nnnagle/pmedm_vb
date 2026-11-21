@@ -38,19 +38,48 @@ In fitting, the model's covariance is $\Sigma = \Sigma_{\mathrm{survey}} +
 ## 3. Data: the regional run with survey error
 
 In the regional run, each zone's tables have so far equalled its truth
-exactly: no survey error. To check calibration, the tables are drawn as
-the generative model says:
+exactly: no survey error. To check calibration, the tables are drawn with
+survey error, in two ways.
 
-* **Truth:** each zone's own records, design-weighted (as in steps 3 and
-  3b). Its tables $\mathcal A(C^{\mathrm{true}})$.
-* **Replicates** $r = 1, \dots, R$ with $R = 10$:
-  $Y^{(r)} = \mathcal A(C^{\mathrm{true}}) + \epsilon^{(r)}$,
-  $\epsilon^{(r)} \sim \mathcal N(0, \Sigma_{\mathrm{survey}})$, using the
-  region's replicate covariance (untapered, $\alpha = 0.01$), fixed seeds.
-  The held-out tables B1 and B2 get survey error the same way, since B1
-  plays published tables in choosing $\tau$.
-* Leave-zone-out support. The region's records and $\theta_A$ are not
-  perturbed (the PUMS is the same in every replicate).
+* **Truth (both simulations):** each zone's own records, design-weighted (as
+  in steps 3 and 3b): the realized population, record $i$ standing for
+  $w_i$ identical units. Its tables $\mathcal A(C^{\mathrm{true}})$.
+* **Leave-zone-out support** in both. The region's records and $\theta_A$
+  are not perturbed (the PUMS is the same in every replicate). $N_b$ is the
+  truth's unit total (known, as the model assumes).
+* **$R = 10$ replicates per simulation,** fixed seeds. The held-out tables
+  B1 and B2 are drawn the same way as the fitted ones, since B1 plays
+  published tables in choosing $\tau$.
+
+### Simulation G: Gaussian survey error
+
+$Y^{(r)} = \mathcal A(C^{\mathrm{true}}) + \epsilon^{(r)}$,
+$\epsilon^{(r)} \sim \mathcal N(0, \Sigma_{\mathrm{survey}})$, with the
+region's replicate covariance (untapered, $\alpha = 0.01$). Fitting uses the
+same $\Sigma_{\mathrm{survey}}$. The model's survey assumption holds
+exactly, so this isolates the posterior approximation.
+
+### Simulation S: a 1-in-8 sample of the true population
+
+* **Sample:** each of the $w_i$ units behind record $i$ is in the sample
+  independently with probability $\pi = 1/8$ (Bernoulli sampling), so record
+  $i$ contributes $n_i \sim \mathrm{Binomial}(w_i, \pi)$ sampled units.
+  Households are sampled whole, with their members, so person cells of one
+  household move together.
+* **Survey estimate:** the Horvitz–Thompson estimate of every cell,
+  $\hat Y = \pi^{-1}\sum_i n_i\, t(x_i)$.
+* **Estimated covariance** (the usual unbiased estimator under Bernoulli
+  sampling):
+  $\hat\Sigma = \frac{1 - \pi}{\pi^2}\sum_i n_i\, t(x_i)\,t(x_i)'$,
+  across all cells of a zone; zones are sampled independently.
+* **Zero cells:** a cell with $\hat Y = 0$ gets the variance of one sampled
+  unit, $(1 - \pi)/\pi^2$, as a floor, in the spirit of the standard PMEDM's
+  zero-count floor.
+* **Fitting** uses $\hat\Sigma$ in place of $\Sigma_{\mathrm{survey}}$ (plus
+  $\omega^2 I$), as a real application uses estimated MOEs.
+
+The survey error is then discrete and skewed for small cells, and $\Sigma$
+is itself estimated: closer to the real ACS than simulation G.
 
 ## 4. Pieces
 
@@ -108,21 +137,27 @@ Against truth, pooled over replicates, zones and cells, by functional class:
 * the variation of coverage across replicates, since cells within a
   replicate are correlated.
 
+All of the above for each simulation separately.
+
 The MAP's point accuracy under noisy $Y$ is reported beside step 3b's
 noise-free results.
 
 ## 5. Compute
 
 CPU on ISAAC. Step 3b's `kern30` MAPs took about 4 CPU-hours for one data
-set over a 4-value $\tau$ grid; ten replicates give about 40 CPU-hours. The
-Laplace draws and conditioning are small (192 coordinates per region,
-closed-form conditioning). Estimated 3–6 hours on one 16-core node, to be
-checked on the smoke run.
+set over a 4-value $\tau$ grid; ten replicates of two simulations give
+about 80 CPU-hours. The Laplace draws and conditioning are small (192
+coordinates per region, closed-form conditioning). Estimated 6–10 hours on
+one 16-core node, to be checked on the smoke run.
 
 ## 6. Decision rules (fixed before results)
 
 Thresholds are proposals to confirm at review.
 
+* **Primary: simulation S** (the realistic one). Simulation G is the
+  diagnostic: if S fails where G passes, the failure is in the survey
+  error's form or in estimating $\Sigma$, not in the posterior
+  approximation.
 * **Calibrated** if, for each functional class except rare groups, pooled
   coverage is within $[0.85, 0.95]$ at 90% and $[0.42, 0.58]$ at 50%.
 * **Rare groups** are judged separately with the same bands:
@@ -162,7 +197,10 @@ Thresholds are proposals to confirm at review.
 
 ## 9. Open for review
 
-1. Survey-error replicates: $R = 10$, drawn from the replicate covariance.
+1. Two simulations, G (Gaussian from the replicate covariance) and S (a
+   1-in-8 Bernoulli sample of the true population, Horvitz–Thompson
+   estimates, estimated covariance, a one-unit floor for zero cells),
+   $R = 10$ replicates each; S primary.
 2. The $\tau$ grid with one step below 3b's edge.
 3. $\theta_A$ and $\tau$ held fixed in the posterior (stage 2 as specified).
 4. The coverage bands in §6 and the split of rare groups.
