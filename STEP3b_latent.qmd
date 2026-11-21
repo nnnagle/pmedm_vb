@@ -1,0 +1,168 @@
+---
+title: "Latent-population PMEDM, steps 3 and 3b: MAP against the standard PMEDM, and the basis of the zone deviations"
+subtitle: "Design, results and decisions"
+date: 2026-11-21
+---
+
+Step 3 of `PLAN_latent.md` (`PLAN_latent_step3.md`, version 3) and its
+review, step 3b (`PLAN_latent_step3b.md`, version 1). Model:
+`MODEL_latent.qmd` version 2 for step 3, version 3 for step 3b.
+
+## The test
+
+The regional run plays the real problem with known truth. Each of 13
+regions (3–6 contiguous PUMAs) plays a PUMA, and its PUMAs (58 zones) play
+block groups. The models see:
+* the region's PUMS records;
+* each zone's S1 tables, computed from the zone's own records, with
+  replicate-weight standard errors.
+
+They do not see which records belong to which zone. Estimates are scored
+against each zone's own records.
+
+**Leave-zone-out** (the primary mode): when a zone is fitted, its own
+records are removed from the support, as real block-group residents are
+mostly absent from the PUMS. A secondary mode keeps them.
+
+**Scores:**
+* per-zone joint structure on unfitted scoring tables: log-odds-ratio
+  (LOR) error and TVD;
+* rare groups: RMS log ratio over zones;
+* misfit on fitted cells in SE units;
+* transfer: misfit on tables never fitted (transfer set B), in SE units.
+
+## Step 3: the ladder
+
+| variant | what changes |
+|---|---|
+| `pmedm_own` | the standard PMEDM (untapered $\Sigma$, $\alpha = 0.01$, multiplier prior sd 3) on the region's own records |
+| `pmedm_ref` | the same, on statewide records reweighted by the region's type reference (step 1) |
+| `latent_u0` | the model's realized-population fit (conditional PMEDM, entropy weight $N_b$), every zone with the region's type mix |
+| `latent` | the full model: zone deviations $u_b$ on `kern100`, $\tau$ chosen by Laplace evidence |
+
+Leave-zone-out, means over the 58 zones:
+
+| variant | LOR error | TVD | rare groups | transfer |
+|---|---|---|---|---|
+| `pmedm_own` | 0.455 | 0.066 | 0.756 | 2.32 |
+| `pmedm_ref` | 0.408 | 0.060 | 0.630 | 2.23 |
+| `latent_u0` | 0.413 | 0.063 | 0.680 | 2.33 |
+| `latent` (evidence: $2\tau_{\mathrm{ref}}$) | 0.556 | 0.076 | 0.825 | 3.10 |
+| `latent` at $0.5\tau_{\mathrm{ref}}$ | 0.440 | 0.062 | 0.673 | 2.15 |
+
+* **Decision (§6): failed.** Against `pmedm_own`: LOR error +22%, TVD
+  +14.5% (limit +5%).
+* **The type-reference support is a clear gain:** `pmedm_ref` beats
+  `pmedm_own` by 9–17% on joint structure and rare groups.
+* **The entropy weight $N_b$** costs a little against $n$ (1–8%).
+* **The zone deviations on `kern100`** worsen joint structure at every
+  $\tau$, more as $\tau$ grows.
+* **The Laplace evidence chose $2\tau_{\mathrm{ref}}$** (the grid's top) in
+  all 26 region × mode units; truth chose $0.5\tau_{\mathrm{ref}}$ (the
+  bottom) in all 26.
+
+### The MAP for the zone deviations
+
+The collapsed posterior over $U$ is not convex. Its mean is a softmax of
+$U$ seen through $T$, and its covariance moves with $U$. A diagnostic on two
+regions (plan version 2) showed local optima that grow with $\tau$: none at
+$0.5\tau_{\mathrm{ref}}$, spreads up to 101 log-likelihood units at
+$2\tau_{\mathrm{ref}}$. They persist with $S$ held fixed, so they come from
+the mismatch between the tilt's features ($h$) and the tables' ($x$). The
+MAP was taken as the lowest exact objective over four starts. L-BFGS
+preconditioned by the Gauss–Newton matrix reached the best objective in most
+cases with 1–2% of plain L-BFGS's evaluations. Levenberg–Marquardt did not
+converge within its cap.
+
+## Step 3b: the basis of the zone deviations
+
+Model version 3 gives the deviations their own basis $g$, while the region
+reference keeps $h$ = `kern100`:
+
+$$
+p_{bi} \propto q_i\gamma^{d}\exp\{\theta_A'h(z_i) + u_b'g(z_i)\},
+\qquad u_b \sim \mathcal N(0, \tau^2 I).
+$$
+
+* **Bases** $g \in$ {`kern30`, `kern100`, `kern200`}, each with its own
+  $\tau^g_{\mathrm{ref}}$ from the spread of PUMA tilts on $g$ (0.2844,
+  0.2841 and 0.2908; `kern100` matches step 2's 0.284).
+* **$\tau$ grid** $\{0.125, 0.25, 0.5, 1\}\times\tau^g_{\mathrm{ref}}$.
+* **$\tau$ chosen without truth** by the misfit on half of the held-out
+  tables (B1, 10 tables, 316 cells); transfer scored on the other half
+  (B2, 10 tables, 151 cells).
+* Leave-zone-out only; baselines from step 3.
+
+### Results
+
+Each basis at its B1-chosen $\tau$, against `latent_u0`:
+
+| basis | LOR error | TVD | B2 transfer | rule |
+|---|---|---|---|---|
+| `kern30` | +1.9% | −7.2% | −10.3% | **qualifies** |
+| `kern100` | +3.0% | −6.4% | −10.2% | fails (LOR) |
+| `kern200` | +3.7% | −7.7% | −8.7% | fails (LOR) |
+
+Leave-zone-out, means over zones:
+
+| variant | LOR error | TVD | rare groups | B2 transfer |
+|---|---|---|---|---|
+| `pmedm_own` | 0.455 | 0.066 | 0.756 | 2.59 |
+| `pmedm_ref` | 0.408 | 0.060 | 0.630 | 2.48 |
+| `latent_u0` | 0.413 | 0.063 | 0.680 | 2.59 |
+| `latent`, `kern30` | 0.421 | 0.059 | 0.664 | 2.32 |
+| `latent`, `kern100` | 0.425 | 0.059 | 0.665 | 2.32 |
+| `latent`, `kern200` | 0.428 | 0.059 | 0.651 | 2.36 |
+
+* **The coarse basis makes the deviations safe.** On `kern30`, LOR error is
+  0.419–0.428 and B2 transfer 2.32–2.35 across the whole $\tau$ grid. On
+  `kern100` and `kern200`, LOR error climbs to 0.487 and 0.544 at
+  $1\times\tau^g_{\mathrm{ref}}$. Too much flexibility, not too little, was
+  the problem in step 3.
+* **`kern30` has no local optima:** the spread over starts was 0.000 in
+  every fit. It is also cheap: about 4 CPU-hours in total, against 21 for
+  `kern100` and 86 for `kern200`.
+* **The evidence chose the largest $\tau$** in all 39 basis × region cases,
+  never the truth-best. The B1 rule agreed with truth in 46–85% of cases.
+* **B1 and truth mostly chose $0.125\times$,** the grid's lower edge. The
+  deviations' benefit lives at small $\tau$; on `kern30` the results are
+  flat in $\tau$, so the edge matters little.
+
+## Decisions
+
+* **Step 3 (`PLAN_latent_step3.md` §6):** failed; stop and review.
+* **Step 3b (`PLAN_latent_step3b.md` §6):** the zone deviations stay, with
+  $g$ = `kern30`. The pass is narrow (LOR error +1.9% against a +2% limit).
+  In words: `kern30` deviations are roughly neutral on joint structure and
+  clearly help margins (TVD −7%) and prediction of unfitted tables (−10%).
+
+## Standing of the model
+
+Against today's standard PMEDM (`pmedm_own`), the full model with `kern30`
+is better on every score, by 7–12%. Against the standard PMEDM on the
+type-reference support (`pmedm_ref`), it trades: better on TVD (−1.7%) and
+transfer (−6.5%), worse on joint structure (+3.1%) and rare groups
+(+5.5%). The model with deviations is the better predictor of tables it has
+not seen, which is the table-agnostic aim; `pmedm_ref` is the better choice
+if joint structure and rare groups matter most.
+
+## Notes
+
+* The Laplace evidence is not usable for choosing $\tau$ in this model:
+  it always prefers the most flexible setting, which the fitted tables
+  reward and the unfitted joint structure punishes.
+* The conditional PMEDM hit its 200-iteration cap in 4% of step 3's solves,
+  with duality gaps still tiny.
+* Step 3 took about 165 CPU-hours (both modes); step 3b about 111.
+
+## Record
+
+* **Code:** `96ef633`, `06e28e2`, `97de9df` (step 3, plan versions 1–3);
+  `e26dfbf` (step 3b).
+* **Runs** (under `/lustre/isaac24/proj/UTK0533/pmedm_vb_runs/latent/`):
+  `step3` (both modes), `step3_diagnostic`, `step3b` (run of record for the
+  deviation basis).
+* **Handed to step 4:** model version 3 with $h$ = `kern100`, $g$ =
+  `kern30`, $\gamma = 0.5$, $\sigma_\theta = 1$, entropy weight $N_b$; $\tau$
+  chosen by held-out tables; the MAP as the lowest exact objective over
+  starts.
