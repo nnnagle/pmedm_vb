@@ -1,9 +1,13 @@
 # Plan, step 4: the posterior and its calibration
 
-> **Status: draft for review.** Lower-level plan for step 4 of
-> `PLAN_latent.md` (version 2), for the model in `MODEL_latent.qmd`
-> (version 3) with the choices fixed in step 3b (`STEP3b_latent.qmd`). Once
-> approved it is fixed, with a change log.
+> **Status: fixed.** Lower-level plan for step 4 of `PLAN_latent.md`
+> (version 2), for the model in `MODEL_latent.qmd` (version 3) with the
+> choices fixed in step 3b (`STEP3b_latent.qmd`). Change it only when the
+> plan itself changes, and record each change below.
+>
+> | version | date | change |
+> |---|---|---|
+> | 1 | 2026-11-21 | approved as drafted, with two simulations (G and S); §9 items accepted as proposed |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -195,7 +199,7 @@ Thresholds are proposals to confirm at review.
 * Posterior samples' summaries per zone and functional; coverage tables.
 * `summary.txt`.
 
-## 9. Open for review
+## 9. Resolved at approval (as proposed)
 
 1. Two simulations, G (Gaussian from the replicate covariance) and S (a
    1-in-8 Bernoulli sample of the true population, Horvitz–Thompson
