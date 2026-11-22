@@ -28,68 +28,85 @@ never as uncertainty in $C$.
 
 ## 2. Model change (version 4, on approval)
 
-The zone's composition scatters around the family before its people are
-drawn:
+**Totals.** As in the original PMEDM, the area total $N_A$ (a PUMA, or a
+region in the test) is known: it is a hard control in ACS post-stratification
+or large enough for its error to be negligible. The zone totals $N_b$ are
+unknown.
+
+**Realized population over (zone, atom) pairs.** With zone shares
+$\pi^0_b$ (a prior allocation: equal shares, as the PMEDM's design
+distribution, or prior counts where they exist) and the zone superpopulations
+$p_b$, let $q_{bi} = \pi^0_b\, p_{bi}$. Then
 
 $$
-\tilde p_b \mid p_b \sim \mathrm{Dirichlet}(\kappa_b\, p_b),
+\tilde q \mid q \sim \mathrm{Dirichlet}(\kappa\, q),
 \qquad
-C_b \mid \tilde p_b \sim \mathrm{Multinomial}(N_b, \tilde p_b),
+C \mid \tilde q \sim \mathrm{Multinomial}(N_A, \tilde q),
 $$
 
-that is, $C_b \sim \mathrm{DirMult}(N_b, \kappa_b p_b)$. Version 3 is the
-limit $\kappa_b \to \infty$.
+that is, $C \sim \mathrm{DirMult}(N_A, \kappa q)$ over all (zone, atom) pairs
+of the area. Version 3 is the limit $\kappa \to \infty$ with the zone totals
+fixed.
 
-**Moments** (standard Dirichlet-multinomial results):
-
-$$
-\mathbb E\, C_b = N_b p_b,
-\qquad
-\mathrm{Cov}\, C_b = \varphi_b\, N_b(\mathrm{diag}\,p_b - p_bp_b'),
-\qquad
-\varphi_b = \frac{N_b + \kappa_b}{1 + \kappa_b}.
-$$
+* **Zone totals** $N_b = \sum_i C_{bi}$ are random, with $\sum_b N_b = N_A$.
+  By the Dirichlet's aggregation property, $(N_b)_b \sim
+  \mathrm{DirMult}(N_A, \kappa\pi^0)$, and given the $N_b$, each zone's
+  population is $C_b \sim \mathrm{DirMult}(N_b, \kappa\pi^0_b\, p_b)$: the
+  zone's own overdispersion is $\kappa_b = \kappa\pi^0_b$.
+* **Moments** (standard Dirichlet-multinomial results):
+  $$
+  \mathbb E\, C = N_A\, q,
+  \qquad
+  \mathrm{Cov}\, C = \varphi\, N_A(\mathrm{diag}\,q - qq'),
+  \qquad
+  \varphi = \frac{N_A + \kappa}{1 + \kappa}.
+  $$
+  The covariance couples zones through $-qq'$ (their totals sum to
+  $N_A$).
+* **The Gamma–Poisson view** (standard): independent counts
+  $C_{bi} \sim \mathrm{Poisson}(\lambda_{bi})$ with
+  $\lambda_{bi} \sim \mathrm{Gamma}(\kappa q_{bi}, \beta)$, conditioned on
+  their total $N_A$, are exactly this Dirichlet-multinomial.
 
 **What changes elsewhere** (derived here):
 
-* **Collapsed likelihood:** the realization term in $S$ is multiplied by
-  $\varphi_b$: $S = \Sigma + \sum_b \varphi_b N_b D_bT'(\mathrm{diag}\,p_b -
-  p_bp_b')TD_b'$. The tables become less informative about $U$, so the zone
-  deviations shrink more.
-* **Gaussian conditioning (stage 2):** the same formulas, with
-  $N_b(\mathrm{diag}\,p_b - p_bp_b')$ replaced by
-  $\varphi_b N_b(\mathrm{diag}\,p_b - p_bp_b')$ in both $\mathrm{Cov}\,C_b$
-  and $k_b$.
+* **Collapsed likelihood:** $m = N_A\sum_b \pi^0_b D_bT'p_b$, and the
+  realization term in $S$ becomes $\varphi N_A\,\mathcal D T'(\mathrm{diag}\,q
+  - qq')T\mathcal D'$ over pairs. The cross-zone part $-qq'$ is rank one and
+  is handled by one more Woodbury correction.
+* **Gaussian conditioning (stage 2):** the same formulas with
+  $\mathrm{Cov}\,C$ above.
 * **Conditional PMEDM (MAP of the realized population):** to second order,
-  the prior on $r_b = C_b/N_b$ has covariance $\varphi_b(\mathrm{diag}\,p_b
-  - p_bp_b')/N_b$, which matches an entropy weight $N_b/\varphi_b \approx
-  \kappa_b$ for $\kappa_b \ll N_b$. The conditional PMEDM uses weight
-  $N_b/\varphi_b$ in place of $N_b$.
+  the PMEDM primal over pairs with base $q$ and entropy weight
+  $N_A/\varphi \approx \kappa$; the zone shares float, which is the existing
+  solver's form (parent plan, finding 3).
 
 **Relation to the standard PMEDM** (derived here, second-order argument).
-The PMEDM's entropy weight $n$ over (unit, zone) pairs splits into
-$n\,\pi_b$ per zone, about the zone's expected sample size
-$n_b = N_b\, n_A/N_A$. So the PMEDM's choice of $n$ rather than $N_b$
-corresponds to $\kappa_b \approx n_b$. That gives $\varphi_b \approx N_b/n_b$,
-the mean design weight (about 19), so standard deviations about 4.4 times
-wider: close to the "about 5 times too narrow" seen on smoke. With
-$\kappa_b = n_b$, the MAP of the realized population is step 3's `latent_n`
-variant.
+The PMEDM's primal is $n\,\mathrm{KL}(r \Vert q)$ over (unit, zone) pairs,
+with $q$ the design distribution and the zone shares free. That is the MAP of
+this model with $\kappa = n$ and $p_b$ = the design distribution. So:
 
-## 3. Choosing $\kappa_b$
+* the standard PMEDM is version 4 with $\kappa = n$ and no type tilt;
+* the model with tilts is the PMEDM with a learned base $q$;
+* $\kappa = n$ gives $\varphi \approx N_A/n$, the mean design weight (about
+  19): standard deviations about 4.4 times wider than with independent
+  units, close to the "about 5 times too narrow" seen on smoke.
+
+## 3. Choosing $\kappa$
 
 Two arms:
 
-* **K1 (primary): $\kappa_b = n_b = N_b\, n_A/N_A$.** No fitting; the
-  PMEDM-equivalent overdispersion.
-* **K2: $\kappa_b = c\, n_b$, with $c$ chosen per region without truth**
-  from $c \in \{0.25, 0.5, 1, 2, 4\}$, by the posterior predictive log
-  density of the held-out tables B1. B1's predictive distribution is the
-  posterior of its true tables plus their survey error. A log density
-  rewards correct width as well as correct centre, which a misfit does not.
+* **K1 (primary): $\kappa = n_A$,** the area's number of records: the
+  PMEDM-equivalent overdispersion. No fitting.
+* **K2: $\kappa = c\, n_A$,** with $c$ chosen per region without truth from
+  $c \in \{0.25, 0.5, 1, 2, 4\}$, by the posterior predictive log density of
+  the held-out tables B1 (the posterior of B1's true tables plus their
+  survey error). A log density rewards correct width as well as correct
+  centre, which a misfit does not.
 
-$\tau$ is still chosen by B1 misfit, as in step 3b, and the $U$ MAP is
-refitted under each arm's $S$.
+In both, $\pi^0_b = 1/Z$ in the test (as the PMEDM's design distribution),
+$\tau$ is still chosen by B1 misfit, and the $U$ MAP is refitted under each
+arm's $S$.
 
 ## 4. Design
 
@@ -106,7 +123,7 @@ change when $S$ does) beside step 4's.
 * Each arm is judged by step 4's §6 bands on simulation S (G as the
   diagnostic).
 * **If K1 is calibrated,** it is adopted: model version 4 with
-  $\kappa_b = n_b$.
+  $\kappa = n_A$.
 * **If only K2 is calibrated,** K2 is adopted, with $c$ chosen by B1.
 * **If neither is,** stop and review.
 
@@ -119,7 +136,9 @@ replicates.
 
 ## 7. Open for review
 
-1. The Dirichlet-multinomial realized level (model version 4).
-2. K1 as primary ($\kappa_b = n_b$), K2 as the tuned alternative.
+1. The Dirichlet-multinomial realized level over (zone, atom) pairs, with
+   $N_A$ known and the zone totals random (model version 4).
+2. K1 as primary ($\kappa = n_A$), K2 as the tuned alternative;
+   $\pi^0_b = 1/Z$ in the test.
 3. Choosing $c$ by B1 predictive log density.
 4. Running 4b only if step 4 fails §6.
