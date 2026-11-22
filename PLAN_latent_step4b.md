@@ -1,11 +1,13 @@
 # Plan, step 4b: an overdispersed realized population (draft)
 
-> **Status: draft for review.** A contingency plan prepared while step 4
-> (`PLAN_latent_step4.md`, version 2) runs. It applies if step 4 finds the
-> posterior over-confident, as its smoke run suggests. Model:
-> `MODEL_latent.qmd` version 3, with the change in §2 (version 4 on
-> approval). Once approved it is fixed, with a change log, and
-> `PLAN_latent.md` gets an entry adding it.
+> **Status: fixed.** Step 4b of `PLAN_latent.md` (version 3), for
+> `MODEL_latent.qmd` version 4. It runs if step 4 (`PLAN_latent_step4.md`,
+> version 2) finds the posterior over-confident, as its smoke run suggests.
+> Change it only when the plan itself changes, and record each change below.
+>
+> | version | date | change |
+> |---|---|---|
+> | 1 | 2026-11-22 | approved; prior shares $\pi^0_b = \hat N_b/N_A$ from estimated zone totals, as in the PMEDM's $q_{ib} = d_i N_b/N$ |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -26,17 +28,17 @@ far smaller than the zone's systematic departure from the family. The
 model-gap term $\omega^2 I$ covers that departure as noise on $Y$ only,
 never as uncertainty in $C$.
 
-## 2. Model change (version 4, on approval)
+## 2. Model change (version 4)
 
 **Totals.** As in the original PMEDM, the area total $N_A$ (a PUMA, or a
 region in the test) is known: it is a hard control in ACS post-stratification
 or large enough for its error to be negligible. The zone totals $N_b$ are
 unknown.
 
-**Realized population over (zone, atom) pairs.** With zone shares
-$\pi^0_b$ (a prior allocation: equal shares, as the PMEDM's design
-distribution, or prior counts where they exist) and the zone superpopulations
-$p_b$, let $q_{bi} = \pi^0_b\, p_{bi}$. Then
+**Realized population over (zone, atom) pairs.** With prior zone shares
+$\pi^0_b = \hat N_b/N_A$ from estimated zone totals, as in the PMEDM's design
+prior $q_{ib} = d_i N_b/N$, and the zone superpopulations $p_b$, let
+$q_{bi} = \pi^0_b\, p_{bi}$. Then
 
 $$
 \tilde q \mid q \sim \mathrm{Dirichlet}(\kappa\, q),
@@ -104,9 +106,14 @@ Two arms:
   survey error). A log density rewards correct width as well as correct
   centre, which a misfit does not.
 
-In both, $\pi^0_b = 1/Z$ in the test (as the PMEDM's design distribution),
-$\tau$ is still chosen by B1 misfit, and the $U$ MAP is refitted under each
-arm's $S$.
+In both, $\tau$ is still chosen by B1 misfit, and the $U$ MAP is refitted
+under each arm's $S$.
+
+**Prior shares in the test.** $\hat N_b$ is each replicate's survey estimate
+of the zone's unit total (households plus group-quarters persons, from the
+fitted unit-type cells: the Horvitz–Thompson estimate in S, truth plus error
+in G), scaled so that $\sum_b \hat N_b = N_A$. The true zone totals are not
+used.
 
 ## 4. Design
 
@@ -134,11 +141,11 @@ arm. K2's five values of $c$ multiply the MAP and posterior cost by up to
 five; to be estimated on smoke, possibly by choosing $c$ on fewer
 replicates.
 
-## 7. Open for review
+## 7. Resolved at approval
 
 1. The Dirichlet-multinomial realized level over (zone, atom) pairs, with
    $N_A$ known and the zone totals random (model version 4).
 2. K1 as primary ($\kappa = n_A$), K2 as the tuned alternative;
-   $\pi^0_b = 1/Z$ in the test.
+   $\pi^0_b = \hat N_b/N_A$ from each replicate's survey estimates.
 3. Choosing $c$ by B1 predictive log density.
 4. Running 4b only if step 4 fails §6.

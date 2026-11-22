@@ -9,6 +9,7 @@
 > |---|---|---|
 > | 1 | 2026-11-17 | initial plan |
 > | 2 | 2026-11-20 | step 3 failed its decision rule; step 3b added as its review: the basis of the zone deviations (`PLAN_latent_step3b.md`), deciding whether they stay before step 4 |
+> | 3 | 2026-11-22 | step 4b added (`PLAN_latent_step4b.md`): the Dirichlet-multinomial realized level of model version 4, with the PUMA total known and block totals random; run if step 4 finds the posterior over-confident |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -73,6 +74,7 @@ stop the work before the expensive pieces are built.
 | 3 | B3, C1, D2 | MAP accuracy against today's PMEDM, with truth | yes |
 | 3b | B3, C1, D2 with a separate deviation basis | whether the zone deviations stay, and on which basis; $\tau$ chosen by held-out tables | yes |
 | 4 | C2, D2 coverage | whether the posterior is calibrated | yes, with $Y$ drawn with survey error |
+| 4b | C2, D2 coverage under model version 4 | whether the overdispersed realized level is calibrated, and $\kappa$ | yes, as step 4 |
 | 5 | C3, C4 | only if step 4 fails for rare groups | yes |
 | 6 | D3 | the real application | yes |
 

@@ -13,6 +13,7 @@ date: 2026-11-17
 > | 1 | 2026-11-17 | initial specification |
 > | 2 | 2026-11-18 | table covariance $\Sigma$ = survey covariance as in the standard PMEDM (untapered, $\alpha = 0.01$, zero-count variance floor) plus the model-gap term $\omega^2 I$, the standard PMEDM's multiplier prior in covariance form |
 > | 3 | 2026-11-20 | the block deviations $u_b$ get their own basis $g$ (separate from the PUMA reference's $h$); version 2 is the case $g = h$. Step 3b tests $g$ = `kern30`, `kern100`, `kern200` |
+> | 4 | 2026-11-22 | realized level: the PUMA total $N_P$ is known and the block totals are random; the realized population over (block, atom) pairs is Dirichlet-multinomial around $q_{bi} = \pi^0_b p_{bi}$, with prior shares $\pi^0_b = \hat N_b/N_P$ as in the PMEDM's $q_{ib} = d_i N_b/N$ and overdispersion $\kappa$; $\kappa = n_P$ reproduces the PMEDM's entropy weight. Version 3's independent multinomial per block (fixed $N_b$) underestimated uncertainty for real blocks, which are not in the model's family |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -69,8 +70,10 @@ q^P_i(\theta_P) &= q_i\, \gamma^{\,d(P,i)}
 p_{bi}(\theta_P, u_b) &= q_i\, \gamma^{\,d(P,i)}
   \exp\{\theta_P' h(z_i) + u_b' g(z_i) - A_P(\theta_P, u_b)\}
   && \text{block superpopulation}\\
-C_b \mid \theta_P, u_b &\sim \mathrm{Multinomial}(N_b,\, p_b)
-  && \text{realized population}\\
+q_{bi} &= \pi^0_b\, p_{bi}(\theta_P, u_b)
+  && \text{base over (block, atom) pairs}\\
+C \mid \theta_P, U &\sim \mathrm{DirMult}(N_P,\, \kappa\, q)
+  && \text{realized population over pairs}\\
 Y \mid C &\sim \mathcal N\big(\mathcal A(C),\, \Sigma\big),
   \quad \mathcal A(C) = \textstyle\sum_b D_b T' C_b
   && \text{published tables}\\
@@ -87,7 +90,31 @@ $$
 * $d(P,i)$ is the distance (for example adjacency steps) from PUMA $P$ to
   atom $i$'s PUMA. $\gamma \in (0,1]$ lets atoms from nearby PUMAs count
   more; $\gamma = 1$ uses the full statewide variety.
-* $N_b$ is the number of units in area $b$, treated as known.
+* **Totals.** The PUMA total $N_P$ (units: households and group-quarters
+  persons) is known: it is a hard control in ACS post-stratification, or
+  large enough for its error to be negligible. The block totals
+  $N_b = \sum_i C_{bi}$ are random, with $\sum_b N_b = N_P$.
+* **Prior shares** $\pi^0_b = \hat N_b/N_P$, from estimated block totals
+  (published block-group unit estimates, or counts), as in the PMEDM's
+  design prior $q_{ib} = d_i N_b/N$. Here $p_{bi}$ plays the part of $d_i$.
+* **Overdispersion $\kappa$.** $C \sim \mathrm{DirMult}(N_P, \kappa q)$
+  means $\tilde q \sim \mathrm{Dirichlet}(\kappa q)$, then
+  $C \sim \mathrm{Multinomial}(N_P, \tilde q)$: a real block's composition
+  scatters around the model's family before its people are drawn.
+  - Moments (standard): $\mathbb E\, C = N_P q$,
+    $\mathrm{Cov}\, C = \varphi N_P(\mathrm{diag}\,q - qq')$,
+    $\varphi = (N_P + \kappa)/(1 + \kappa)$.
+  - By the Dirichlet's aggregation property, the block totals are
+    $\mathrm{DirMult}(N_P, \kappa\pi^0)$, and given them each block's
+    population is $\mathrm{DirMult}(N_b, \kappa\pi^0_b p_b)$.
+  - Equivalently (standard): independent Gamma–Poisson counts per pair,
+    $C_{bi} \sim \mathrm{Poisson}(\lambda_{bi})$,
+    $\lambda_{bi} \sim \mathrm{Gamma}(\kappa q_{bi}, \beta)$, conditioned
+    on their total $N_P$.
+  - $\kappa \to \infty$ gives independent units (version 3's multinomial,
+    with the block totals then also multinomial). $\kappa = n_P$, the
+    PUMA's number of records, reproduces the standard PMEDM's entropy weight
+    (below); $\varphi \approx N_P/n_P$ is then the mean design weight.
 * $\Sigma$ is the table covariance, used everywhere below:
   $$
   \Sigma = \Sigma_{\mathrm{survey}} + \omega^2 I,
@@ -103,9 +130,8 @@ $$
 * Tables enter only through $T$: a new table adds columns, and $h$,
   $\theta_P$, $u_b$ and $p_b$ keep their meaning.
 
-Equivalently, area $b$'s $N_b$ individuals carry atom labels
-$a_{b1},\dots,a_{bN_b}$ in $\{1,\dots,M\}$, and
-$C_{bi} = \#\{k: a_{bk} = i\}$.
+Equivalently, the PUMA's $N_P$ individuals carry (block, atom) labels, and
+$C_{bi}$ counts the individuals labelled $(b, i)$.
 
 ### The PUMA-record likelihood
 
@@ -127,7 +153,7 @@ $$
 \pi(\theta_P, U, \tau, C \mid Y, \mathcal P) \propto
   \pi(\theta_P)\, \pi(\tau)\, \prod_b \pi(u_b \mid \tau)\;
   e^{\ell_P(\theta_P)}
-  \prod_b \mathrm{Mult}\big(C_b;\, N_b, p_b(\theta_P, u_b)\big)\;
+  \mathrm{DirMult}\big(C;\, N_P, \kappa\, q(\theta_P, U)\big)\;
   \exp\!\Big\{-\tfrac12\, e'\Sigma^{-1} e\Big\},
 $$
 
@@ -136,7 +162,8 @@ with $e = Y - \mathcal A(C)$ and $U = (u_1, \dots, u_B)$.
 * Any realized table, published or not, is a linear functional $g'C_b$
   (for example $g = T e_c$ for cell $c$).
 * $x_b \mid Y$ is the posterior over $C_b$ read as weighted records.
-* $z_b \mid Y$ is its image $\sum_i C_{bi}\,\delta_{z_i} / N_b$.
+* $z_b \mid Y$ is its image $\sum_i C_{bi}\,\delta_{z_i} / N_b$, and the
+  block total $N_b \mid Y$ is part of the posterior.
 
 ## Collapsed likelihood for the parameters
 
@@ -145,13 +172,20 @@ Integrating $C$ out with a central-limit approximation (derived here):
 $$
 Y \mid \theta_P, U \;\dot\sim\; \mathcal N\big(m,\, S\big),
 \qquad
-m = \sum_b N_b D_b T' p_b,
+m = N_P\, v,
 \qquad
-S = \Sigma + \sum_b N_b D_b T'\big(\mathrm{diag}\,p_b - p_b p_b'\big) T D_b'.
+v = \sum_b \pi^0_b D_b T' p_b,
 $$
 
-$S$ adds the variance of realizing $N_b$ individuals to the table
-covariance $\Sigma$. Both $m$ and $S$ depend on the parameters, so
+$$
+S = \Sigma + \varphi N_P\Big[\sum_b \pi^0_b D_b T'\mathrm{diag}(p_b) T D_b'
+  - v v'\Big].
+$$
+
+$S$ adds the variance of realizing the PUMA's $N_P$ individuals over
+(block, atom) pairs, overdispersed by $\varphi$, to the table covariance
+$\Sigma$. The $-vv'$ term couples blocks (their totals sum to $N_P$); it is
+rank one. Both $m$ and $S$ depend on the parameters, so
 
 $$
 \log \pi(\theta_P, U, \tau \mid Y, \mathcal P) \approx
@@ -169,28 +203,29 @@ $$
 1. $(\hat U, \hat\tau)$, and optionally a joint update of $\theta_P$,
    maximizing the collapsed posterior.
 2. Given the parameters, the realized composition's MAP (fractional,
-   $r_b = C_b/N_b$) is the conditional PMEDM, solved jointly over the block
-   groups of a tract (derived here):
+   $r = C/N_P$ over (block, atom) pairs) is the conditional PMEDM (derived
+   here, to second order, with $W = N_P/\varphi \approx \kappa$):
 
 $$
-\min_{\{r_b\}} \sum_b N_b\, \mathrm{KL}\big(r_b \,\Vert\, p_b\big)
+\min_{r} W\, \mathrm{KL}\big(r \,\Vert\, q\big)
   + \tfrac12\, e'\Sigma^{-1}e,
-\qquad e = \textstyle\sum_b N_b D_b T' r_b - Y,
+\qquad e = N_P \textstyle\sum_b D_b T' r_b - Y,
 $$
 
 $$
 f(\lambda) = \lambda' Y
-  + \sum_b N_b \log \sum_i p_{bi}\, e^{-t(x_i)' D_b' \lambda}
+  + W \log \sum_{b,i} q_{bi}\, e^{-\varphi\, t(x_i)' D_b' \lambda}
   + \tfrac12 \lambda'\Sigma\lambda,
 \qquad
-r_{bi} \propto p_{bi}\, e^{-t(x_i)' D_b' \lambda}.
+r_{bi} \propto q_{bi}\, e^{-\varphi\, t(x_i)' D_b' \lambda}.
 $$
 
-This is the existing PMEDM dual over statewide atoms, with base $p_b$ in
-place of $q$ and entropy weight $N_b$ (from the multinomial, via Stirling).
-Its $\Sigma$ includes $\omega^2 I$, the same covariance inflation as the
-standard PMEDM's multiplier prior (here with entropy weight $N_b$, so not
-literally the same prior on $\lambda$).
+This is the existing PMEDM dual over statewide atoms, with base
+$q_{bi} = \pi^0_b p_{bi}$ in place of the design distribution and the block
+shares free, as in the PMEDM. With $\kappa = n_P$ and no type tilt it is
+the standard PMEDM: its primal is $n\,\mathrm{KL}(r \Vert q)$ over (unit,
+zone) pairs with $q_{ib} = d_i N_b/N$. Its $\Sigma$ includes $\omega^2 I$,
+the standard PMEDM's multiplier prior in covariance form.
 Its size is $B \times M$ pairs per PUMA (about 15 million for 100 block
 groups): GPU scale.
 
@@ -198,18 +233,22 @@ groups): GPU scale.
 
 * $(\theta_P, U) \sim \mathcal N(\text{MAP}, H^{-1})$, with $H$ the Hessian
   of the negative collapsed log posterior (at $\hat\tau$).
-* Given the parameters, approximate $C_b$ by its multinomial moments,
-  $\mathbb E C_b = N_b p_b$ and
-  $\mathrm{Cov}\, C_b = N_b(\mathrm{diag}\,p_b - p_b p_b')$, and condition
-  on $Y$. For any functional $g'C_b$ (derived here):
+* Given the parameters, approximate $C$ by its Dirichlet-multinomial
+  moments, $\mathbb E C = N_P q$ and
+  $\mathrm{Cov}\, C = \varphi N_P(\mathrm{diag}\,q - qq')$ over (block,
+  atom) pairs, and condition on $Y$. For any functional $g'C$, with $g$ over
+  pairs (for example a block's cell, or its total $N_b$) (derived here):
 
 $$
 \begin{aligned}
-\mathbb E[g'C_b \mid \cdot, Y] &= N_b\, g'p_b + k_b' S^{-1}(Y - m),\\
-\mathrm{Var}[g'C_b \mid \cdot, Y] &= N_b\, g'(\mathrm{diag}\,p_b - p_b p_b')\,g - k_b' S^{-1} k_b,\\
-k_b &= N_b\, D_b T'(\mathrm{diag}\,p_b - p_b p_b')\, g .
+\mathbb E[g'C \mid \cdot, Y] &= N_P\, g'q + k' S^{-1}(Y - m),\\
+\mathrm{Var}[g'C \mid \cdot, Y] &= \varphi N_P\, g'(\mathrm{diag}\,q - qq')\,g - k' S^{-1} k,\\
+k &= \varphi N_P\, \mathcal D T'(\mathrm{diag}\,q - qq')\, g,
 \end{aligned}
 $$
+
+  with $\mathcal D T'$ mapping pair counts to published rows
+  ($\sum_b D_bT'C_b$).
 
 * Mix over parameter draws. This gives closed-form intervals for every
   table, every rare-group total and every joint-structure cell, including
@@ -217,6 +256,13 @@ $$
 * Weak spot: very small counts, where the Gaussian can put mass below zero.
 
 ### Stage 3: sampling
+
+> **To revise for version 4 (step 5).** The samplers below were written for
+> version 3's multinomial per block with fixed $N_b$. Under version 4, moves
+> relabel an individual's (block, atom) pair, the prior ratio becomes the
+> Dirichlet-multinomial's, and the parameters' conditional given $C$ is no
+> longer the simple exponential-family form. They are kept as the starting
+> point.
 
 **Parameters (all variants): HMC.** Two schemes.
 
@@ -349,9 +395,12 @@ changes the generative model above is a model change.
    $\gamma < 1$; choose by the regional run, or by predicting held-out
    records' $x$ from $z$ across PUMAs.
 6. **Integer or fractional** realized populations as the reported product.
-7. **Entropy weight.** $N_b$ from the model; also fit $n$ (today's PMEDM)
-   as a sensitivity check.
-8. **$N_b$.** Known from census counts, or uncertain?
+7. **Overdispersion $\kappa$.** $\kappa = n_P$ (the PMEDM-equivalent) or
+   $\kappa = c\,n_P$ with $c$ chosen without truth (step 4b). The
+   realized-population MAP's entropy weight is $N_P/\varphi \approx \kappa$.
+8. **Prior shares $\pi^0$.** From published block-group unit estimates, or
+   from counts (for example the decennial census), and how much weight they
+   get. $N_P$ is known; block totals are random.
 9. **Calibration test.** The regional run's $Y$ equals the truth's tables
    exactly. Testing coverage needs $Y$ drawn with survey error around the
    truth.
