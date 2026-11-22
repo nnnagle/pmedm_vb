@@ -27,7 +27,7 @@ version 4 (:mod:`pmedm_vb.latent.overdispersed`):
 **Arms** (§3):
 
 * ``K1``: ``κ = n_A``, the region's number of records;
-* ``K2``: ``κ = c n_A``, ``c ∈ --c-grid`` (``{0.25, 0.5, 1, 2, 4}``), chosen
+* ``K2``: ``κ = c n_A``, ``c ∈ --c-grid`` (``{0.0625, 0.125, 0.25, 0.5, 1}``, plan version 2), chosen
   per simulation and region by the B1 posterior predictive log density
   (:func:`~pmedm_vb.latent.overdispersed.predictive_log_density`), summed
   over the region's first ``--c-replicates`` replicates (default 3; the plan's
@@ -104,7 +104,7 @@ _SHARED: dict = {}
 
 MODE = "lzo"
 TAU_MULTIPLES = (0.0625, 0.125, 0.25, 0.5)
-C_GRID = (0.25, 0.5, 1.0, 2.0, 4.0)
+C_GRID = (0.0625, 0.125, 0.25, 0.5, 1.0)
 SPLIT_FILE = Path(__file__).with_name("step3b_split.json")
 SCORED = ("B1", "B2")
 

@@ -8,6 +8,7 @@
 > | version | date | change |
 > |---|---|---|
 > | 1 | 2026-11-22 | approved; prior shares $\pi^0_b = \hat N_b/N_A$ from estimated zone totals, as in the PMEDM's $q_{ib} = d_i N_b/N$ |
+> | 2 | 2026-11-22 | §3: K2's grid moved down to $c \in \{0.0625, 0.125, 0.25, 0.5, 1\}$. Step 4 found errors 6–12 times the posterior sd (coverage 0.14–0.34 at 90%), and K2 chose the grid's lower edge (0.25) on smoke; values above 1 only narrow the intervals |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -101,7 +102,7 @@ Two arms:
 * **K1 (primary): $\kappa = n_A$,** the area's number of records: the
   PMEDM-equivalent overdispersion. No fitting.
 * **K2: $\kappa = c\, n_A$,** with $c$ chosen per region without truth from
-  $c \in \{0.25, 0.5, 1, 2, 4\}$, by the posterior predictive log density of
+  $c \in \{0.0625, 0.125, 0.25, 0.5, 1\}$, by the posterior predictive log density of
   the held-out tables B1 (the posterior of B1's true tables plus their
   survey error). A log density rewards correct width as well as correct
   centre, which a misfit does not.
