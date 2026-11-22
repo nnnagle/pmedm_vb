@@ -1,6 +1,6 @@
 """Step 4 of the latent-population PMEDM: the stage 2 posterior and its
 calibration on the regional run with survey error (``PLAN_latent_step4.md``
-version 1; model ``MODEL_latent.qmd`` version 3).
+version 2; model ``MODEL_latent.qmd`` version 3).
 
     python experiments/latent/step4_posterior.py --config experiments/embed/stage1_v2.json \
         --regions experiments/latent/regions_tn.json \
@@ -22,8 +22,10 @@ split of step 3b (its ``settings.json``; checked against the committed
 (:mod:`pmedm_vb.latent.calibration`), ``--replicates`` (10) each, data seeds
 fixed by (``--seed``, simulation, region, replicate). Per unit:
 
-1. the replicate's published tables: the fitted S1 cells and the held-out
-   B1 and B2 cells, drawn jointly (§3);
+1. the replicate's realized population (``N_b`` units drawn from the zone's
+   records with probability ``∝ w_i``; seeded by region and replicate only,
+   so G and S share it) and its published tables: the fitted S1 cells and the
+   held-out B1 and B2 cells, drawn jointly (§3);
 2. ``Σ`` for fitting: G, the region's ``Σ_survey`` plus ``ω² I``
    (:func:`~pmedm_vb.latent.region_engine.region_sigma`); S, ``Σ̂`` plus
    ``ω² I`` (:class:`~pmedm_vb.latent.calibration.BlockSigma`);
@@ -34,10 +36,12 @@ fixed by (``--seed``, simulation, region, replicate). Per unit:
    ``τ`` chosen by B1 (§4.1);
 4. at the chosen ``τ``: Laplace and ``--draws`` (200) posterior draws of
    every functional (:mod:`pmedm_vb.latent.posterior`), their interval
-   statistics against truth, and for the fitted cells the published SE and the
+   statistics against the replicate's truth (from its realized population), and for the fitted cells the published SE and the
    direct estimate's 90% interval ``Y ± 1.645 SE``;
 5. the MAP's point accuracy: step 3's scoring of the realized MAP at the
-   chosen ``τ`` (``latent_kern30``) and of ``p_b`` (``:p``), against truth,
+   chosen ``τ`` (``latent_kern30``) and of ``p_b`` (``:p``), against the
+   zones' design-weighted records as in steps 3 and 3b (comparable with step
+   3b's noise-free scores),
    with transfer misfit on B1 and B2 (the replicate's published tables).
 
 Each unit writes ``<out>/<simulation>/<region>/r<k>/``: ``posterior.csv.gz``
@@ -75,6 +79,7 @@ from pmedm_vb.latent.calibration import (
     BlockSigma,
     draw_bernoulli,
     draw_gaussian,
+    draw_truth,
     interval_stats,
     with_tables,
 )
@@ -125,17 +130,22 @@ def run_unit(unit: tuple[str, str, int]) -> tuple[str, str, int, float]:
     data, sets, X = s["data"], s["sets"], s["X"]
     region, ref = s["regions"][region_id], s["refs"][region_id]
     index = list(s["regions"]).index(region_id)
+    # The truth is drawn from (seed, region, replicate) only, so G and S of the
+    # same region and replicate share it; the survey error adds the simulation.
+    truth_rng = np.random.default_rng([args.seed, index, k])
     rng = np.random.default_rng([args.seed, SIMULATIONS.index(sim), index, k])
 
     # 1-2. The replicate's tables and Σ.
     problems = {key: build_region(data, region, tables=sets[key]) for key in ("A", *SCORED)}
     joint = build_region(data, region, tables=(*sets["A"], *sets["B1"], *sets["B2"]))
-    draw = draw_gaussian(joint, rng) if sim == "G" else draw_bernoulli(joint, rng)
+    true_pop = draw_truth(joint, truth_rng)
+    draw = (draw_gaussian(joint, true_pop, rng) if sim == "G"
+            else draw_bernoulli(joint, true_pop, rng))
     sizes = [len(problems[key].cells) for key in ("A", *SCORED)]
     cuts = np.cumsum([0, *sizes])
     reps = {key: with_tables(problems[key], np.arange(cuts[j], cuts[j + 1]), draw)
             for j, key in enumerate(("A", *SCORED))}
-    pA = reps["A"]
+    pA = replace(reps["A"], zone_weight=true_pop.N.astype(float))   # N_b known (rounded)
     inputs = pA.inputs
     Z = inputs.n_zones
     N_b = np.asarray(pA.zone_weight, float)
@@ -191,7 +201,9 @@ def run_unit(unit: tuple[str, str, int]) -> tuple[str, str, int, float]:
     post_rng = np.random.default_rng([args.seed, SIMULATIONS.index(sim), index, k, 1])
     sample = posterior_samples(engine, theta0, U_hat, m_star * s["tau_ref_g"], s["fun"],
                                X["A"], args.draws, post_rng)
-    truth = zone_truth(s["fun"], ref["zone"], data.weight, Z)
+    counts = np.zeros(data.weight.size)
+    counts[joint.units] = true_pop.counts
+    truth = zone_truth(s["fun"], ref["zone"], counts, Z)
     st = interval_stats(sample.samples, truth)
     times["posterior"] = time.perf_counter() - t0
     fun = s["fun"]

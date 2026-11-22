@@ -1,10 +1,15 @@
 """Calibration of the stage 2 posterior on the regional run with survey error
-(step 4, D2 coverage of ``PLAN_latent.md``; ``PLAN_latent_step4.md`` version 1,
+(step 4, D2 coverage of ``PLAN_latent.md``; ``PLAN_latent_step4.md`` version 2,
 §3 and §4.4).
 
-**Truth** (both simulations): each zone's own records, design-weighted (record
-``i`` standing for ``w_i`` identical units). The region's records and
-``θ_A`` are not perturbed; ``N_b`` is the truth's unit total.
+**Truth** (both simulations; :func:`draw_truth`): a realized population per
+replicate. Zone ``b``'s population is ``N_b`` units (its design-weighted unit
+total, rounded) drawn independently from the zone's own records with
+probability ``∝ w_i``: ``c ~ Multinomial(N_b, w/Σw)`` over the records
+(households carry their members, since ``t(x_i)`` is the whole unit's
+contribution). Its tables ``A(C_true) = Σ_i c_i t(x_i)`` are the replicate's
+target, and every functional's truth is computed from ``c``. The region's
+records and ``θ_A`` are not perturbed; ``N_b`` is known.
 
 **Simulation G** (:func:`draw_gaussian`): ``Y = A(C_true) + ε``,
 ``ε ~ N(0, Σ_survey)`` with the region's replicate covariance (untapered,
@@ -17,9 +22,9 @@ the fitted tables). Fitting uses the same ``Σ_survey`` plus ``ω² I``
 (:func:`~pmedm_vb.latent.region_engine.region_sigma`).
 
 **Simulation S** (:func:`draw_bernoulli`): a 1-in-8 Bernoulli sample of the
-true population. Record ``i`` of zone ``b`` contributes
-``n_i ~ Binomial(w_i, π)`` sampled units, ``π = 1/8`` (a household with its
-members, since ``t(x_i)`` is the whole unit's contribution);
+replicate's realized population. Record ``i`` of zone ``b`` contributes
+``n_i ~ Binomial(c_i, π)`` sampled units, ``π = 1/8`` (a household with its
+members); no Gaussian error is added;
 ``Ŷ = π⁻¹ Σ_i n_i t(x_i)`` (Horvitz–Thompson) and
 ``Σ̂ = (1 - π)/π² Σ_i n_i t(x_i) t(x_i)'`` over all of the zone's cells
 (fitted, B1, B2), zones independent. A cell with ``Ŷ = 0`` gets the variance
@@ -75,7 +80,37 @@ class SurveyDraw:
     sampled_units: np.ndarray | None = None
 
 
-def draw_gaussian(problem_all: RegionProblem, rng: np.random.Generator,
+@dataclass
+class TruthDraw:
+    """A replicate's realized population: ``counts`` (units per record of the
+    region, in ``problem_all``'s unit order), the zones' ``N_b`` and tables
+    (``Z × C_all``)."""
+
+    counts: np.ndarray
+    N: np.ndarray
+    Y: np.ndarray
+
+
+def draw_truth(problem_all: RegionProblem, rng: np.random.Generator) -> TruthDraw:
+    """The realized population (module notes)."""
+    inputs = problem_all.inputs
+    X = inputs.X_B.tocsr()
+    w = inputs.units["weight"].to_numpy(dtype=float)
+    Z, C = inputs.Y_B.shape
+    counts = np.zeros(w.size, dtype=np.int64)
+    N = np.zeros(Z, dtype=np.int64)
+    for b in range(Z):
+        own = np.flatnonzero(problem_all.zone_of_unit == b)
+        N[b] = int(np.rint(w[own].sum()))
+        counts[own] = rng.multinomial(N[b], w[own] / w[own].sum())
+    Y = np.zeros((Z, C))
+    for b in range(Z):
+        own = np.flatnonzero(problem_all.zone_of_unit == b)
+        Y[b] = np.asarray(X[own].T @ counts[own].astype(float)).ravel()
+    return TruthDraw(counts=counts, N=N, Y=Y)
+
+
+def draw_gaussian(problem_all: RegionProblem, truth: TruthDraw, rng: np.random.Generator,
                   alpha: float = 0.01) -> SurveyDraw:
     """Simulation G (module notes)."""
     inputs = problem_all.inputs
@@ -87,16 +122,15 @@ def draw_gaussian(problem_all: RegionProblem, rng: np.random.Generator,
     Z, C = inputs.Y_B.shape
     E = eps.reshape(C, Z).T                      # stacked: cell-major, zone fastest
     var = sigma.diagonal().reshape(C, Z).T
-    return SurveyDraw(Y=inputs.Y_B + E, var=var)
+    return SurveyDraw(Y=truth.Y + E, var=var)
 
 
-def draw_bernoulli(problem_all: RegionProblem, rng: np.random.Generator,
+def draw_bernoulli(problem_all: RegionProblem, truth: TruthDraw, rng: np.random.Generator,
                    pi: float = PI) -> SurveyDraw:
     """Simulation S (module notes)."""
     inputs = problem_all.inputs
     X = inputs.X_B.tocsr()
-    w = np.rint(inputs.units["weight"].to_numpy()).astype(np.int64)
-    n = rng.binomial(w, pi)
+    n = rng.binomial(truth.counts, pi)
     Z, C = inputs.Y_B.shape
     Y, var, blocks, floor = np.zeros((Z, C)), np.zeros((Z, C)), [], np.zeros((Z, C))
     c = (1.0 - pi) / pi ** 2
@@ -226,9 +260,11 @@ def decide(table: pd.DataFrame, primary: str = "S") -> tuple[dict, list[str]]:
             out = "calibrated, rare groups included: stage 2 is the posterior; go to step 6"
         elif others_pass and rare is False:
             out = "calibrated except rare groups: step 5 (samplers)"
-        else:
+        else:   # other classes fail, whether rare groups pass or fail (plan v2, §6)
             out = ("not calibrated outside rare groups: stop and review the posterior "
-                   "approximation (Laplace, tau fixed, theta_A fixed) before any sampler")
+                   "approximation (Laplace, tau fixed, theta_A fixed) before any sampler"
+                   + (" (rare groups pass; plan version 2: also stop and review)"
+                      if rare else ""))
         verdict[sim] = {"classes": ok, "others_pass": others_pass, "rare_pass": rare,
                         "decision": out}
         role = "primary" if sim == primary else "diagnostic"
