@@ -8,6 +8,7 @@
 > | version | date | change |
 > |---|---|---|
 > | 1 | 2026-11-21 | approved as drafted, with two simulations (G and S); §9 items accepted as proposed |
+> | 2 | 2026-11-22 | §3: each replicate's truth is a realized population of $N_b$ units drawn independently from the zone's records (probability $\propto w_i$), replacing the zone's records as $w_i$ identical copies, which is clumped relative to the model's independent units ($\sum w^2/\sum w \approx 35$ times the variance in `knoxville_core`); S samples those units, G adds Gaussian error to their tables. §6: the case "other classes fail, rare groups pass" is stop and review. |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -45,19 +46,29 @@ In the regional run, each zone's tables have so far equalled its truth
 exactly: no survey error. To check calibration, the tables are drawn with
 survey error, in two ways.
 
-* **Truth (both simulations):** each zone's own records, design-weighted (as
-  in steps 3 and 3b): the realized population, record $i$ standing for
-  $w_i$ identical units. Its tables $\mathcal A(C^{\mathrm{true}})$.
+* **Truth (both simulations): a realized population per replicate.** Zone
+  $b$'s population is $N_b$ units (households and group-quarters persons;
+  $N_b$ the zone's design-weighted unit total, rounded) drawn independently
+  from the zone's own records with probability $\propto w_i$:
+  $c^{(r)} \sim \mathrm{Multinomial}(N_b, w/\sum w)$ over the records. Its
+  tables $\mathcal A(C^{\mathrm{true},(r)})$ are the target of replicate $r$.
+  - The zone's distribution of records is not a member of the model's
+    family, and its records are excluded from the support, so the test of
+    the model stays honest.
+  - Units are independent, as the model's realized population is. Using the
+    records as $w_i$ identical copies instead (version 1) clumps the truth:
+    its variance around any $p_b$ is about $\sum w^2/\sum w$ times larger
+    (35 in `knoxville_core`).
 * **Leave-zone-out support** in both. The region's records and $\theta_A$
-  are not perturbed (the PUMS is the same in every replicate). $N_b$ is the
-  truth's unit total (known, as the model assumes).
+  are not perturbed (the PUMS is the same in every replicate). $N_b$ is
+  known, as the model assumes.
 * **$R = 10$ replicates per simulation,** fixed seeds. The held-out tables
   B1 and B2 are drawn the same way as the fitted ones, since B1 plays
   published tables in choosing $\tau$.
 
 ### Simulation G: Gaussian survey error
 
-$Y^{(r)} = \mathcal A(C^{\mathrm{true}}) + \epsilon^{(r)}$,
+$Y^{(r)} = \mathcal A(C^{\mathrm{true},(r)}) + \epsilon^{(r)}$,
 $\epsilon^{(r)} \sim \mathcal N(0, \Sigma_{\mathrm{survey}})$, with the
 region's replicate covariance (untapered, $\alpha = 0.01$). Fitting uses the
 same $\Sigma_{\mathrm{survey}}$. The model's survey assumption holds
@@ -65,9 +76,11 @@ exactly, so this isolates the posterior approximation.
 
 ### Simulation S: a 1-in-8 sample of the true population
 
-* **Sample:** each of the $w_i$ units behind record $i$ is in the sample
-  independently with probability $\pi = 1/8$ (Bernoulli sampling), so record
-  $i$ contributes $n_i \sim \mathrm{Binomial}(w_i, \pi)$ sampled units.
+* **Sample:** each unit of the replicate's realized population is in the
+  sample independently with probability $\pi = 1/8$ (Bernoulli sampling),
+  so record $i$ contributes $n_i \sim \mathrm{Binomial}(c^{(r)}_i, \pi)$
+  sampled units. This is the only survey error in S; nothing Gaussian is
+  added.
   Households are sampled whole, with their members, so person cells of one
   household move together.
 * **Survey estimate:** the Horvitz–Thompson estimate of every cell,
@@ -169,7 +182,8 @@ Thresholds are proposals to confirm at review.
   - fail while the other classes pass: step 5 (samplers) as the parent plan
     says;
   - fail in other classes too: stop and review the posterior approximation
-    (Laplace, $\tau$ fixed, $\theta_A$ fixed) before any sampler.
+    (Laplace, $\tau$ fixed, $\theta_A$ fixed) before any sampler;
+  - pass while other classes fail: also stop and review.
 * **Reported, not decided:** RMS $z$, PIT, widths, the share of intervals
   below zero, per-replicate variation, MAP accuracy under noise.
 
