@@ -123,7 +123,13 @@ def zone_covariances(engine: CollapsedLikelihood, ev: Evaluation) -> list[np.nda
 
 
 def information(engine: CollapsedLikelihood, ev: Evaluation) -> np.ndarray:
-    """The mean-part Fisher information of ``U`` (``ZK × ZK``) at ``ev``."""
+    """The mean-part Fisher information of ``U`` (``ZK × ZK``) at ``ev``. An
+    engine with its own ``gn_information`` (model version 4's
+    :class:`~pmedm_vb.latent.overdispersed.PairLikelihood`) supplies it; every
+    other engine is unchanged."""
+    own = getattr(engine, "gn_information", None)
+    if own is not None:
+        return own(ev)
     return puma_information(engine, ev, zone_covariances(engine, ev))
 
 
