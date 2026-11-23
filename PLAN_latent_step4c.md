@@ -1,8 +1,13 @@
 # Plan, step 4c: choosing $\tau$ and $\kappa$ together (draft)
 
-> **Status: draft for review.** Review of step 4b (`STEP4_latent.qmd`), for
-> `MODEL_latent.qmd` version 4 (no model change). Once approved it is fixed,
-> with a change log, and `PLAN_latent.md` gets an entry adding it.
+> **Status: fixed.** Review of step 4b (`STEP4_latent.qmd`), for
+> `MODEL_latent.qmd` version 4 (no model change). Added to `PLAN_latent.md`
+> in its version 4. Change it only when the plan itself changes, and record
+> each change below.
+>
+> | version | date | change |
+> |---|---|---|
+> | 1 | 2026-11-23 | approved as drafted; S-cal optional, at S's chosen $(\tau, c)$; the $\pi^0$ test (§5 item 5) is not part of this step |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -119,7 +124,7 @@ hours on one 16-core node, less with step 4b's fits reused. S-cal, when
 run, adds about 40 CPU-hours (10 replicates × 13 regions at S's chosen
 pair, no selection phase).
 
-## 5. Open for review
+## 5. Resolved at approval
 
 1. The grid: $\tau$ to $2\times$, $c \in \{0.125, 0.25, 0.5\}$.
 2. Joint choice by B1 log density over 3 replicates, with 50 draws in the
@@ -128,6 +133,6 @@ pair, no selection phase).
 4. S-cal as an optional simulation, with controls on households,
    group-quarters persons and persons by sex × broad age at region level,
    at S's chosen $(\tau, c)$; reported, not decided on.
-5. Still open: an arm with prior shares $\pi^0$ from an independent source
+5. Not part of this step (left open): an arm with prior shares $\pi^0$ from an independent source
    (truth plus independent error), to test whether using the survey's zone
    totals as both prior and data narrows the totals' posterior.
