@@ -1,0 +1,157 @@
+---
+title: "Latent-population PMEDM, steps 4 and 4b: calibration of the posterior"
+subtitle: "Design, results and decisions"
+date: 2026-11-23
+---
+
+Step 4 (`PLAN_latent_step4.md`, version 2) and step 4b
+(`PLAN_latent_step4b.md`, version 2). Model: `MODEL_latent.qmd` version 3
+for step 4, version 4 for step 4b.
+
+## The test
+
+The regional run with known truth (13 regions, 58 zones, leave-zone-out
+support), the model chosen in step 3b ($h$ = `kern100` for the region
+reference, $g$ = `kern30` for the zone deviations).
+
+**Truth.** In each replicate, a zone's realized population is $N_b$ units
+drawn independently from the zone's own records with probability
+$\propto w_i$. (Plan version 1 used the records as $w_i$ identical copies;
+that truth is clumped, with variance about $\sum w^2/\sum w \approx 35$ times
+too large, and was replaced before the run.)
+
+**Survey error, two simulations, 10 replicates each:**
+* **S (primary):** a 1-in-8 Bernoulli sample of the realized population;
+  Horvitz–Thompson tables; covariance estimated from the sample, with a
+  one-unit floor for zero cells. Fitting uses the estimated covariance.
+* **G (diagnostic):** the truth's tables plus Gaussian error from the
+  replicate covariance, which fitting also uses.
+
+In both, the direct estimate $\pm 1.645$ SE covers the truth 0.90 of the
+time, so the simulated surveys behave as intended.
+
+**Posterior (stage 2):** the MAP for the zone deviations $U$ ($\tau$ chosen
+by held-out tables B1), a Laplace approximation for $U$ (200 draws), and for
+each draw the closed-form Gaussian conditioning of the realized population
+on the tables. $\theta_A$ and $\tau$ fixed.
+
+**Functionals scored:** fitted cells; held-out tables B1 (used to choose
+$\tau$) and B2 (never used); two-way joint cells; 15 rare-group totals; in
+step 4b also zone totals.
+
+**Checks of the code:** where the model is true (parameters, population and
+tables drawn from the model), 90% intervals cover 0.88–0.91 and 50%
+intervals 0.48–0.56 in every class, for both model versions. Failures below
+are the model's, not the code's.
+
+## Step 4: independent units (model version 3)
+
+Pooled over replicates, zones and cells:
+
+| class | S: cover 90% | S: cover 50% | S: RMS $z$ | G: cover 90% | G: RMS $z$ |
+|---|---|---|---|---|---|
+| fitted | 0.28 | 0.12 | 5.7 | 0.18 | 7.2 |
+| B1 | 0.24 | 0.11 | 10.3 | 0.21 | 10.6 |
+| B2 | 0.19 | 0.08 | 10.1 | 0.14 | 12.2 |
+| joint | 0.23 | 0.09 | 8.2 | 0.18 | 9.1 |
+| rare | 0.34 | 0.13 | 7.8 | 0.22 | 8.2 |
+
+* The PIT histograms are U-shaped (about 40% in each extreme decile): the
+  intervals are far too narrow, not off-centre.
+* The worst tables are the attributes stage 1's type space barely encodes:
+  travel time (B08303, B08134) and year built (B25036), RMS $z$ 14–22.
+* **The MAP is robust to survey noise:** log-odds-ratio error 0.419 (G) and
+  0.422 (S), against 0.4205 with noise-free tables in step 3b.
+* **Decision (§6): not calibrated; stop and review.**
+
+**Diagnosis.** Version 3 draws a zone's people independently from $p_b$, a
+member of the model's family. Real zones are outside the family, and for
+$N_b$ in the tens of thousands the multinomial variance around $p_b$ is far
+smaller than their systematic departure from it.
+
+## Step 4b: an overdispersed realized level (model version 4)
+
+The region total $N_A$ is known; zone totals are random. The realized
+population over (zone, atom) pairs is Dirichlet-multinomial,
+$C \sim \mathrm{DirMult}(N_A, \kappa q)$ with $q_{bi} = \pi^0_b p_{bi}$ and
+prior shares $\pi^0_b = \hat N_b/N_A$ from each replicate's survey
+estimates of zone totals, as in the PMEDM's $q_{ib} = d_i N_b/N$. The
+covariance is multiplied by $\varphi = (N_A + \kappa)/(1 + \kappa)$. With
+$\kappa = n_A$ the conditional PMEDM's entropy weight is the standard
+PMEDM's $n$ (to $O(n/N)$).
+
+* **K1:** $\kappa = n_A$.
+* **K2:** $\kappa = c\,n_A$, $c \in \{0.0625, 0.125, 0.25, 0.5, 1\}$ chosen
+  per simulation and region by the posterior predictive log density of B1,
+  over the first 3 replicates.
+
+### Results, simulation S
+
+| class | step 4 ($\kappa = \infty$) | K1 | **K2** | K2 cover 50% | K2 RMS $z$ |
+|---|---|---|---|---|---|
+| fitted | 0.28 | 0.78 | **0.87** | 0.48 | 1.08 |
+| B1 | 0.24 | 0.69 | **0.88** | 0.56 | 1.24 |
+| B2 | 0.19 | 0.58 | 0.82 | 0.45 | 1.47 |
+| joint | 0.23 | 0.69 | **0.90** | 0.55 | 1.11 |
+| rare | 0.34 | 0.80 | **0.88** | 0.56 | 1.14 |
+| zone totals | — | 0.71 | 0.82 | 0.42 | 1.22 |
+
+(Coverage at 90% unless stated.) The K2 PIT histograms are close to flat.
+On simulation G, K2 also fails on fitted cells (0.80) and rare groups
+(0.84).
+
+* **The overdispersion is the missing piece:** coverage rises from 0.2–0.3
+  to 0.82–0.90.
+* **$c = 0.25$ was chosen in 22 of 26 cases and 0.5 in the rest,** never an
+  edge of the grid: $\kappa \approx n_A/4$, a variance inflation about four
+  times the PMEDM-equivalent. The PMEDM's implicit overdispersion is in the
+  right direction but about four times too small.
+* **B2's shortfall** comes from attributes outside what the type space
+  encodes; a single $\kappa$ widens every direction alike, so it cannot give
+  B2 more width without over-widening the classes already calibrated.
+* **Zone totals** are tied to the same $\kappa$ through the Dirichlet's
+  aggregation, and their prior shares come from noisy survey estimates.
+* **$\tau$ hit the top of its grid:** under K2, B1 chose
+  $0.5\,\tau_{\mathrm{ref}}$ in 110 of 110 cases on S. $\tau$ and $c$ were
+  chosen one after the other.
+
+### Point accuracy of the realized MAP, simulation S
+
+| model | LOR error | TVD | rare groups |
+|---|---|---|---|
+| step 4 ($\kappa = \infty$) | 0.422 | 0.063 | 0.714 |
+| K1 | 0.411 | 0.058 | 0.583 |
+| K2 | **0.410** | **0.057** | 0.597 |
+| step 3b, noise-free | 0.421 | 0.059 | 0.664 |
+| step 3 `pmedm_ref`, noise-free | 0.408 | 0.060 | 0.630 |
+
+The overdispersed model's point estimates are the best of any variant,
+under noisy tables, and level with or better than the standard PMEDM on the
+type-reference support (scored on noise-free tables).
+
+## Decisions
+
+* **Step 4 (§6):** not calibrated; stop and review (→ step 4b).
+* **Step 4b (§5):** neither K1 nor K2 calibrated on S; stop and review. K2
+  passes four of six classes; B2 (0.82) and zone totals (0.82) miss the 0.85
+  floor at 90%.
+
+## Notes
+
+* The Laplace part of the posterior (the zone deviations) carries little of
+  the uncertainty; most is in the realized population given $U$. The
+  failures were in the realized level's variance, not in the Laplace step:
+  where the model is true, the same approximation is calibrated.
+* $\kappa = n_A$ reproduces the PMEDM's entropy weight only to $O(n/N)$
+  (about 5% in `knoxville_core`).
+* Compute: step 4 about 119 CPU-hours; step 4b about 249 (one resubmission
+  after the 24-hour limit).
+
+## Record
+
+* **Code:** `dded086`, `abc99b4` (step 4); `6101bd6`, `c215319` (step 4b).
+* **Runs** (under `/lustre/isaac24/proj/UTK0533/pmedm_vb_runs/latent/`):
+  `step4` (the $\kappa = \infty$ arm), `step4b` (K1, K2).
+* **Handed on:** model version 4; $\kappa \approx n_A/4$ by B1 log density;
+  the open questions of $\tau$ at its grid edge, B2's tables outside the
+  type space, and zone totals.
