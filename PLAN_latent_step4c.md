@@ -8,6 +8,7 @@
 > | version | date | change |
 > |---|---|---|
 > | 1 | 2026-11-23 | approved as drafted; S-cal optional, at S's chosen $(\tau, c)$; the $\pi^0$ test (§5 item 5) is not part of this step |
+> | 2 | 2026-11-23 | the $\pi^0$ test added as an optional arm (P0) |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -94,6 +95,26 @@ does not replace S or G; S stays primary.
 S-cal tests whether the totals' shortfall, and the rest of the calibration,
 carry over to a survey whose weights are post-stratified like the ACS's.
 
+### Optional arm P0: prior shares from an independent source
+
+An additional arm, run on request, on simulation S only. It tests whether
+using the survey's zone totals as both the prior shares $\pi^0$ and data
+narrows the posterior of zone totals.
+
+* **Prior shares:** $\pi^0_b = \hat N^{\mathrm{ind}}_b / \sum_{b'} \hat
+  N^{\mathrm{ind}}_{b'}$, where $\hat N^{\mathrm{ind}}_b$ is the zone's
+  unit total from a second, independent 1-in-8 Bernoulli sample of the same
+  realized population (its own seeds). It has the same precision as the
+  survey's own totals but is independent of $Y$, like a count from another
+  source.
+* **Everything else as S:** the same $Y$ and covariance, and, as with S-cal,
+  the $(\tau, c)$ pair S chose for each region; all 10 replicates with 200
+  draws, fitted from scratch.
+* **Reading it:** if zone totals reach the band under P0 while they miss
+  under S, using the survey's totals twice is the cause, and real
+  applications should take $\pi^0$ from another source (for example
+  decennial counts; model fork 8).
+
 ## 3. Decision rules (fixed before results)
 
 Simulation S primary, G diagnostic; classes pooled over replicates, zones
@@ -109,8 +130,8 @@ and cells.
 * **Calibrated:** every class within its band. Then model version 4 with
   $(\tau, c)$ chosen by B1 is the posterior; go to step 6.
 * **Otherwise:** stop and review, reporting which classes fail.
-* **S-cal, when run,** is reported with the same bands but does not enter
-  the decision.
+* **S-cal and P0, when run,** are reported with the same bands but do not
+  enter the decision.
 
 Under these bands step 4b's K2 would pass B2 (0.82) and still fail on zone
 totals (0.82).
@@ -122,7 +143,7 @@ draws; final: 7 × 26 units with 200 draws. In step 4b a unit took about 18
 minutes, most of it the 200 draws. Estimated 150–180 CPU-hours, about 10–12
 hours on one 16-core node, less with step 4b's fits reused. S-cal, when
 run, adds about 40 CPU-hours (10 replicates × 13 regions at S's chosen
-pair, no selection phase).
+pair, no selection phase). P0, when run, adds about the same.
 
 ## 5. Resolved at approval
 
@@ -133,6 +154,6 @@ pair, no selection phase).
 4. S-cal as an optional simulation, with controls on households,
    group-quarters persons and persons by sex × broad age at region level,
    at S's chosen $(\tau, c)$; reported, not decided on.
-5. Not part of this step (left open): an arm with prior shares $\pi^0$ from an independent source
+5. Added in version 2 as the optional arm P0: an arm with prior shares $\pi^0$ from an independent source
    (truth plus independent error), to test whether using the survey's zone
    totals as both prior and data narrows the totals' posterior.
