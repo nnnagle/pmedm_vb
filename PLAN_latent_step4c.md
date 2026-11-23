@@ -81,6 +81,10 @@ does not replace S or G; S stays primary.
   correlated, and the controlled totals are nearly exact, as in ACS
   estimates.
 * **Fitting** uses that covariance (plus $\omega^2 I$), as with S.
+* **No selection of its own:** S-cal uses, for each region, the
+  $(\tau, c)$ pair that S chose, and runs all 10 replicates at that pair
+  with 200 draws, fitted from scratch. With the tuning held fixed,
+  differences in coverage between S and S-cal come from the calibration.
 
 S-cal tests whether the totals' shortfall, and the rest of the calibration,
 carry over to a survey whose weights are post-stratified like the ACS's.
@@ -112,7 +116,8 @@ Selection: 12 pairs × 3 replicates × 26 (simulation, region) units with 50
 draws; final: 7 × 26 units with 200 draws. In step 4b a unit took about 18
 minutes, most of it the 200 draws. Estimated 150–180 CPU-hours, about 10–12
 hours on one 16-core node, less with step 4b's fits reused. S-cal, when
-run, adds about half again (one more simulation beside S and G).
+run, adds about 40 CPU-hours (10 replicates × 13 regions at S's chosen
+pair, no selection phase).
 
 ## 5. Open for review
 
@@ -121,8 +126,8 @@ run, adds about half again (one more simulation beside S and G).
    selection phase.
 3. The wider band for B2 only; zone totals kept at the standard band.
 4. S-cal as an optional simulation, with controls on households,
-   group-quarters persons and persons by sex × broad age at region level;
-   reported, not decided on.
+   group-quarters persons and persons by sex × broad age at region level,
+   at S's chosen $(\tau, c)$; reported, not decided on.
 5. Still open: an arm with prior shares $\pi^0$ from an independent source
    (truth plus independent error), to test whether using the survey's zone
    totals as both prior and data narrows the totals' posterior.
