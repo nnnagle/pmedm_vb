@@ -56,6 +56,35 @@ replicates. The other 7 replicates run only the chosen pair.
   - the truth-best pair (lowest mean log-odds-ratio error), as a check;
   - a flag if the chosen $\tau$ is at the new top edge ($2\times$).
 
+### Optional simulation S-cal: a post-stratified survey
+
+An additional simulation, off by default and run only when requested. It
+does not replace S or G; S stays primary.
+
+* **Sample:** the same 1-in-8 Bernoulli sample of the realized population
+  as S (same seeds).
+* **Calibration:** the sample weights are calibrated to region-level
+  controls taken from the realized population, the analogue of the ACS's
+  county-level weighting areas:
+  - total households;
+  - group-quarters persons;
+  - persons by sex × broad age group.
+
+  By raking (iterative proportional fitting) to those margins, with a
+  generalized-regression fallback if raking fails to converge (reported).
+* **Tables:** every fitted and held-out cell from the calibrated weights.
+* **Covariance:** the linearization estimator for a calibration estimator:
+  the Bernoulli-sampling formula of S applied to the residuals of each
+  unit's contributions after regression on the calibration variables (to
+  verify against the literature before building, as recalled from Deville
+  and Särndal and Särndal et al.). Zone totals' errors become negatively
+  correlated, and the controlled totals are nearly exact, as in ACS
+  estimates.
+* **Fitting** uses that covariance (plus $\omega^2 I$), as with S.
+
+S-cal tests whether the totals' shortfall, and the rest of the calibration,
+carry over to a survey whose weights are post-stratified like the ACS's.
+
 ## 3. Decision rules (fixed before results)
 
 Simulation S primary, G diagnostic; classes pooled over replicates, zones
@@ -71,6 +100,8 @@ and cells.
 * **Calibrated:** every class within its band. Then model version 4 with
   $(\tau, c)$ chosen by B1 is the posterior; go to step 6.
 * **Otherwise:** stop and review, reporting which classes fail.
+* **S-cal, when run,** is reported with the same bands but does not enter
+  the decision.
 
 Under these bands step 4b's K2 would pass B2 (0.82) and still fail on zone
 totals (0.82).
@@ -80,7 +111,8 @@ totals (0.82).
 Selection: 12 pairs × 3 replicates × 26 (simulation, region) units with 50
 draws; final: 7 × 26 units with 200 draws. In step 4b a unit took about 18
 minutes, most of it the 200 draws. Estimated 150–180 CPU-hours, about 10–12
-hours on one 16-core node, less with step 4b's fits reused.
+hours on one 16-core node, less with step 4b's fits reused. S-cal, when
+run, adds about half again (one more simulation beside S and G).
 
 ## 5. Open for review
 
@@ -88,3 +120,9 @@ hours on one 16-core node, less with step 4b's fits reused.
 2. Joint choice by B1 log density over 3 replicates, with 50 draws in the
    selection phase.
 3. The wider band for B2 only; zone totals kept at the standard band.
+4. S-cal as an optional simulation, with controls on households,
+   group-quarters persons and persons by sex × broad age at region level;
+   reported, not decided on.
+5. Still open: an arm with prior shares $\pi^0$ from an independent source
+   (truth plus independent error), to test whether using the survey's zone
+   totals as both prior and data narrows the totals' posterior.
