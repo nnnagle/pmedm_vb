@@ -78,6 +78,8 @@ class SurveyDraw:
     blocks: list | None = None          # S: Σ̂_b (C_all × C_all) before the floor
     floor: np.ndarray | None = None     # S: (Z, C_all) floor added on the diagonal
     sampled_units: np.ndarray | None = None
+    full: np.ndarray | None = None      # S-cal: Σ̂ over the fitted cells, stacked, before the floor
+    info: dict | None = None            # S-cal: calibration diagnostics
 
 
 @dataclass
@@ -153,8 +155,8 @@ def with_tables(problem: RegionProblem, columns: np.ndarray, draw: SurveyDraw
     Y = draw.Y[:, columns]
     sigma_v = draw.var[:, columns].T.ravel()               # stacked order
     inputs = problem.inputs
-    # Simulation S has no replicate factor: its covariance is Σ̂ (BlockSigma).
-    sigma_l = inputs.sigma_l if draw.blocks is None else None
+    # Simulations S and S-cal have no replicate factor: their covariance is Σ̂.
+    sigma_l = inputs.sigma_l if draw.blocks is None and draw.full is None else None
     return replace(problem, inputs=replace(inputs, Y_B=Y, sigma_v=sigma_v, sigma_l=sigma_l))
 
 
@@ -276,4 +278,186 @@ def decide(table: pd.DataFrame, primary: str = "S") -> tuple[dict, list[str]]:
                          "or in estimating Sigma, not in the posterior approximation.")
     decision = verdict.get(primary, {}).get("decision", "incomplete")
     lines.append(f"DECISION (section 6, simulation {primary}): {decision}")
+    return {"decision": decision, "per_simulation": verdict}, lines
+
+
+# --------------------------------------------------------------------------
+# Step 4c: simulation S-cal, a post-stratified survey (PLAN_latent_step4c.md §2)
+# --------------------------------------------------------------------------
+#
+# The same Bernoulli sample as S (draw_bernoulli with the same generator), its
+# weights d_i = n_i/π calibrated to region-level controls from the realized
+# population: total households, group-quarters persons, and persons by sex x
+# broad age (0-17, 18-64, 65+). Raking (Deville and Särndal 1992's
+# multiplicative distance, w = d exp(x'λ), solved by Newton for
+# Σ w x = T), with the generalized-regression (GREG) weights
+# w = d (1 + x'λ) as the fallback when raking does not converge. Tables from
+# the calibrated weights. Covariance: the residual (linearization) estimator
+# for calibration estimators (Deville and Särndal 1992, JASA 87:376-382;
+# Särndal, Swensson and Wretman 1992, ch. 6; as implemented in R's
+# sampling::calibev), V = ΣΣ (Δ_kl/π_kl)(w_k e_k)(w_l e_l), which under
+# Bernoulli sampling (Δ_kl = 0 for k ≠ l, Δ_kk/π_kk = 1 - π) is
+# (1 - π) Σ_k (w_k e_k)(w_k e_k)' = (1 - π)/π² Σ_i n_i g_i² e_i e_i', with
+# g_i = w_i/d_i and e_i the residual of unit i's domain contributions (its
+# cells in its own zone, zero elsewhere) after the design-weighted regression
+# on the calibration variables over the region's sample. It covers every
+# zone's cells jointly, so zones' errors are correlated. Cells whose
+# calibrated estimate is zero get S's one-unit floor (1 - π)/π².
+
+SEX_AGE_BANDS = (("male", 0, 18), ("male", 18, 65), ("male", 65, 200),
+                 ("female", 0, 18), ("female", 18, 65), ("female", 65, 200))
+
+
+def _lower_age(category: str) -> int:
+    import re
+
+    if re.search(r"_lt_\d+$", category):
+        return 0
+    found = re.search(r"_(?:ge_)?(\d+)(?:_to_\d+)?$", category)
+    return int(found.group(1))
+
+
+def calibration_variables(data, units: np.ndarray) -> tuple[np.ndarray, list[str]]:
+    """Per region unit: [household, group-quarters persons, persons by sex x
+    broad age] (8 columns)."""
+    ut = [c.name for c in data.tables["unit_type"].categories]
+    U = data.counts["unit_type"][units].toarray()
+    hh = U[:, ut.index("household")]
+    gq = U[:, ut.index("institutional")] + U[:, ut.index("noninstitutional")]
+    cats = [c.name for c in data.tables["age_sex"].categories]
+    A = data.counts["age_sex"][units].toarray()
+    cols, names = [hh, gq], ["households", "gq_persons"]
+    for sex, lo, hi in SEX_AGE_BANDS:
+        pick = [j for j, c in enumerate(cats)
+                if c.startswith(sex + "_") and lo <= _lower_age(c) < hi]
+        cols.append(A[:, pick].sum(axis=1))
+        names.append(f"{sex}_{lo}_{hi if hi < 200 else 'plus'}")
+    return np.column_stack(cols).astype(float), names
+
+
+def rake(d: np.ndarray, X: np.ndarray, T: np.ndarray, *, tol: float = 1e-10,
+         max_iter: int = 100) -> tuple[np.ndarray, dict]:
+    """Calibrated weights ``w`` with ``X'w = T``: raking (``w = d exp(x'λ)``,
+    Newton), else GREG (``w = d (1 + x'λ)``) (notes above)."""
+    lam = np.zeros(X.shape[1])
+    scale = np.maximum(np.abs(T), 1.0)
+    for it in range(1, max_iter + 1):
+        w = d * np.exp(np.clip(X @ lam, -50, 50))
+        gap = X.T @ w - T
+        if np.abs(gap / scale).max() <= tol:
+            return w, {"method": "raking", "iterations": it,
+                       "max_rel_gap": float(np.abs(gap / scale).max())}
+        Hm = (X * w[:, None]).T @ X
+        try:
+            lam = lam - np.linalg.solve(Hm, gap)
+        except np.linalg.LinAlgError:
+            break
+    lam = np.linalg.solve((X * d[:, None]).T @ X, T - X.T @ d)
+    w = d * (1.0 + X @ lam)
+    gap = X.T @ w - T
+    return w, {"method": "greg", "iterations": max_iter,
+               "max_rel_gap": float(np.abs(gap / scale).max())}
+
+
+def draw_calibrated(problem_all: RegionProblem, truth: TruthDraw, rng: np.random.Generator,
+                    Xcal: np.ndarray, n_fitted: int, pi: float = PI) -> SurveyDraw:
+    """Simulation S-cal (notes above). ``Xcal`` the calibration variables of the
+    region's units (``problem_all``'s order); ``n_fitted`` the number of
+    fitted cells (the first columns), whose joint covariance across zones is
+    returned in ``full`` (stacked: cell-major, zone fastest)."""
+    base = draw_bernoulli(problem_all, truth, rng, pi)        # the same sample as S
+    n = base.sampled_units
+    inputs = problem_all.inputs
+    X = inputs.X_B.tocsr()
+    Z, C = inputs.Y_B.shape
+    zone = problem_all.zone_of_unit
+    s = np.flatnonzero(n > 0)
+    d = n[s] / pi
+    Tc = Xcal.T @ truth.counts.astype(float)
+    w, info = rake(d, Xcal[s], Tc)
+    g = w / d
+    Y = np.zeros((Z, C))
+    for b in range(Z):
+        own = zone[s] == b
+        Y[b] = np.asarray(X[s[own]].T @ w[own]).ravel()
+    Xs = Xcal[s]
+    gram = (Xs * d[:, None]).T @ Xs
+    c = (1.0 - pi) / pi ** 2
+    amp = np.sqrt(c * n[s]) * g                              # per sampled record
+    var = np.zeros((Z, C))
+    Xr = X[s]
+    for b in range(Z):
+        own = (zone[s] == b).astype(float)
+        Yb = Xr.multiply(own[:, None]).tocsc()               # domain contributions
+        B = np.linalg.solve(gram, np.asarray(Yb.T @ (Xs * d[:, None])).T)   # (p, C)
+        for lo in range(0, C, 256):
+            hi = min(C, lo + 256)
+            E = Yb[:, lo:hi].toarray() - Xs @ B[:, lo:hi]
+            var[b, lo:hi] = np.square(amp[:, None] * E).sum(axis=0)
+    # the fitted cells' joint covariance across zones
+    Efull = np.zeros((s.size, n_fitted * Z))
+    for b in range(Z):
+        own = (zone[s] == b).astype(float)
+        Yb = Xr[:, :n_fitted].multiply(own[:, None]).toarray()
+        B = np.linalg.solve(gram, (Xs * d[:, None]).T @ Yb)
+        Efull[:, np.arange(n_fitted) * Z + b] = amp[:, None] * (Yb - Xs @ B)
+    full = Efull.T @ Efull
+    floor = np.where(Y == 0, c, 0.0)
+    info = {**info, "controls": Tc.tolist(), "achieved": (Xs.T @ w).tolist(),
+            "sampled_records": int(s.size), "g_min": float(g.min()), "g_max": float(g.max())}
+    return SurveyDraw(Y=Y, var=var + floor, floor=floor, sampled_units=n, full=full, info=info)
+
+
+class FullSigma:
+    """``Σ̂ + ω² I`` in the engine's form for a covariance that couples zones
+    (S-cal): ``Σ̂ = V Λ V'`` (eigenvalues above ``1e-10`` of the largest kept) as
+    the factor ``b``; the floor and ``ω²`` in ``d``."""
+
+    is_tapered = False
+    groups = None
+
+    def __init__(self, full: np.ndarray, floor_stacked: np.ndarray, prior_var: float,
+                 rel_tol: float = 1e-10):
+        self.prior_var = float(prior_var)
+        self.d = np.asarray(floor_stacked, float) + self.prior_var
+        lam, V = np.linalg.eigh(0.5 * (full + full.T))
+        keep = lam > rel_tol * max(float(lam.max()), 1e-300)
+        self.b = V[:, keep] * np.sqrt(lam[keep])
+        self.rank = int(keep.sum())
+
+    def diagonal(self) -> np.ndarray:
+        return self.d + np.square(self.b).sum(axis=1)
+
+    def to_dense(self) -> np.ndarray:
+        return np.diag(self.d) + self.b @ self.b.T
+
+
+#: Step 4c §3 bands: B2 wider; every other class step 4's.
+BANDS_4C = {"B2": {0.9: (0.80, 0.95), 0.5: (0.40, 0.60)}}
+
+
+def decide_bands(table: pd.DataFrame, primary: str = "S", wider: dict = BANDS_4C
+                 ) -> tuple[dict, list[str]]:
+    """Step 4c §3: every class within its band (``wider`` for the classes it
+    names, step 4's otherwise; rare groups included), on ``primary``."""
+    lines, verdict = [], {}
+    for sim in [x for x in table.index.get_level_values(0).unique()]:
+        sub = table.loc[sim]
+        ok = {}
+        for cls, row in sub.iterrows():
+            bands = wider.get(cls, BANDS)
+            ok[cls] = all(bands[lv][0] <= row[f"cover{int(lv * 100)}"] <= bands[lv][1]
+                          for lv in LEVELS)
+        verdict[sim] = {"classes": ok, "calibrated": all(ok.values())}
+        role = "primary" if sim == primary else "reported"
+        lines.append(f"Simulation {sim} ({role}): " + ", ".join(
+            f"{c} {'pass' if v else 'FAIL'}" for c, v in ok.items()))
+    if primary in verdict:
+        fails = [c for c, v in verdict[primary]["classes"].items() if not v]
+        decision = ("calibrated: model version 4 with (tau, c) chosen by B1 is the posterior; "
+                    "go to step 6") if not fails else \
+            f"stop and review (failing on {primary}: {', '.join(fails)})"
+    else:
+        decision = "incomplete"
+    lines.append(f"DECISION (step 4c section 3, simulation {primary}): {decision}")
     return {"decision": decision, "per_simulation": verdict}, lines
