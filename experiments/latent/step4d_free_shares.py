@@ -82,6 +82,56 @@ FS_TAG = 4004
 _SHARED = s4c._SHARED       # step 4c's Replicate reads this dictionary
 
 
+def write_scores(rep, r: np.ndarray, q: np.ndarray, tag: dict, out: Path) -> float:
+    """Step 4c's scores of the realized MAP ``r`` and the prior ``q`` (pairs,
+    ``Z × M``), written under ``out``; returns the MAP's B1 RMS z."""
+    s = _SHARED
+    b1 = float(transfer_misfit(rep.views["B1"], r, "x", "A", "B1")["rms_z"].mean())
+    se_cells = np.sqrt(rep.pA.inputs.sigma_v)
+    parts = {key: [] for key in ("scores", "rare", "misfit", "transfer")}
+    for name, pm in (("latent_kern30", r), ("latent_kern30:p", q)):
+        scored = score_region(s["data"], rep.views["A"], pm, name, se_cells)
+        scored["transfer"] = pd.concat([transfer_misfit(rep.views[key], pm, name, "A", key)
+                                        for key in s4c.SCORED], ignore_index=True)
+        for key in parts:
+            parts[key].append(scored[key].assign(**tag))
+    for key, part in parts.items():
+        write_text(out / f"{key}.csv", pd.concat(part, ignore_index=True).to_csv(index=False))
+    return b1
+
+
+def write_posterior(rep, samples: np.ndarray, tag: dict, out: Path) -> float:
+    """Step 4c's ``posterior.csv.gz`` for posterior ``samples`` ``(S, Z, F)``;
+    returns the B1 predictive log density."""
+    s = _SHARED
+    fun = s["fun"]
+    counts = np.zeros(s["data"].weight.size)
+    counts[rep.joint.units] = rep.true_pop.counts
+    truth = zone_truth(fun, rep.ref["zone"], counts, rep.Z)
+    st = interval_stats(samples, truth)
+    cuts, draw = rep.cuts, rep.draw
+    b1_logdens = predictive_log_density(samples[:, :, fun.of("B1")],
+                                        draw.Y[:, cuts[1]:cuts[2]], draw.var[:, cuts[1]:cuts[2]])
+    frame = pd.DataFrame({
+        "zone": np.repeat(np.array(rep.region.pumas), fun.F),
+        "cls": np.tile(fun.cls, rep.Z), "functional": np.tile(fun.names, rep.Z),
+        "truth": truth.ravel(), **{key: np.asarray(v).ravel() for key, v in st.items()}})
+    fitted = fun.of("fitted")
+    se = np.full((rep.Z, fun.F), np.nan)
+    pub = np.full((rep.Z, fun.F), np.nan)
+    se[:, fitted] = np.sqrt(draw.var[:, :cuts[1]])
+    pub[:, fitted] = draw.Y[:, :cuts[1]]
+    frame["se"], frame["published"] = se.ravel(), pub.ravel()
+    frame["direct_cover90"] = np.where(frame["se"].notna(),
+                                       np.abs(frame["published"] - frame["truth"])
+                                       <= 1.645 * frame["se"], np.nan)
+    frame["width90_over_se"] = frame["width90"] / (2 * frame["se"])
+    frame["width90_over_truth"] = np.where(frame["truth"] > 0,
+                                           frame["width90"] / frame["truth"], np.nan)
+    frame.assign(**tag).to_csv(out / "posterior.csv.gz", index=False)
+    return b1_logdens
+
+
 def fit_unit(unit: tuple) -> str:
     region_id, c, m, k = unit
     s, args = _SHARED, _SHARED["args"]
@@ -111,17 +161,7 @@ def fit_unit(unit: tuple) -> str:
     tag = {"simulation": ARM, "region": region_id, "replicate": k, "c": c, "phase": "final",
            "tau_multiple": m, "tau": tau, "kappa": kappa, "phi": phi,
            "share_prior": args.share_prior}
-    b1 = float(transfer_misfit(rep.views["B1"], res.r, "x", "A", "B1")["rms_z"].mean())
-    se_cells = np.sqrt(rep.pA.inputs.sigma_v)
-    parts = {key: [] for key in ("scores", "rare", "misfit", "transfer")}
-    for name, pm in (("latent_kern30", res.r), ("latent_kern30:p", q)):
-        scored = score_region(s["data"], rep.views["A"], pm, name, se_cells)
-        scored["transfer"] = pd.concat([transfer_misfit(rep.views[key], pm, name, "A", key)
-                                        for key in s4c.SCORED], ignore_index=True)
-        for key in parts:
-            parts[key].append(scored[key].assign(**tag))
-    for key, part in parts.items():
-        write_text(out / f"{key}.csv", pd.concat(part, ignore_index=True).to_csv(index=False))
+    b1 = write_scores(rep, res.r, q, tag, out)
     values = [f.objective for f in starts]
     write_text(out / "starts.csv", pd.DataFrame(
         [{**tag, **f.info(), "selected": f is fit} for f in starts]).to_csv(index=False))
@@ -134,30 +174,7 @@ def fit_unit(unit: tuple) -> str:
                                       int(round(m * 1000)), int(round(kappa)), FS_TAG])
     sample = free_share_posterior_samples(engine, rep.theta0, fit, fun, s["X"]["A"],
                                           args.draws, post_rng)
-    counts = np.zeros(s["data"].weight.size)
-    counts[rep.joint.units] = rep.true_pop.counts
-    truth = zone_truth(fun, rep.ref["zone"], counts, rep.Z)
-    st = interval_stats(sample.samples, truth)
-    cuts, draw = rep.cuts, rep.draw
-    b1_logdens = predictive_log_density(sample.samples[:, :, fun.of("B1")],
-                                        draw.Y[:, cuts[1]:cuts[2]], draw.var[:, cuts[1]:cuts[2]])
-    frame = pd.DataFrame({
-        "zone": np.repeat(np.array(rep.region.pumas), fun.F),
-        "cls": np.tile(fun.cls, rep.Z), "functional": np.tile(fun.names, rep.Z),
-        "truth": truth.ravel(), **{key: np.asarray(v).ravel() for key, v in st.items()}})
-    fitted = fun.of("fitted")
-    se = np.full((rep.Z, fun.F), np.nan)
-    pub = np.full((rep.Z, fun.F), np.nan)
-    se[:, fitted] = np.sqrt(draw.var[:, :cuts[1]])
-    pub[:, fitted] = draw.Y[:, :cuts[1]]
-    frame["se"], frame["published"] = se.ravel(), pub.ravel()
-    frame["direct_cover90"] = np.where(frame["se"].notna(),
-                                       np.abs(frame["published"] - frame["truth"])
-                                       <= 1.645 * frame["se"], np.nan)
-    frame["width90_over_se"] = frame["width90"] / (2 * frame["se"])
-    frame["width90_over_truth"] = np.where(frame["truth"] > 0,
-                                           frame["width90"] / frame["truth"], np.nan)
-    frame.assign(**tag).to_csv(out / "posterior.csv.gz", index=False)
+    b1_logdens = write_posterior(rep, sample.samples, tag, out)
 
     N_true = rep.true_pop.N.astype(float)
     N_map, N_survey = rep.N_A * fit.shares, rep.N_A * rep.shares
@@ -194,8 +211,8 @@ def fit_unit(unit: tuple) -> str:
     return f"{region_id} r{k}"
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+def common_arguments(parser: argparse.ArgumentParser) -> None:
+    """The arguments step 4d shares with later arms on S's data (step 4e)."""
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--regions", required=True, type=Path)
     parser.add_argument("--run", required=True, type=Path, help="stage 1 run directory (z)")
@@ -209,7 +226,6 @@ def main() -> None:
     parser.add_argument("--region", nargs="+", default=None)
     parser.add_argument("--replicates", type=int, default=10)
     parser.add_argument("--draws", type=int, default=200)
-    parser.add_argument("--share-prior", type=float, default=SHARE_PRIOR)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--basis", default="kern30", choices=list(DEVIATION_BASES))
     parser.add_argument("--sigma-alpha", type=float, default=0.01)
@@ -218,19 +234,20 @@ def main() -> None:
     parser.add_argument("--map-max-iter", type=int, default=20000)
     parser.add_argument("--cond-tol", type=float, default=1e-10)
     parser.add_argument("--cond-max-iter", type=int, default=200)
-    parser.add_argument("--unit-tol", type=float, default=0.01,
-                        help="realized MAP: stop when no zone total moves by more (units)")
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--threads", type=int, default=1)
-    args = parser.parse_args()
+
+
+def setup(args, settings: dict) -> tuple[dict, list, dict]:
+    """Step 4c's setup, unchanged, so that its ``Replicate`` builds S's data;
+    fills ``_SHARED`` and writes ``settings.json`` (``settings`` added).
+    Returns the regions, the chosen region ids and step 4c's choice."""
     os.environ.setdefault(OFFLINE_ENV, "1")
     args.out.mkdir(parents=True, exist_ok=True)
     s4 = json.loads((args.step4 / "settings.json").read_text())
     args.seed = int(s4["seed"]) if args.seed is None else args.seed
     record_run(args.out, args)
     choice = json.loads((args.step4c / "choice.json").read_text())
-
-    # The setup of step4c_joint.main, unchanged, so that Replicate builds S's data.
     config = load_config(args.config)
     regions = {r.id: r for r in load_regions(args.regions)}
     chosen = args.region or list(regions)
@@ -266,20 +283,37 @@ def main() -> None:
                         step1.gamma)
         refs[rid] = {"theta": theta, "logb": logb, "zone": zone_of_atoms(region, data.puma)}
     write_text(args.out / "settings.json", json.dumps({
-        "arm": ARM, "mode": s4c.MODE, "basis": basis_info, "tau_ref_g": tau_ref_g,
-        "draws": args.draws, "replicates": args.replicates, "share_prior": args.share_prior,
-        "seed": args.seed, "fs_tag": FS_TAG, "step4c": str(args.step4c),
+        **settings, "mode": s4c.MODE, "basis": basis_info, "tau_ref_g": tau_ref_g,
+        "draws": args.draws, "replicates": args.replicates, "seed": args.seed,
+        "step4c": str(args.step4c),
         "pairs": {r: [choice[f"S/{r}"]["c"], choice[f"S/{r}"]["tau_multiple"]] for r in chosen},
-        "split": {key: list(v) for key, v in sets.items()}, "unit_tol": args.unit_tol,
-        "map_starts": ["survey_gn", "equal_gn"]}, indent=1, default=str))
+        "split": {key: list(v) for key, v in sets.items()}}, indent=1, default=str))
     _SHARED.update(data=data, args=args, regions=regions, refs=refs, H=H, G=G, sets=sets, X=X,
                    pairs=pairs, fun=fun, frame=frame, tau_ref_g=tau_ref_g)
+    return regions, chosen, choice
 
+
+def units_at_s_pairs(regions: dict, chosen: list, choice: dict, replicates: int) -> list:
+    """``(region, c, τ multiple, replicate)`` at S's chosen pairs. Largest
+    regions first, but every region's replicates interleaved, so a partial
+    run covers all regions rather than only the largest."""
     units = [(r, choice[f"S/{r}"]["c"], choice[f"S/{r}"]["tau_multiple"], k)
-             for r in chosen for k in range(args.replicates)]
-    # Largest regions first, but every region's replicates interleaved, so a
-    # partial run covers all regions rather than only the largest.
+             for r in chosen for k in range(replicates)]
     units.sort(key=lambda u: (u[3], -len(regions[u[0]].pumas), u[0]))
+    return units
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    common_arguments(parser)
+    parser.add_argument("--share-prior", type=float, default=SHARE_PRIOR)
+    parser.add_argument("--unit-tol", type=float, default=0.01,
+                        help="realized MAP: stop when no zone total moves by more (units)")
+    args = parser.parse_args()
+    regions, chosen, choice = setup(args, {
+        "arm": ARM, "share_prior": args.share_prior, "fs_tag": FS_TAG,
+        "unit_tol": args.unit_tol, "map_starts": ["survey_gn", "equal_gn"]})
+    units = units_at_s_pairs(regions, chosen, choice, args.replicates)
     logger.info("FS: %d units at S's chosen pairs", len(units))
     s4c.run_units(fit_unit, units, args)
 

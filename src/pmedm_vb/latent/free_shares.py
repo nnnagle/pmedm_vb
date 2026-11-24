@@ -471,8 +471,12 @@ def free_share_conditional_moments(engine: FreeShareLikelihood, ev: FreeShareEva
         kg = k1 - np.outer(ev.mu[:, b], Eg)
         Gbb = engine.zone_inverse(ev, b)
         mean[b] = ev.n[b] * Eg + ev.c[b] * (kg.T @ R[:, b])
-        vb = ev.c[b] * (E2 - Eg ** 2) - ev.c[b] ** 2 * np.einsum("ij,ij->j", kg, Gbb @ kg)
-        negative += int((vb < 0).sum())
+        spread = E2 - Eg ** 2
+        vb = ev.c[b] * spread - ev.c[b] ** 2 * np.einsum("ij,ij->j", kg, Gbb @ kg)
+        # functionals constant on the zone's support (the total) have variance 0
+        # exactly; rounding makes it slightly negative, which is not counted
+        constant = spread <= 1e-12 * np.maximum(E2, 1.0)
+        negative += int(((vb < 0) & ~constant).sum())
         var[b] = np.maximum(vb, 0.0)
     return mean, var, negative
 
@@ -590,8 +594,211 @@ def solve_free_share_map(T: sp.spmatrix, p: np.ndarray, start_shares: np.ndarray
                               seconds=time.perf_counter() - t0)
 
 
+
+# --------------------------------------------------------------------------
+# The cut form (MODEL_latent_v5_draft.md §7; step 4e)
+# --------------------------------------------------------------------------
+
+
+def cut_totals(x: np.ndarray, Sx: np.ndarray, N_A: float) -> tuple[np.ndarray, np.ndarray]:
+    """The totals module: ``N | x`` for direct totals ``x ~ N(N, Sx)``, flat
+    shares and ``Σ N = N_A`` known (Gaussian conditioning on the constraint)."""
+    x, Sx = np.asarray(x, float), np.asarray(Sx, float)
+    one = np.ones(x.size)
+    Sone = Sx @ one
+    V = float(one @ Sone)
+    mean = x + Sone * (N_A - float(one @ x)) / V
+    cov = Sx - np.outer(Sone, Sone) / V
+    return mean, 0.5 * (cov + cov.T)
+
+
+def draw_cut_totals(mean: np.ndarray, cov: np.ndarray, n: int, rng: np.random.Generator
+                    ) -> np.ndarray:
+    """``(n, Z)`` draws of the totals module (``cov`` has rank ``Z - 1``: the
+    draws sum to ``N_A`` exactly)."""
+    lam, V = np.linalg.eigh(cov)
+    root = V * np.sqrt(np.clip(lam, 0.0, None))[None, :]
+    return mean[None, :] + rng.standard_normal((n, mean.size)) @ root.T
+
+
+class CutObjective:
+    """``F(U) = -L(U, ψ̄) + ‖U‖²/(2τ²)`` with the shares fixed at the totals
+    module's mean (the cut form's ``U`` given the totals)."""
+
+    def __init__(self, engine: FreeShareLikelihood, theta: np.ndarray, tau: float,
+                 psi: np.ndarray):
+        self.engine, self.theta, self.tau = engine, np.asarray(theta, float), float(tau)
+        self.psi = np.asarray(psi, float)
+        self.shape = (engine.Z * engine.K,)
+        self.evaluations = 0
+
+    def value_grad(self, x: np.ndarray) -> tuple[float, np.ndarray]:
+        U = np.asarray(x, float).reshape(self.engine.Z, self.engine.K)
+        ev = self.engine.evaluate(self.theta, U, self.psi)
+        self.evaluations += 1
+        prec = 1.0 / self.tau ** 2
+        return -ev.loglik + 0.5 * prec * float(np.sum(U * U)), (-ev.grad_U + prec * U).ravel()
+
+    def gn_hessian(self, x: np.ndarray) -> np.ndarray:
+        U = np.asarray(x, float).reshape(self.engine.Z, self.engine.K)
+        ev = self.engine.evaluate(self.theta, U, self.psi, gradient=False)
+        self.evaluations += 1
+        return cut_information(self.engine, ev, self.tau)
+
+
+def cut_information(engine: FreeShareLikelihood, ev: FreeShareEvaluation, tau: float
+                    ) -> np.ndarray:
+    """``J_U'S⁻¹J_U + τ⁻² I``: the Gauss–Newton information of ``U`` alone."""
+    J = engine.jacobian(ev)[:, :engine.Z * engine.K]
+    info = J.T @ engine.s_solve(ev, J)
+    info = 0.5 * (info + info.T)
+    info[np.diag_indices_from(info)] += 1.0 / tau ** 2
+    return info
+
+
+def fit_cut_U(engine: FreeShareLikelihood, theta: np.ndarray, tau: float, psi: np.ndarray, *,
+              gtol: float = 1e-4, ftol: float = 1e-14, max_iter: int = 20000
+              ) -> tuple[FreeShareFit, list]:
+    """The MAP of ``U`` given the shares: the lower objective of two starts at
+    ``U = 0`` (``gn`` and ``m10``)."""
+    fits = []
+    Z, K = engine.Z, engine.K
+    for optimizer in ("gn", "m10"):
+        t0 = time.perf_counter()
+        obj = CutObjective(engine, theta, tau, psi)
+        times: list[float] = []
+        x0 = np.zeros(Z * K)
+        if optimizer == "gn":
+            x, nit, ok, msg = _gn_lbfgs(obj, x0, gtol, ftol, max_iter, times)
+        else:
+            x, nit, ok, msg = _lbfgs(obj, x0, 10, gtol, ftol, max_iter, times)
+        value, grad = obj.value_grad(x)
+        U = x.reshape(Z, K)
+        ev = engine.evaluate(theta, U, psi, gradient=False)
+        fits.append(FreeShareFit(
+            tau=float(tau), x=x, U=U, psi=np.asarray(psi, float), shares=ev.shares,
+            objective=float(value), loglik=float(ev.loglik), grad_max=float(np.abs(grad).max()),
+            grad_max_U=float(np.abs(grad).max()), grad_max_psi=0.0, iterations=nit,
+            evaluations=obj.evaluations, converged=ok, message=msg,
+            seconds=time.perf_counter() - t0, start=f"zero_{optimizer}", optimizer=optimizer))
+    return min(fits, key=lambda f: f.objective), fits
+
+
+def cut_posterior_samples(engine: FreeShareLikelihood, theta: np.ndarray, fit: FreeShareFit,
+                          totals_mean: np.ndarray, totals_cov: np.ndarray, fun: Functionals,
+                          T0: sp.spmatrix, n_draws: int, rng: np.random.Generator
+                          ) -> FreeSharePosterior:
+    """The cut posterior's draws (``MODEL_latent_v5_draft.md`` §7): totals
+    from the module, ``U`` from its Laplace approximation given the module's
+    mean, each zone's functionals conditioned on ``Y`` given its total."""
+    start = time.perf_counter()
+    ev0 = engine.evaluate(theta, fit.U, fit.psi, gradient=False)
+    R = cholesky(cut_information(engine, ev0, fit.tau), lower=False)
+    xi = rng.standard_normal((fit.U.size, n_draws))
+    Us = (fit.U.ravel()[:, None] + solve_triangular(R, xi, lower=False)).T
+    totals = draw_cut_totals(totals_mean, totals_cov, n_draws, rng)
+    floor = 1e-6 * engine.N_A
+    GG = fun.G.multiply(fun.G).tocsc()
+    out = np.empty((n_draws, engine.Z, fun.F), dtype=np.float32)
+    shares = np.empty((n_draws, engine.Z))
+    negative = 0
+    for k in range(n_draws):
+        N = np.maximum(totals[k], floor)
+        psi = shares_to_psi(N / N.sum())
+        ev = engine.evaluate(theta, Us[k].reshape(engine.Z, engine.K), psi, gradient=False)
+        mean, var, neg = free_share_conditional_moments(engine, ev, fun, T0, GG)
+        negative += neg
+        shares[k] = ev.shares
+        out[k] = mean + np.sqrt(var) * rng.standard_normal(mean.shape)
+    seconds = time.perf_counter() - start
+    return FreeSharePosterior(out, shares, negative, seconds, seconds / max(n_draws, 1))
+
+
+def solve_conditional_fixed_shares(T: sp.spmatrix, p: np.ndarray, shares: np.ndarray,
+                                   N_A: float, W: float, Y: np.ndarray, Sigma: np.ndarray, *,
+                                   tol: float = 1e-10, max_iter: int = 200,
+                                   init: np.ndarray | None = None):
+    """The conditional PMEDM with the zone totals fixed at ``N_A shares``
+    (``MODEL_latent_v5_draft.md`` §7; derived here):
+    ``min_r W Σ_b KL(r_b· ‖ s_b p_b) + ½ e'Σ⁻¹e`` with ``Σ_i r_bi = s_b``. Dual
+    ``f(λ) = λ'Y + W Σ_b s_b log Σ_i p_bi exp{-(N_A/W) t_i'λ_b} + ½ λ'Σλ``,
+    minimized by Newton on the dense Hessian
+    ``Σ + (N_A²/W) blockdiag_b(T'diag(r_b)T - u_b u_b'/s_b)``, ``u_b = T'r_b``.
+    Returns :class:`~pmedm_vb.latent.overdispersed.PairConditionalResult`
+    (``r`` over pairs, ``Z × M``)."""
+    from pmedm_vb.latent.overdispersed import PairConditionalResult
+
+    start = time.perf_counter()
+    T = sp.csr_matrix(T, dtype=float)
+    Tt = T.T.tocsr()
+    M, Z = np.asarray(p).shape
+    C = T.shape[1]
+    s = np.asarray(shares, float)
+    s = s / s.sum()
+    with np.errstate(divide="ignore"):
+        logp = np.log(np.asarray(p, float))                       # (M, Z)
+    ratio = N_A / W
+    Sigma = np.asarray(Sigma, float)
+    Y = np.asarray(Y, float)
+
+    def state(lam):
+        L = lam.reshape(C, Z)
+        e = -ratio * (T @ L)                                      # (M, Z)
+        logits = logp + e
+        logZ = logsumexp(logits, axis=0)                          # (Z,)
+        r = s[None, :] * np.exp(logits - logZ[None, :])           # (M, Z)
+        u = Tt @ r                                                # (C, Z)
+        fitted = N_A * u.ravel()
+        sl = Sigma @ lam
+        return {"lam": lam, "r": r, "e": e, "logZ": logZ, "u": u, "fitted": fitted, "sl": sl,
+                "value": float(lam @ Y + W * float(s @ logZ) + 0.5 * lam @ sl),
+                "grad": Y - fitted + sl}
+
+    def hessian(st):
+        H = Sigma.copy()
+        for b in range(Z):
+            rows = np.arange(C) * Z + b
+            rb, ub = st["r"][:, b], st["u"][:, b]
+            H[np.ix_(rows, rows)] += (N_A ** 2 / W) * (
+                (Tt @ T.multiply(rb[:, None])).toarray() - np.outer(ub, ub) / s[b])
+        return H
+
+    lam = np.zeros(C * Z) if init is None else np.asarray(init, float).ravel()
+    st = state(lam)
+    converged, decrement, it = False, np.inf, 0
+    for it in range(max_iter + 1):
+        direction = -cho_solve(cho_factor(hessian(st), lower=True), st["grad"])
+        slope = float(st["grad"] @ direction)
+        decrement = -0.5 * slope
+        if decrement <= tol:
+            converged = True
+            break
+        if it == max_iter:
+            break
+        step = 1.0
+        for _ in range(50):
+            cand = state(st["lam"] + step * direction)
+            if cand["value"] <= st["value"] + 0.25 * step * slope:
+                break
+            step *= 0.5
+        else:
+            break
+        st = cand
+    r, e = st["r"], st["e"]
+    kl = float(np.sum(np.where(r > 0, r * e, 0.0))) - float(s @ st["logZ"])
+    err = st["fitted"] - Y
+    primal = W * kl + 0.5 * float(err @ cho_solve(cho_factor(Sigma, lower=True), err))
+    kkt = float(np.abs(err - st["sl"]).max())
+    return PairConditionalResult(
+        lam=st["lam"].reshape(C, Z), r=r.T.copy(), fitted=st["fitted"], objective=st["value"],
+        primal=primal, gap=primal + st["value"], kkt_max=kkt,
+        kkt_relative=kkt / max(float(np.abs(err).max()), 1e-300), decrement=decrement,
+        iterations=it, converged=converged, seconds=time.perf_counter() - start)
+
 __all__ = ["FreeShareLikelihood", "FreeShareObjective", "FreeShareFit", "SHARE_PRIOR",
            "covariance_weights", "fit_free_shares", "free_share_conditional_moments",
            "free_share_engine", "free_share_evidence", "free_share_hessian",
            "free_share_posterior_samples", "free_share_starts", "shares_to_psi",
-           "softmax_shares", "solve_free_share_map"]
+           "softmax_shares", "solve_free_share_map", "CutObjective", "cut_information",
+           "cut_posterior_samples", "cut_totals", "draw_cut_totals", "fit_cut_U",
+           "solve_conditional_fixed_shares"]

@@ -9,6 +9,11 @@
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature. All of them need checking before the model is fixed.
+>
+> | draft | date | change |
+> |---|---|---|
+> | 1 | 2026-11-24 | free shares (§1–§6), tested in step 4d |
+> | 2 | 2026-11-24 | §7, the cut form, after step 4d: totals from the unit-type cells and $N_P$ alone, composition given the totals; to be tested in step 4e |
 
 ## 1. Why
 
@@ -230,3 +235,65 @@ A regional-run arm "free shares" beside S and P0 at S's chosen $(\tau, c)$,
 judged with step 4c's bands. Expected: zone totals' coverage near the
 direct estimates' (about 0.90), other classes as in step 4c. To be written
 as a step plan once this draft is approved.
+
+## 7. The cut form (draft 2, after step 4d)
+
+**What step 4d found** (`STEP4_latent.qmd`). Free shares removed the double
+use and kept every composition class calibrated, but zone totals stayed
+short (0.843 at 90%). Their intervals had the right width; their centre
+carried a pull from the model that is 91% fixed by zone across replicates.
+With the shares free, every table informs a block's total, and a block's
+composition departs from the model in a fixed way. A totals module using
+only the unit-type cells and $N_P$ was calibrated (0.888, 0.485).
+
+**Definition.** Two modules, with the feedback from the second to the
+first cut:
+
+1. **Totals.** $x_b$, the block's direct unit total (the sum of its
+   unit-type cells: households and group-quarters persons), and its survey
+   covariance $\Sigma_x = A_u \Sigma_{\mathrm{survey}} A_u'$ ($A_u$ sums each
+   block's unit-type cells; no model-gap term, since no model enters). With
+   $x \sim \mathcal N(N, \Sigma_x)$, a flat prior on the shares and
+   $\sum_b N_b = N_P$ known:
+   $$
+   N \mid x \sim \mathcal N\Big(x + \Sigma_x \mathbf 1\,\frac{N_P - \mathbf 1'x}{\mathbf 1'\Sigma_x\mathbf 1},\;
+   \Sigma_x - \frac{\Sigma_x \mathbf 1\mathbf 1'\Sigma_x}{\mathbf 1'\Sigma_x\mathbf 1}\Big)
+   $$
+   (standard Gaussian conditioning on a linear constraint). With blocks
+   sampled independently (simulation S) $\Sigma_x$ is diagonal; in the real
+   application the replicate covariance couples blocks and the full
+   $\Sigma_x$ is used.
+2. **Composition given the totals:** version 5's composition level (§2)
+   with $N_b$ fixed, and the table likelihood over all tables, unit-type
+   cells included (they still inform, for example, the split between
+   households and group quarters within a block).
+
+The **cut posterior** is $p(N \mid x)\, p(U, C \mid N, Y)$: the composition
+module does not update the totals. It is not the joint posterior of one
+model; it is the standard remedy when one module is misspecified and should
+not contaminate another (cut distributions in Bayesian graphical models,
+Plummer 2015, as recalled; to verify). Here the misspecified module is the
+composition, and the diagnostics show it contaminating the totals.
+
+**Inference** (derived here):
+
+* totals: draws from the Gaussian above;
+* $U$: MAP and Laplace with the totals fixed at the module's mean (Û's
+  dependence on $N$ within the totals' uncertainty, about 1%, is ignored);
+* stage 2: for each draw, totals from the module, $U$ from its Laplace
+  approximation, and each block's composition conditioned on $Y$ given its
+  total, as in §3;
+* realized MAP: the conditional PMEDM with the block totals fixed at the
+  module's mean. Its dual has one normalizer per block,
+  $f(\lambda) = \lambda'Y + W\sum_b s_b \log\sum_i p_{bi}\,
+  e^{-(N_P/W)\,t_i'\lambda_b} + \tfrac12\lambda'\Sigma\lambda$, and a Hessian
+  block-diagonal by block apart from $\Sigma$.
+
+**Open for the real application.** In the table set, group quarters are
+published at tract level only (`B26001`), so block-group unit totals are not
+directly available: households are, group-quarters persons are not. A
+block-group totals module needs either a two-level form (tract
+group-quarters totals, split among the tract's block groups by the
+composition module, a partial cut) or another source for block-group
+group quarters.
+

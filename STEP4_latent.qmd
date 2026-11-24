@@ -1,13 +1,14 @@
 ---
-title: "Latent-population PMEDM, steps 4, 4b and 4c: calibration of the posterior"
+title: "Latent-population PMEDM, steps 4 to 4d: calibration of the posterior"
 subtitle: "Design, results and decisions"
 date: 2026-11-24
 ---
 
 Step 4 (`PLAN_latent_step4.md`, version 2), step 4b
-(`PLAN_latent_step4b.md`, version 2) and step 4c (`PLAN_latent_step4c.md`,
-version 2). Model: `MODEL_latent.qmd` version 3 for step 4, version 4 for
-steps 4b and 4c.
+(`PLAN_latent_step4b.md`, version 2), step 4c (`PLAN_latent_step4c.md`,
+version 2) and step 4d (`PLAN_latent_step4d.md`, version 1). Model:
+`MODEL_latent.qmd` version 3 for step 4, version 4 for steps 4b and 4c, the
+draft version 5 (`MODEL_latent_v5_draft.md`) for step 4d.
 
 ## The test
 
@@ -274,6 +275,85 @@ PUMA is made of whole counties.
 As step 4b's K2 (0.410, 0.057, 0.597). The prior shares barely touch the
 composition within zones, which these measures score.
 
+## Step 4d: free zone shares (draft model version 5)
+
+### What changed
+
+One arm, FS, on simulation S's data exactly as step 4c built them (the same
+replicates, seeds, truths, $Y$ and $\hat\Sigma$), at the $(\tau, c)$ step 4c
+chose for S in each region. Only the realized level changes: $\pi^0$ leaves
+the model, and the zone shares are parameters with a weak
+$\mathrm{Dirichlet}(\tfrac12)$ prior, so that the tables alone determine
+the totals (`MODEL_latent_v5_draft.md`, `src/pmedm_vb/latent/free_shares.py`).
+The shares join $U$ in the MAP and the Laplace approximation; given the
+shares, each zone's composition is conditioned as before, and a zone's total
+is then exactly $N_A s_b$, so all its uncertainty comes from the shares.
+
+**Checks of the code** (a toy problem; `PLAN_latent_step4d.md` §2): gradient
+against finite differences, log-likelihood and conditional moments against
+dense computations, Jacobian and Gauss–Newton information against numerical
+ones, all to $10^{-8}$ or better.
+
+### Calibration
+
+| class (cover 90%, 50%) | FS | S | P0 |
+|---|---|---|---|
+| fitted | **0.873**, 0.485 | **0.870**, 0.480 | **0.875**, 0.486 |
+| B1 | **0.893**, 0.576 | **0.890**, 0.574 | **0.893**, 0.577 |
+| B2 | **0.826**, 0.462 | **0.823**, 0.460 | **0.827**, 0.462 |
+| joint | **0.906**, 0.560 | **0.903**, 0.558 | **0.907**, 0.561 |
+| rare | **0.882**, 0.564 | **0.880**, 0.560 | **0.883**, 0.563 |
+| zone totals | 0.843, 0.459 | 0.824, 0.429 | **0.862**, 0.474 |
+
+Bold: within the bands at both levels. Freeing the shares leaves every
+composition class and the point accuracy (LOR error 0.4125, TVD 0.0571)
+unchanged, and moves the zone totals part of the way: RMS $z$ 1.22 to 1.16,
+median 90% width 5% wider. The fits are clean: all 130 MAPs converged, the
+two starts agree to $10^{-7}$, the realized MAP needs a median of 4 solver
+calls. (The 58,115 "negative conditional variances" are the zone totals
+themselves: given the shares their conditional variance is exactly zero,
+and rounding makes it slightly negative half the time.)
+
+### Where the totals' miss comes from
+
+Diagnostics from the existing outputs
+(`experiments/latent/diagnose_step4d_totals.py`), with RMS relative errors
+over all 580 zone-replicates:
+
+| zone totals | cover 90% | cover 50% | RMS $z$ | RMS error | mean sd or SE |
+|---|---|---|---|---|---|
+| direct (Horvitz–Thompson) | **0.902** | **0.485** | 1.05 | 1.25% | 1.18% |
+| direct, conditioned on $N_A$ | **0.888** | **0.485** | 1.08 | 1.13% | 1.04% |
+| FS | 0.843 | 0.459 | 1.16 | 1.20% | 1.03% |
+| S | 0.824 | 0.429 | 1.22 | 1.20% | 0.98% |
+| P0 | **0.862** | **0.474** | 1.10 | 1.09% | 0.99% |
+
+* **The survey's own totals are calibrated,** with their SEs from the
+  unit-type cells (each unit is in one unit type, so their covariances are
+  zero under S's design).
+* **Conditioning the direct totals on the known $N_A$** (Gaussian, zones
+  independent: mean $x_b + v_b(N_A - X)/V$, variance $v_b - v_b^2/V$; a
+  proportional rescaling with a delta-method variance gives the same to
+  three decimals) is still calibrated and 10% more accurate. This is a
+  totals module using only the unit-type cells and $N_A$.
+* **FS's intervals are as wide as that module's** (1.03% against 1.04%), but
+  its centre is less accurate (1.20% against 1.13%).
+* **The difference is a zone-specific pull from the model.** Writing FS's
+  posterior mean as the conditioned direct total plus a model part, the
+  model part has an RMS of 0.29%, is nearly uncorrelated with the direct
+  error (0.10), and is 91% between zones: each replicate redraws the truth
+  and the sample, yet a zone's model part keeps almost the same value. The
+  direct error is 11% between zones, as chance would give.
+
+Reading (derived here, consistent with the diagnostics but not proven):
+with the shares free, every table informs a zone's total, not only the
+unit-type cells. A person table measures units times mean household size
+under the model's composition; under leave-zone-out a zone's composition
+departs from the model in a fixed way, and where that departure exceeds the
+composition variance the model allows, part of it is assigned to the total.
+Removing the double use fixed the width; the remaining miss is the model's
+composition leaking into the totals.
+
 ## Decisions
 
 * **Step 4 (§6):** not calibrated; stop and review (→ step 4b).
@@ -283,8 +363,12 @@ composition within zones, which these measures score.
 * **Step 4c (§3):** not calibrated on S; stop and review, failing only on
   zone totals (0.824). S-cal and P0 do not enter the decision; P0 identifies
   the cause.
+* **Step 4d (§3):** not calibrated; stop and review, failing only on zone
+  totals (0.843). The review (above) finds the cause and a lead: a totals
+  module from the unit-type cells and $N_A$ alone is calibrated (0.888,
+  0.485). Next: step 4e, the cut form of model version 5.
 
-### For the review
+### For the review (after step 4c; option 2 was taken in step 4d)
 
 The cause of the remaining failure is identified: the survey's zone totals
 are used both in the prior shares and in $Y$. Options (none decided):
@@ -316,6 +400,7 @@ cells and rare groups.
 * Compute: step 4 about 119 CPU-hours; step 4b about 249 (one resubmission
   after the 24-hour limit); step 4c about 179, with 336 units reused from
   step 4b (S, G, S-cal and P0 as separate jobs).
+* Step 4d about 39 CPU-hours (130 units, median 1,000 s).
 * A collection taken while S-cal and P0 were half done showed S-cal's zone
   totals at 0.865. The arms run the largest regions first, so a partial arm
   is not comparable with a complete one; only complete arms are reported
@@ -324,10 +409,13 @@ cells and rare groups.
 ## Record
 
 * **Code:** `dded086`, `abc99b4` (step 4); `6101bd6`, `c215319` (step 4b);
-  `a758f25` (step 4c); `f87fafa` (the zero-MOE check).
+  `a758f25` (step 4c); `f87fafa` (the zero-MOE check); `3e7285b` (step 4d),
+  `ca11eb6`, `bbc1cbc`, `f46754f` (its totals diagnostics).
 * **Runs** (under `/lustre/isaac24/proj/UTK0533/pmedm_vb_runs/latent/`):
   `step4` (the $\kappa = \infty$ arm), `step4b` (K1, K2), `step4c` (S, G,
-  `Scal`, `P0`).
+  `Scal`, `P0`), `step4d` (FS; diagnostics in `step4d/diagnostics`).
 * **Handed on:** model version 4 with $\kappa \approx n_A/4$, calibrated on
-  S in every class but zone totals; the cause of that failure (the survey's
-  zone totals used twice) and the options above; $\tau$ weakly identified.
+  S in every class but zone totals. Free shares (step 4d) remove the survey
+  totals' double use and keep the composition classes, but the model's
+  composition pulls the totals; a totals module from the unit-type cells
+  and $N_A$ alone is calibrated. $\tau$ weakly identified.

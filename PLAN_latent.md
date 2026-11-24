@@ -12,6 +12,7 @@
 > | 3 | 2026-11-22 | step 4b added (`PLAN_latent_step4b.md`): the Dirichlet-multinomial realized level of model version 4, with the PUMA total known and block totals random; run if step 4 finds the posterior over-confident |
 > | 4 | 2026-11-23 | step 4b found K2 ($\kappa \approx n_A/4$) close to calibrated, with $\tau$ at its grid's edge; step 4c added (`PLAN_latent_step4c.md`): $(\tau, \kappa)$ chosen jointly, a wider band for never-used tables, and an optional post-stratified simulation |
 > | 5 | 2026-11-24 | step 4c failed only on zone totals, traced (arm P0) to the survey's totals used both in the prior shares and in $Y$; step 4d added (`PLAN_latent_step4d.md`, draft): the free-shares realized level of the draft model version 5 (`MODEL_latent_v5_draft.md`), one arm on simulation S |
+> | 6 | 2026-11-24 | step 4d (free shares) failed only on zone totals; its review found the model's composition pulling the totals and a totals module from the unit-type cells and $N_A$ alone calibrated; step 4e added (`PLAN_latent_step4e.md`, draft): the cut form of the draft model version 5 (`MODEL_latent_v5_draft.md` §7) |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -79,6 +80,7 @@ stop the work before the expensive pieces are built.
 | 4b | C2, D2 coverage under model version 4 | whether the overdispersed realized level is calibrated, and $\kappa$ | yes, as step 4 |
 | 4c | as 4b, with $(\tau, \kappa)$ chosen jointly | whether the posterior is calibrated with both chosen together | yes, as step 4 |
 | 4d | C2, D2 coverage under the draft model version 5 | whether free zone shares (the survey's totals used once) calibrate the zone totals without harming the other classes | yes, as step 4 |
+| 4e | as 4d, the cut form | whether totals from the unit-type cells and $N_A$ alone, with the composition fitted given them, calibrate every class | yes, as step 4 |
 | 5 | C3, C4 | only if step 4 fails for rare groups | yes |
 | 6 | D3 | the real application | yes |
 

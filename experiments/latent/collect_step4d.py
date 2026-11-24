@@ -34,17 +34,10 @@ from pmedm_vb.latent.calibration import decide_bands, pit_histogram, summarize
 from pmedm_vb.progress import write_text
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--root", required=True, type=Path, help="step 4d output root")
-    parser.add_argument("--step4c", required=True, type=Path, help="step 4c output root")
-    args = parser.parse_args()
-    choice = json.loads((args.step4c / "choice.json").read_text())
-    groups4c = unit_dirs(args.step4c, choice)
-    groups = {"FS": sorted(args.root.glob("FS/*/r*"))}
-    for label in ("S", "P0"):
-        if groups4c.get(label):
-            groups[label] = groups4c[label]
+def report(root: Path, primary: str, groups: dict, n_expected: int, title: str,
+           adopt: str, step: str) -> None:
+    """Pool ``groups`` (label → unit directories), decide on ``primary`` with
+    step 4c's bands, and write the summary files under ``root``."""
     tables, pits, accs = [], [], []
     for label, dirs in groups.items():
         frames = {name: read(dirs, name) for name in FILES}
@@ -58,40 +51,38 @@ def main() -> None:
         pits.append(pit_histogram(post))
         accs.append(accuracy(frames, label))
     table = pd.concat(tables)
-    verdict, lines = decide_bands(table, primary="FS")
-    lines = lines[:-1]                       # step 4c's decision line; 4d's below
-    fails = [c for c, v in verdict["per_simulation"].get("FS", {}).get("classes", {}).items()
+    verdict, lines = decide_bands(table, primary=primary)
+    lines = lines[:-1]                       # step 4c's decision line; this step's below
+    fails = [c for c, v in verdict["per_simulation"].get(primary, {}).get("classes", {}).items()
              if not v]
-    n_expected = sum(1 for k in choice if k.startswith("S/")) * 10
-    done = [json.loads((d / "done.json").read_text()) for d in groups["FS"]
+    done = [json.loads((d / "done.json").read_text()) for d in groups[primary]
             if (d / "done.json").exists()]
     if len(done) < n_expected:
         decision = f"incomplete ({len(done)} of {n_expected} units)"
     elif fails:
-        decision = f"stop and review (failing on FS: {', '.join(fails)})"
+        decision = f"stop and review (failing on {primary}: {', '.join(fails)})"
     else:
-        decision = ("calibrated: model version 5 (free shares) with step 4c's (tau, c) "
-                    "is the posterior; merge the draft into MODEL_latent.qmd and go to step 6")
-    lines.append(f"DECISION (step 4d section 3, arm FS): {decision}")
+        decision = adopt
+    lines.append(f"DECISION ({step} section 3, arm {primary}): {decision}")
 
     d = pd.DataFrame(done)
     tot = pd.DataFrame([{"region": u["region"], "replicate": u["replicate"],
                          **{f"rel_rms_{k}": v for k, v in u["totals_rel_rms"].items()},
                          "posterior_sd_rel": u["totals_posterior_sd_rel_mean"]} for u in done])
+    order = [primary, *[g for g in groups if g != primary]]
     with pd.option_context("display.width", 250, "display.max_columns", 40,
                            "display.max_rows", 1000):
-        text = ["Step 4d: free shares (model version 5 draft) on simulation S", "", *lines, "",
-                "1. Calibration (FS: all replicates at S's chosen pair; S and P0 from step 4c)",
-                table.round(3).to_string(), ""]
+        text = [title, "", *lines, "",
+                f"1. Calibration ({primary}: all replicates at S's chosen pair; the others "
+                f"as their own steps pooled them)", table.round(3).to_string(), ""]
         if "total" in table.index.get_level_values("cls"):
             zt = table.xs("total", level="cls")[["n", "cover90", "cover50", "rms_z",
                                                    "median_width90"]]
             text += ["   zone totals side by side:",
-                     zt.reindex([x for x in ("FS", "S", "P0") if x in zt.index])
-                     .round(3).to_string(), ""]
-        text += ["2. Zone totals: relative RMS error against the truth (mean over units) of "
-                 "the MAP shares, the survey's shares and the realized MAP's shares; "
-                 "posterior sd relative to the truth",
+                     zt.reindex([x for x in order if x in zt.index]).round(3).to_string(), ""]
+        text += [f"2. Zone totals ({primary}): relative RMS error against the truth (mean over "
+                 "units' per-unit RMS) of the totals' point estimates; posterior sd relative to "
+                 "the truth",
                  tot.drop(columns="replicate").groupby("region").mean().round(4).to_string(),
                  "   all units: " + ", ".join(f"{c} {tot[c].mean():.4f}"
                                               for c in tot.columns if c not in
@@ -99,11 +90,11 @@ def main() -> None:
                  "3. PIT histograms", pd.concat(pits).round(3).to_string(), "",
                  "4. MAP point accuracy (realized MAP)", pd.concat(accs).round(4).to_string(), ""]
         if not d.empty:
-            text += ["5. Fit diagnostics (FS)",
+            text += [f"5. Fit diagnostics ({primary})",
                      f"   MAP converged in {int(d['map_converged'].sum())} of {len(d)}; "
                      f"largest gradient {d['map_grad_max'].max():.2e} "
                      f"(U {d['map_grad_max_U'].max():.2e}, psi {d['map_grad_max_psi'].max():.2e}); "
-                     f"spread of the two starts: median {d['spread'].median():.2e}, "
+                     f"spread of the starts: median {d['spread'].median():.2e}, "
                      f"max {d['spread'].max():.2e}",
                      f"   realized MAP converged in {int(d['realized_converged'].sum())} of "
                      f"{len(d)}; solver calls median {d['realized_outer_iterations'].median():.0f}, "
@@ -112,15 +103,36 @@ def main() -> None:
                      f"{int(d['negative_variances'].sum())}",
                      f"   compute: {d['seconds'].sum() / 3600:.1f} CPU-hours over {len(d)} units; "
                      f"median {d['seconds'].median():.0f}s, max {d['seconds'].max():.0f}s"]
-    write_text(args.root / "summary.txt", "\n".join(text) + "\n")
-    write_text(args.root / "decision.json", json.dumps({"decision": decision, **verdict},
-                                                       indent=1, default=str))
-    write_text(args.root / "calibration.csv", table.reset_index().to_csv(index=False))
-    write_text(args.root / "pit.csv", pd.concat(pits).reset_index().to_csv(index=False))
-    write_text(args.root / "map_accuracy.csv", pd.concat(accs).reset_index().to_csv(index=False))
-    write_text(args.root / "totals.csv", tot.to_csv(index=False))
+    write_text(root / "summary.txt", "\n".join(text) + "\n")
+    write_text(root / "decision.json", json.dumps({"decision": decision, **verdict},
+                                                  indent=1, default=str))
+    write_text(root / "calibration.csv", table.reset_index().to_csv(index=False))
+    write_text(root / "pit.csv", pd.concat(pits).reset_index().to_csv(index=False))
+    write_text(root / "map_accuracy.csv", pd.concat(accs).reset_index().to_csv(index=False))
+    write_text(root / "totals.csv", tot.to_csv(index=False))
     print("\n".join(lines))
-    print(f"\nfull summary in {args.root / 'summary.txt'}")
+    print(f"\nfull summary in {root / 'summary.txt'}")
+
+
+def step4c_groups(step4c: Path) -> tuple[dict, int]:
+    """S and P0 as step 4c pooled them; the expected units per arm (10 per
+    region)."""
+    choice = json.loads((step4c / "choice.json").read_text())
+    g4c = unit_dirs(step4c, choice)
+    return ({label: g4c[label] for label in ("S", "P0") if g4c.get(label)},
+            sum(1 for k in choice if k.startswith("S/")) * 10)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--root", required=True, type=Path, help="step 4d output root")
+    parser.add_argument("--step4c", required=True, type=Path, help="step 4c output root")
+    args = parser.parse_args()
+    others, n_expected = step4c_groups(args.step4c)
+    report(args.root, "FS", {"FS": sorted(args.root.glob("FS/*/r*")), **others}, n_expected,
+           "Step 4d: free shares (model version 5 draft) on simulation S",
+           "calibrated: model version 5 (free shares) with step 4c's (tau, c) is the "
+           "posterior; merge the draft into MODEL_latent.qmd and go to step 6", "step 4d")
 
 
 if __name__ == "__main__":
