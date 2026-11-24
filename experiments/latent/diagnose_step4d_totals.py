@@ -28,6 +28,18 @@ it). All three share S's survey draws, so the direct estimates are the same.
    estimator, with no model in it. ``pull = constraint part (rescaled -
    direct) + model part (posterior mean - rescaled)``. The rescaled
    estimator's error is reported beside the direct one.
+4. **A cut totals module, checked without refitting** (added after the
+   second run). Two estimators that use only the unit-type cells and the
+   known ``N_A``, zones independent (simulation S samples each zone on its
+   own), with ``x_b`` the direct totals, ``v_b`` their variances,
+   ``X = Σ x``, ``V = Σ v``, ``s_b = x_b/X``:
+   - proportional rescaling ``N_A x_b / X``, its variance by the delta
+     method, ``(N_A/X)² [(1 - s_b)² v_b + s_b² Σ_{j≠b} v_j]``;
+   - Gaussian conditioning on ``Σ_b N_b = N_A``: mean
+     ``x_b + v_b (N_A - X)/V``, variance ``v_b - v_b²/V`` (the posterior of
+     a module with a Gaussian likelihood on the unit-type cells, a flat
+     prior on the shares and the total known).
+   Their 90% and 50% coverage (normal intervals), RMS z and errors.
 
 Writes ``<root>/diagnostics/totals_by_unit.csv`` and
 ``<root>/diagnostics/totals_summary.txt``.
@@ -93,6 +105,14 @@ def main() -> None:
     f["rescaled_err"] = (f["rescaled"] - f["truth"]) / f["truth"]
     f["constraint_part"] = (f["rescaled"] - f["direct"]) / f["truth"]
     f["model_part"] = (f["mean"] - f["rescaled"]) / f["truth"]
+    X = unit["direct"].transform("sum")
+    V = unit["direct_var"].transform("sum")
+    N_A = unit["truth"].transform("sum")
+    share = f["direct"] / X
+    f["rescaled_var"] = (N_A / X) ** 2 * ((1.0 - share) ** 2 * f["direct_var"]
+                                         + share ** 2 * (V - f["direct_var"]))
+    f["conditioned"] = f["direct"] + f["direct_var"] * (N_A - X) / V
+    f["conditioned_var"] = f["direct_var"] - f["direct_var"] ** 2 / V
     for col in ("cover90", "cover50"):
         f[col] = f[col].astype(bool)
 
@@ -106,13 +126,20 @@ def main() -> None:
         "rms_rel_error": [float(np.sqrt(np.mean(d["survey_err"] ** 2)))],
         "mean_rel_se": [float(d["direct_se_rel"].mean())],
         "mean_rel_error": [float(d["survey_err"].mean())]}, index=["direct (HT)"])
-    direct.loc["rescaled to N_A", ["n", "rms_rel_error", "mean_rel_error"]] = [
-        len(d), float(np.sqrt(np.mean(d["rescaled_err"] ** 2))),
-        float(d["rescaled_err"].mean())]
     by_region_direct = d.assign(inside=np.abs(d["direct_z"]) <= Z90,
                                 z2=d["direct_z"] ** 2).groupby("region").agg(
         n=("inside", "size"), cover90=("inside", "mean"), mean_z2=("z2", "mean"))
     by_region_direct["rms_z"] = np.sqrt(by_region_direct.pop("mean_z2"))
+    for label, est, var in (("rescaled to N_A (delta)", "rescaled", "rescaled_var"),
+                            ("conditioned on N_A", "conditioned", "conditioned_var")):
+        z = (d[est] - d["truth"]) / np.sqrt(d[var])
+        rel = (d[est] - d["truth"]) / d["truth"]
+        direct.loc[label] = [len(d), float((np.abs(z) <= Z90).mean()),
+                             float((np.abs(z) <= Z50).mean()),
+                             float(np.sqrt(np.mean(z ** 2))), float(np.sqrt(np.mean(rel ** 2))),
+                             float((np.sqrt(d[var]) / d["truth"]).mean()), float(rel.mean())]
+        by_region_direct[f"cover90 {est}"] = (np.abs(z) <= Z90).groupby(d["region"]).mean()
+        by_region_direct[f"rms_z {est}"] = np.sqrt((z ** 2).groupby(d["region"]).mean())
 
     # 2. decomposition per arm
     rows, split = {}, {}
