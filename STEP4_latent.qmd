@@ -1,14 +1,16 @@
 ---
-title: "Latent-population PMEDM, steps 4 to 4d: calibration of the posterior"
+title: "Latent-population PMEDM, steps 4 to 4e: calibration of the posterior"
 subtitle: "Design, results and decisions"
 date: 2026-11-24
 ---
 
 Step 4 (`PLAN_latent_step4.md`, version 2), step 4b
 (`PLAN_latent_step4b.md`, version 2), step 4c (`PLAN_latent_step4c.md`,
-version 2) and step 4d (`PLAN_latent_step4d.md`, version 1). Model:
-`MODEL_latent.qmd` version 3 for step 4, version 4 for steps 4b and 4c, the
-draft version 5 (`MODEL_latent_v5_draft.md`) for step 4d.
+version 2), step 4d (`PLAN_latent_step4d.md`, version 1) and step 4e
+(`PLAN_latent_step4e.md`, version 1). Model: `MODEL_latent.qmd` version 3
+for step 4, version 4 for steps 4b and 4c; the draft version 5 for steps 4d
+(free shares) and 4e (its cut form), which after step 4e became
+`MODEL_latent.qmd` version 5.
 
 ## The test
 
@@ -354,6 +356,58 @@ composition variance the model allows, part of it is assigned to the total.
 Removing the double use fixed the width; the remaining miss is the model's
 composition leaking into the totals.
 
+## Step 4e: the cut form (draft model version 5)
+
+### What changed
+
+One arm, FScut, as step 4d's FS (S's data, step 4c's pairs, 10 replicates,
+200 draws, from scratch), with the totals cut from the composition
+(`PLAN_latent_step4e.md`; the draft's §7, now `MODEL_latent.qmd` version
+5):
+
+* **totals module:** each zone's direct unit total (its `unit_type:*` cells)
+  with its variance from $\hat\Sigma$, conditioned on the known $N_A$
+  (Gaussian; zones independent in S): the estimator the step 4d diagnostics
+  found calibrated;
+* **composition given the totals:** $U$'s MAP and Laplace approximation with
+  the shares fixed at the module's mean; the realized MAP with the zone
+  totals fixed (a dual with one normalizer per zone);
+* **posterior:** per draw, totals from the module, $U$ from its Laplace
+  approximation, each zone conditioned on $Y$ given its total.
+
+The other tables no longer inform the totals, so the model's composition
+cannot pull them.
+
+### Calibration
+
+| class (cover 90%, 50%) | FScut | FS | S | P0 |
+|---|---|---|---|---|
+| fitted | **0.876**, 0.487 | **0.873**, 0.485 | **0.870**, 0.480 | **0.875**, 0.486 |
+| B1 | **0.893**, 0.577 | **0.893**, 0.576 | **0.890**, 0.574 | **0.893**, 0.577 |
+| B2 | **0.828**, 0.461 | **0.826**, 0.462 | **0.823**, 0.460 | **0.827**, 0.462 |
+| joint | **0.907**, 0.561 | **0.906**, 0.560 | **0.903**, 0.558 | **0.907**, 0.561 |
+| rare | **0.883**, 0.563 | **0.882**, 0.564 | **0.880**, 0.560 | **0.883**, 0.563 |
+| zone totals | **0.871**, 0.476 | 0.843, 0.459 | 0.824, 0.429 | **0.862**, 0.474 |
+
+Bold: within the bands at both levels. **Every class is calibrated.**
+
+* **Zone totals:** RMS $z$ 1.09 (FS 1.16, S 1.22); PIT nearly flat (0.114
+  and 0.124 in the extreme deciles); relative error 1.05%, against 1.18% for
+  the raw direct totals, with a posterior sd of 1.04%: centre and width now
+  agree.
+* **The totals' coverage (0.871)** is a little below the diagnostic's 0.888
+  for the same estimator. Here the intervals are quantiles of 200 draws, which
+  are noisier than the diagnostic's exact normal intervals; that is the likely
+  reason, not checked.
+* **Nothing else moved:** every composition class, and the point accuracy
+  (LOR error 0.4125, TVD 0.0571, rare groups 0.594), as in steps 4c and 4d.
+  Cutting the totals' feedback cost nothing.
+* **Fits:** 13 of 130 MAPs of $U$ were not flagged as converged by the
+  optimizer, but their largest gradient is $6\times10^{-4}$ and their two
+  starts agree to $10^{-7}$; the fixed-total realized MAP converged in every
+  unit; no negative conditional variances (the totals, exactly determined
+  given a draw, are no longer counted).
+
 ## Decisions
 
 * **Step 4 (§6):** not calibrated; stop and review (→ step 4b).
@@ -367,8 +421,12 @@ composition leaking into the totals.
   totals (0.843). The review (above) finds the cause and a lead: a totals
   module from the unit-type cells and $N_A$ alone is calibrated (0.888,
   0.485). Next: step 4e, the cut form of model version 5.
+* **Step 4e (§3):** calibrated in every class. Model version 5 in its cut
+  form, with step 4c's $(\tau, c)$, is the posterior: the draft is merged
+  into `MODEL_latent.qmd` as version 5, and the next step is step 6 (the real
+  application), with step 5 (draws of the realized populations) under way.
 
-### For the review (after step 4c; option 2 was taken in step 4d)
+### For the review (after step 4c; option 2 was taken in step 4d, and its cut form in step 4e)
 
 The cause of the remaining failure is identified: the survey's zone totals
 are used both in the prior shares and in $Y$. Options (none decided):
@@ -400,7 +458,8 @@ cells and rare groups.
 * Compute: step 4 about 119 CPU-hours; step 4b about 249 (one resubmission
   after the 24-hour limit); step 4c about 179, with 336 units reused from
   step 4b (S, G, S-cal and P0 as separate jobs).
-* Step 4d about 39 CPU-hours (130 units, median 1,000 s).
+* Step 4d about 39 CPU-hours (130 units, median 1,000 s); step 4e about 41
+  (median 1,080 s).
 * A collection taken while S-cal and P0 were half done showed S-cal's zone
   totals at 0.865. The arms run the largest regions first, so a partial arm
   is not comparable with a complete one; only complete arms are reported
@@ -410,12 +469,16 @@ cells and rare groups.
 
 * **Code:** `dded086`, `abc99b4` (step 4); `6101bd6`, `c215319` (step 4b);
   `a758f25` (step 4c); `f87fafa` (the zero-MOE check); `3e7285b` (step 4d),
-  `ca11eb6`, `bbc1cbc`, `f46754f` (its totals diagnostics).
+  `ca11eb6`, `bbc1cbc`, `f46754f` (its totals diagnostics); `c224862`
+  (step 4e).
 * **Runs** (under `/lustre/isaac24/proj/UTK0533/pmedm_vb_runs/latent/`):
   `step4` (the $\kappa = \infty$ arm), `step4b` (K1, K2), `step4c` (S, G,
-  `Scal`, `P0`), `step4d` (FS; diagnostics in `step4d/diagnostics`).
-* **Handed on:** model version 4 with $\kappa \approx n_A/4$, calibrated on
-  S in every class but zone totals. Free shares (step 4d) remove the survey
-  totals' double use and keep the composition classes, but the model's
-  composition pulls the totals; a totals module from the unit-type cells
-  and $N_A$ alone is calibrated. $\tau$ weakly identified.
+  `Scal`, `P0`), `step4d` (FS; diagnostics in `step4d/diagnostics`),
+  `step4e` (FScut).
+* **Handed on:** model version 5 in its cut form (`MODEL_latent.qmd`
+  version 5): zone totals from the unit-type cells and $N_A$, the
+  composition given them, $\kappa \approx n_A/4$ and $(\tau, c)$ by B1 log
+  density; calibrated on simulation S in every class. Open: $\tau$ weakly
+  identified above $0.5\,\tau_{\mathrm{ref}}$; B2 passes only under its
+  wider band; G's fitted cells and rare groups; block-group unit totals in
+  the real application, where group quarters are published only by tract.
