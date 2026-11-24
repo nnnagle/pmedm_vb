@@ -69,8 +69,10 @@ case "$($PY -c 'import pmedm_vb; print(pmedm_vb.__file__)')" in
     "$REPO"/src/*) ;;
     *) echo "ERROR: pmedm_vb is not imported from $REPO/src" >&2; exit 1 ;;
 esac
-if ! $PY -c 'import numba, arviz' 2>/dev/null; then
-    echo "ERROR: numba or arviz missing: set PMEDM_VB_ENV to the numba environment" >&2
+echo "environment: $CONDA_PREFIX (PMEDM_VB_ENV=${PMEDM_VB_ENV:-unset})"
+if ! $PY -c 'import numba, arviz; print("numba", numba.__version__, "arviz", arviz.__version__)'; then
+    echo "ERROR: importing numba or arviz failed in $CONDA_PREFIX (the error is above)." >&2
+    echo "       If this is not the numba environment, export PMEDM_VB_ENV before sbatch." >&2
     exit 1
 fi
 
