@@ -7,7 +7,7 @@
 >
 > | version | date | change |
 > |---|---|---|
-> | 1 | 2026-11-24 | draft |
+> | 1 | 2026-11-24 | draft; §7 items 1 (the hybrid) and 2 (model version 5 only) approved |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -150,11 +150,13 @@ effective samples per second, and the regional run is sized from them.
 
 ## 7. To resolve at approval
 
-1. The hybrid (parameters as stage 2, MCMC for $C$ only); full parameter
-   MCMC deferred.
-2. Model version 5 as step 4e leaves it (cut or free shares); version 4,
-   whose zone totals move within the realized level and would need moves
-   across zones, not sampled.
+1. **Approved:** the hybrid (parameters as stage 2, MCMC for $C$ only);
+   full parameter MCMC deferred.
+2. **Approved:** model version 5 as step 4e leaves it (cut or free shares).
+   Version 4 is not sampled: its zone totals are part of $C$, so a chain
+   would need moves across zones, and a total's posterior (sd about 1,000
+   units) would then mix by a random walk of single-unit moves; under
+   version 5 each parameter draw brings an independent draw of the totals.
 3. Proposals (a)–(c) first, (d) if needed; CPU or GPU decided by the pilot.
 4. The thresholds in §5.
 5. Whether a compiled kernel (numba, which the project environment lacks)
