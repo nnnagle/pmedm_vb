@@ -1,13 +1,13 @@
-# Plan, step 5: drawing the realized populations (draft)
+# Plan, step 5: drawing the realized populations
 
-> **Status: draft, for review.** Step 5 of `PLAN_latent.md` (version 7),
+> **Status: fixed.** Step 5 of `PLAN_latent.md` (version 7),
 > for the draft model version 5 (`MODEL_latent_v5_draft.md`): free shares,
 > or their cut form if step 4e adopts it. Once approved, change it only
 > when the plan itself changes, and record each change below.
 >
 > | version | date | change |
 > |---|---|---|
-> | 1 | 2026-11-24 | draft; §7 items 1 (the hybrid) and 2 (model version 5 only) approved |
+> | 1 | 2026-11-24 | approved; every item of §7 as drafted (items 1 and 2 with the reasons now given) |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -148,7 +148,7 @@ The GPU helps by running many chains per batch and by making proposal (d)
 affordable. The pilot reports seconds per sweep, sweeps to convergence and
 effective samples per second, and the regional run is sized from them.
 
-## 7. To resolve at approval
+## 7. Resolved at approval
 
 1. **Approved:** the hybrid (parameters as stage 2, MCMC for $C$ only);
    full parameter MCMC deferred.
@@ -157,8 +157,9 @@ effective samples per second, and the regional run is sized from them.
    would need moves across zones, and a total's posterior (sd about 1,000
    units) would then mix by a random walk of single-unit moves; under
    version 5 each parameter draw brings an independent draw of the totals.
-3. Proposals (a)–(c) first, (d) if needed; CPU or GPU decided by the pilot.
-4. The thresholds in §5.
-5. Whether a compiled kernel (numba, which the project environment lacks)
-   may live in a separate environment if torch batching is too slow; the
-   main environment is not changed.
+3. **Approved:** proposals (a)–(c) first, (d) if needed; CPU or GPU (ISAAC's
+   GPUs are available) decided by the pilot.
+4. **Approved:** the thresholds in §5.
+5. **Approved:** a compiled kernel (numba, which the project environment
+   lacks) may live in a separate environment if torch batching is too slow;
+   the main environment is not changed.
