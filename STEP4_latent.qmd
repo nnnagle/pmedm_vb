@@ -1,12 +1,13 @@
 ---
-title: "Latent-population PMEDM, steps 4 and 4b: calibration of the posterior"
+title: "Latent-population PMEDM, steps 4, 4b and 4c: calibration of the posterior"
 subtitle: "Design, results and decisions"
-date: 2026-11-23
+date: 2026-11-24
 ---
 
-Step 4 (`PLAN_latent_step4.md`, version 2) and step 4b
-(`PLAN_latent_step4b.md`, version 2). Model: `MODEL_latent.qmd` version 3
-for step 4, version 4 for step 4b.
+Step 4 (`PLAN_latent_step4.md`, version 2), step 4b
+(`PLAN_latent_step4b.md`, version 2) and step 4c (`PLAN_latent_step4c.md`,
+version 2). Model: `MODEL_latent.qmd` version 3 for step 4, version 4 for
+steps 4b and 4c.
 
 ## The test
 
@@ -129,12 +130,180 @@ The overdispersed model's point estimates are the best of any variant,
 under noisy tables, and level with or better than the standard PMEDM on the
 type-reference support (scored on noise-free tables).
 
+## Step 4c: $\tau$ and $\kappa$ chosen together (model version 4)
+
+### What changed
+
+As step 4b's K2, except:
+
+* **Joint choice** of $(\tau, c)$ per simulation and region, by the B1
+  posterior predictive log density summed over the first 3 replicates (50
+  draws), on $\tau \in \{0.25, 0.5, 1, 2\}\times\tau_{\mathrm{ref}}$ and
+  $c \in \{0.125, 0.25, 0.5\}$. The other 7 replicates ran only the chosen
+  pair (200 draws). Step 4b's fits were reused where pair and replicate
+  matched.
+* **A wider band for B2** (tables never used in fitting or tuning):
+  $[0.80, 0.95]$ at 90%, $[0.40, 0.60]$ at 50%. Fixed before the run.
+* **Two optional arms,** reported but outside the decision, each at S's
+  chosen pair for every region, all 10 replicates, fitted from scratch:
+  - **S-cal:** S's sample with its weights raked to region-level controls
+    (total households, group-quarters persons, persons by sex × broad age:
+    the analogue of the ACS's county weighting areas), and the
+    linearization covariance of a calibration estimator.
+  - **P0:** S, but the prior shares $\pi^0_b$ from a second, independent
+    1-in-8 sample of the same realized population: as noisy as the
+    survey's own zone totals, but independent of $Y$.
+
+### The choice of $(\tau, c)$
+
+* **$c$ is stable:** 0.25 in 10 of 13 regions on S and 11 of 13 on G; 0.5
+  in the same two regions (nashville_east, knoxville_ring) in both. So
+  $\kappa \approx n_A/4$ again.
+* **$\tau$ is barely identified above $0.5\,\tau_{\mathrm{ref}}$.** On S it
+  went to $0.5\times$ in 7 regions and to the new top, $2\times$, in 6; on G
+  to $0.25\times$, $0.5\times$ and $2\times$ in 3, 6 and 4. Where it went to
+  the top, the B1 log density at the chosen $c$ differs between $0.5\times$
+  and $2\times$ by 3 to about 110 (summed over 3 replicates, on totals of
+  $-24{,}000$ to $-40{,}000$). The same
+  four regions chose $2\times$ on both simulations: memphis_ring,
+  nashville_core, nashville_south_west, knoxville_core.
+* **Choosing them together changed nothing.** The plan's argument (§1) was
+  that spread in directions $g$ can reach would identify $\tau$ apart from
+  $\kappa$. In practice $c$ stays at 0.25 whatever $\tau$ is, and coverage
+  is within 0.01 of step 4b's K2 in every class on S (within 0.015 on G).
+* **The Laplace evidence no longer prefers the largest $\tau$.** With
+  $\kappa$ in the model it chose $1\times$ in 7 regions on each simulation
+  and never $2\times$; in steps 3b and 4 it always went to the edge. It
+  agrees with B1 on the full pair in 6 of 26 cases.
+* **Point accuracy prefers small $\tau$, predictive fit larger.** The pair
+  with the lowest log-odds-ratio error has $\tau = 0.25\times$ in 22 of 26
+  cases and matches B1's choice in 1. The differences in that error within
+  a region are at most 0.02.
+
+### Calibration
+
+Coverage pooled over replicates, zones and cells; 90% (50%):
+
+| class | S | G | S-cal | P0 |
+|---|---|---|---|---|
+| fitted | **0.870** (0.480) | 0.799 (0.411) | **0.878** (0.484) | **0.875** (0.486) |
+| B1 | **0.890** (0.574) | **0.881** (0.560) | **0.894** (0.577) | **0.893** (0.577) |
+| B2 | **0.823** (0.460) | **0.811** (0.446) | **0.827** (0.462) | **0.827** (0.462) |
+| joint | **0.903** (0.558) | **0.892** (0.540) | **0.907** (0.560) | **0.907** (0.561) |
+| rare | **0.880** (0.560) | 0.841 (0.527) | **0.886** (0.565) | **0.883** (0.563) |
+| zone totals | 0.824 (0.429) | 0.836 (0.416) | 0.833 (0.421) | **0.862** (0.474) |
+
+Bold: within the class's bands at both levels. RMS $z$ on S runs from 1.07
+(fitted) to 1.42 (B2); zone totals 1.22 on S, 1.10 under P0.
+
+* **S passes every class except zone totals.** B2 passes because of the
+  wider band, not because it improved (0.816 in step 4b).
+* **Zone totals: the intervals are too narrow, not off-centre on average.**
+  S's PIT for them has both tails heavy (0.133 and 0.148 in the extreme
+  deciles); median 90% width 3.2% of the total. Coverage varies from 0.72
+  to 0.95 between replicates, because the same 58 zones are scored in each.
+* **P0 brings zone totals into the band** (0.862, 0.474) with the same
+  widths as S (median 1,596 against 1,592), and a nearly flat PIT (0.102 and
+  0.128 in the extreme deciles). The gain is entirely in centring. Every
+  other class, and the point accuracy, is unchanged.
+* **S-cal barely moves zone totals** (0.833). Its other classes are the same
+  or slightly better than S's.
+* **G fails fitted cells and rare groups,** as in step 4b. Its survey errors
+  are about twice S's (from the medians: 90% width over the direct SE is
+  0.76 in G, 1.54 in S, for similar widths of 403 and 426), but the
+  posterior hardly widens. In G the posterior interval is narrower than the
+  survey's own, and its PIT for fitted cells has both tails heavy (0.138,
+  0.169).
+* **Fitted cells and B2 on S have an excess in the top decile of the PIT**
+  (0.143, 0.142): the truth is above the posterior's upper tail more often
+  than below its lower tail.
+* **Using 50 draws in the selection phase cost nothing:** the final
+  replicates alone (200 draws) give the same coverage.
+
+### Why the zone totals miss: the survey's totals are used twice
+
+Derived here; P0 is the test of it.
+
+The prior shares $\pi^0_b = \hat N_b/N_A$ are built from the survey's
+estimates of the zone totals, and the same estimates are in $Y$. If the
+survey's error in a zone total is $e$, the prior is centred on the truth
+plus $e$ and the data on the zone total say the truth plus $e$. The
+posterior combines them as two independent measurements: it stays centred
+on the truth plus $e$, and is narrower than that error warrants.
+
+It is the dependence, not the noise, that does the harm. P0's prior shares
+are just as noisy as the survey's own totals, but independent of $Y$, and
+with them zone totals reach the band. A wider prior on the totals (a
+smaller $\kappa$) would treat the width when the problem is the centre.
+
+**Why calibration does not help.** S-cal's controls are at region level,
+the level of $N_A$, which the model already treats as known. Each zone's
+total is still the region's benchmark times a share estimated from the
+survey, so $\pi^0$ still repeats the survey's error in that share.
+
+**The real data have the same structure** (exploratory checks of the
+2020–2024 ACS 5-year files for Tennessee, run beside this step; the
+block-group and tract part is `experiments/latent/zero_moe.py`):
+
+* No block-group or tract cell of the tables used here has zero replicate
+  variance with a nonzero estimate, so no block-group or tract total is
+  controlled.
+* County totals are exact (zero replicate variance) in 94 of 95 counties.
+  Sex × age groups are nearly exact in the large counties ("near-controls":
+  standard errors of a few to about 100 persons on totals of 6,000 to
+  440,000), apparently with 5–14 and 75+ as single groups, but exact only
+  sporadically.
+* At PUMA level, total population is exact in 25 of 58 PUMAs (tract
+  replicates summed), presumably those made of whole counties (not
+  checked); no sex or sex × age total is exact in any PUMA.
+
+So a block-group total is the county benchmark times a survey-estimated
+share, as in S-cal: the double use applies to block groups in the real
+application, and the benchmark helps only the PUMA total ($N_A$), where the
+PUMA is made of whole counties.
+
+### Point accuracy of the realized MAP
+
+| simulation | LOR error | TVD | rare groups |
+|---|---|---|---|
+| S | 0.4125 | 0.0571 | 0.594 |
+| G | 0.4119 | 0.0577 | 0.628 |
+| S-cal | 0.4125 | 0.0572 | 0.593 |
+| P0 | 0.4125 | 0.0571 | 0.594 |
+
+As step 4b's K2 (0.410, 0.057, 0.597). The prior shares barely touch the
+composition within zones, which these measures score.
+
 ## Decisions
 
 * **Step 4 (§6):** not calibrated; stop and review (→ step 4b).
 * **Step 4b (§5):** neither K1 nor K2 calibrated on S; stop and review. K2
   passes four of six classes; B2 (0.82) and zone totals (0.82) miss the 0.85
   floor at 90%.
+* **Step 4c (§3):** not calibrated on S; stop and review, failing only on
+  zone totals (0.824). S-cal and P0 do not enter the decision; P0 identifies
+  the cause.
+
+### For the review
+
+The cause of the remaining failure is identified: the survey's zone totals
+are used both in the prior shares and in $Y$. Options (none decided):
+
+1. **Prior shares from a source independent of $Y$** (model fork 8). None
+   is in hand; 2020 decennial counts by block group are a candidate, with
+   the gap in date.
+2. **Use the survey's totals once:** keep them in $Y$ and make the prior on
+   the shares weak, so that $Y$ alone sets the totals. Under a plain
+   Dirichlet-multinomial that means a small $\kappa$ everywhere, which step
+   4b showed over-widens the other classes; it needs a concentration of its
+   own for the zone level, the root of a Dirichlet tree (the weak-shares
+   candidate for model version 5).
+3. **Model the shared error:** treat $\pi^0$ as estimated from the same data,
+   with its covariance with $Y$.
+
+Also open, but not failing: $\tau$ is weakly identified above
+$0.5\,\tau_{\mathrm{ref}}$; B2 passes only under its wider band; G's fitted
+cells and rare groups.
 
 ## Notes
 
@@ -145,13 +314,20 @@ type-reference support (scored on noise-free tables).
 * $\kappa = n_A$ reproduces the PMEDM's entropy weight only to $O(n/N)$
   (about 5% in `knoxville_core`).
 * Compute: step 4 about 119 CPU-hours; step 4b about 249 (one resubmission
-  after the 24-hour limit).
+  after the 24-hour limit); step 4c about 179, with 336 units reused from
+  step 4b (S, G, S-cal and P0 as separate jobs).
+* A collection taken while S-cal and P0 were half done showed S-cal's zone
+  totals at 0.865. The arms run the largest regions first, so a partial arm
+  is not comparable with a complete one; only complete arms are reported
+  above.
 
 ## Record
 
-* **Code:** `dded086`, `abc99b4` (step 4); `6101bd6`, `c215319` (step 4b).
+* **Code:** `dded086`, `abc99b4` (step 4); `6101bd6`, `c215319` (step 4b);
+  `a758f25` (step 4c); `f87fafa` (the zero-MOE check).
 * **Runs** (under `/lustre/isaac24/proj/UTK0533/pmedm_vb_runs/latent/`):
-  `step4` (the $\kappa = \infty$ arm), `step4b` (K1, K2).
-* **Handed on:** model version 4; $\kappa \approx n_A/4$ by B1 log density;
-  the open questions of $\tau$ at its grid edge, B2's tables outside the
-  type space, and zone totals.
+  `step4` (the $\kappa = \infty$ arm), `step4b` (K1, K2), `step4c` (S, G,
+  `Scal`, `P0`).
+* **Handed on:** model version 4 with $\kappa \approx n_A/4$, calibrated on
+  S in every class but zone totals; the cause of that failure (the survey's
+  zone totals used twice) and the options above; $\tau$ weakly identified.
