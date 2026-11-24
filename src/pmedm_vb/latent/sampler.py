@@ -191,7 +191,9 @@ def _per_chain(x: np.ndarray, n: int, Z: int, M: int, name: str) -> np.ndarray:
     if np.any(~np.isfinite(x)) or np.any(x < 0):
         raise ValueError(f"{name} must be finite and non-negative")
     tot = x.sum(axis=2, keepdims=True)
-    return np.where(tot > 0, x / np.where(tot > 0, tot, 1.0), 0.0)
+    # C order: the sampler views these flat (torch .view(-1)), which fails on
+    # e.g. the F-ordered result of p[:, keep]
+    return np.ascontiguousarray(np.where(tot > 0, x / np.where(tot > 0, tot, 1.0), 0.0))
 
 
 def restrict_support(p: np.ndarray, T0: sp.spmatrix, r_hat: np.ndarray | None = None,

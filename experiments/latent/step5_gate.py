@@ -1,8 +1,17 @@
 """Step 5, phase 1: the exactness gate of the realized-population sampler
 (``PLAN_latent_step5.md`` version 1, §4 item 1 and §5 first bullet;
-:mod:`pmedm_vb.latent.sampler`).
+:mod:`pmedm_vb.latent.sampler`, and its numba version
+:mod:`pmedm_vb.latent.sampler_numba`).
 
     PYTHONPATH=src python experiments/latent/step5_gate.py [--quick] [--device cpu]
+    PYTHONPATH=src python experiments/latent/step5_gate.py --engine numba [--threads 4]
+
+``--engine`` picks the sampler: ``torch`` (default, the phase 1 sampler) or
+``numba`` (the compiled one; needs numba installed). Parts 1 and 2 are the
+same for both; a numba *sweep* is ``N_b`` moves in zone ``b`` (block) or the
+chain's ``Σ_b N_b`` moves (low rank), where the torch one moves every zone
+``max N_b`` times (block), which leaves the checks unchanged. Part 3 differs
+by engine (below).
 
 Prints a report; writes nothing. Three parts:
 
@@ -46,7 +55,12 @@ Prints a report; writes nothing. Three parts:
    per zone, 8–24 nonzero cells per atom; rank 80 for ``D + LL'``), and the
    implied seconds per sweep against ``N_b`` (a sweep is ``max N_b`` steps
    for the block backend and ``Σ_b N_b`` for the low-rank one); one real
-   sweep checks the extrapolation.
+   sweep checks the extrapolation. With ``--engine numba``, the same sizes
+   by number of threads (``--threads-grid``): microseconds per move, moves
+   per second over all slots (block) or chains (low rank), the implied
+   seconds per sweep (numba's sweep, above) against ``N_b``, and one real
+   sweep against the extrapolation. The first call of each kernel compiles
+   it (cached on disk afterwards); a warm-up call is not timed.
 """
 
 from __future__ import annotations
@@ -68,6 +82,17 @@ from pmedm_vb.latent.sampler import (
     RealizedSampler,
     SamplerInputs,
 )
+
+
+def make_sampler(args, inputs: SamplerInputs, cov, mix: ProposalMix, *, seed: int,
+                 start_counts: np.ndarray | None = None):
+    """The ``--engine``'s sampler (same constructor and ``run`` for both)."""
+    if args.engine == "torch":
+        return RealizedSampler(inputs, cov, mix, device=args.device, seed=seed,
+                               start_counts=start_counts)
+    from pmedm_vb.latent.sampler_numba import NumbaSampler  # needs numba
+    return NumbaSampler(inputs, cov, mix, seed=seed, start_counts=start_counts,
+                        threads=args.threads)
 
 # --------------------------------------------------------------------------
 # Part 1: enumeration
@@ -234,8 +259,8 @@ def run_enumeration(args) -> None:
             start = None
             if mix.weights()[1] == 0 and mix.weights()[2] == 0:
                 start = np.broadcast_to(start_fixed, (n, Z, M)).copy()
-            sampler = RealizedSampler(inputs, cov, mix, device=args.device,
-                                      seed=zlib.crc32(f"{backend}:{name}".encode()), start_counts=start)
+            sampler = make_sampler(args, inputs, cov, mix,
+                                   seed=zlib.crc32(f"{backend}:{name}".encode()), start_counts=start)
             res = sampler.run(long, burn=burn, keep_counts="dense")
             counts = np.stack(res.counts)                               # (long, n, Z, M)
             codes = en.encode(counts)                                    # (long, n)
@@ -371,8 +396,7 @@ def agreement_at(args, scale: float) -> None:
           f"min N_b p_bj = {float((pr['N'][:, None] * pr['p']).min()):.1f}")
     inputs = SamplerInputs(pr["T0"], pr["Y"], np.repeat(pr["N"][None, :], n, 0), pr["p"], r_hat,
                            pr["kappa"])
-    sampler = RealizedSampler(inputs, pr["cov"], ProposalMix(0.4, 0.3, 0.3), device=args.device,
-                              seed=11)
+    sampler = make_sampler(args, inputs, pr["cov"], ProposalMix(0.4, 0.3, 0.3), seed=11)
     t0 = time.perf_counter()
     res = sampler.run(args.agree_sweeps, burn=args.agree_burn, thin=1, G=sp.csr_matrix(pr["G"]))
     secs = time.perf_counter() - t0
@@ -483,9 +507,75 @@ def run_timing(args) -> None:
     print()
 
 
+def run_timing_numba(args) -> None:
+    import numba
+
+    from pmedm_vb.latent.sampler_numba import NumbaSampler
+
+    avail = numba.config.NUMBA_NUM_THREADS
+    grid = sorted({t for t in args.threads_grid if 1 <= t <= avail}) or [avail]
+    print("=" * 100)
+    print(f"PART 3. Timing, numba {numba.__version__} (threading layer "
+          f"{numba.config.THREADING_LAYER}, NUMBA_NUM_THREADS {avail}; threads {grid}): "
+          "Z = 10 zones, M = 5,000 atoms, C = 100 cells per zone")
+    chains_grid = [1, 4, 16, 64] if not args.quick else [1, 16]
+    sizes = [1_000, 10_000, 100_000]
+    moves = args.timing_moves
+    for backend in ("block", "lowrank"):
+        unit = "slots" if backend == "block" else "chains"
+        print(f"  backend {backend}" + (" (rank 80)" if backend == "lowrank" else "")
+              + f": {moves} moves per {unit[:-1]}; a sweep is "
+              + ("N_b moves per zone" if backend == "block" else "10 N_b moves per chain"))
+        print(f"    {'threads':>7s} {'chains':>6s} {unit:>6s} {'us/move':>8s} {'us/step':>8s} "
+              f"{'moves/s':>11s} "
+              f"{'accept':>6s} | "
+              + " ".join(f"{'s/sweep N_b=' + format(s, ','):>18s}" for s in sizes))
+        for threads in grid:
+            for n in chains_grid:
+                inputs, cov, K = timing_problem(n, 1000, backend)
+                sm = NumbaSampler(inputs, cov, ProposalMix(0.4, 0.3, 0.3), seed=1,
+                                  threads=threads)
+                sm.time_moves(20)                                     # compile / warm up
+                sm.stats[:] = 0
+                secs = sm.time_moves(moves)
+                units = n * 10 if backend == "block" else n
+                rate = units * moves / secs
+                # CPU time of one move (threads / rate), and wall time of one move
+                # of every slot (chain) at once (a torch "step")
+                us = 1e6 * threads / rate
+                us_step = 1e6 * secs / moves
+                acc = sm.stats[:, :, 1].sum() / max(sm.stats.sum(), 1)
+                per_sweep = [s * units / rate if backend == "block" else 10 * s * n / rate
+                             for s in sizes]
+                print(f"    {threads:7d} {n:6d} {units:6d} {us:8.3f} {us_step:8.2f} {rate:11.0f} "
+                      f"{acc:6.3f} | "
+                      + " ".join(f"{x:18.3f}" for x in per_sweep))
+        threads = grid[-1]
+        inputs, cov, K = timing_problem(16, 1000, backend)
+        sm = NumbaSampler(inputs, cov, ProposalMix(0.4, 0.3, 0.3), seed=2, threads=threads)
+        secs, drift = sm.run_sweeps(3)
+        m = sm._sweep_moves()
+        units = m.size
+        t = sm.time_moves(moves)
+        est = t * float(m.max()) / moves
+        print(f"    check ({threads} threads): 16 chains, N_b = 1,000: a real sweep "
+              f"{np.median(secs):.4f} s (refresh included) vs {est:.4f} s extrapolated "
+              f"({int(m.max())} moves per {unit[:-1]}, {units} {unit}; largest row nnz "
+              f"K = {K}; drift {drift:.1e})")
+    print("  (us/move: CPU time of one move, threads / (moves/s); us/step: wall time for every "
+          "slot (block) or chain (low rank) to move once, comparable to torch's ms/step; "
+          "moves/s: over all of them.)")
+    print()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--device", default="cpu", help="torch engine only")
+    parser.add_argument("--engine", default="torch", choices=("torch", "numba"))
+    parser.add_argument("--threads", type=int, default=None,
+                        help="numba engine: threads for parts 1 and 2 (default: numba's)")
+    parser.add_argument("--threads-grid", type=lambda x: [int(v) for v in x.split(",")],
+                        default=[1, 2, 4, 8, 16], help="numba engine, part 3: thread counts")
     parser.add_argument("--quick", action="store_true", help="shorter runs (a smoke test)")
     parser.add_argument("--parts", default="123")
     args = parser.parse_args()
@@ -498,15 +588,24 @@ def main() -> None:
     args.agree_burn = 20 if not q else 5
     args.agree_scales = (0.25, 1.0)
     args.timing_steps = 300 if not q else 50
+    args.timing_moves = 20000 if not q else 2000
     torch.manual_seed(0)
     t0 = time.perf_counter()
-    print(f"step 5 phase 1 gate; torch {torch.__version__}, device {args.device}")
+    if args.engine == "torch":
+        print(f"step 5 phase 1 gate; torch {torch.__version__}, device {args.device}")
+    else:
+        import numba
+        print(f"step 5 phase 1 gate; engine numba {numba.__version__}, threads "
+              f"{args.threads or numba.config.NUMBA_NUM_THREADS}")
     if "1" in args.parts:
         run_enumeration(args)
     if "2" in args.parts:
         run_agreement(args)
     if "3" in args.parts:
-        run_timing(args)
+        if args.engine == "torch":
+            run_timing(args)
+        else:
+            run_timing_numba(args)
     print(f"total {time.perf_counter() - t0:.0f} s")
 
 
