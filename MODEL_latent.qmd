@@ -14,6 +14,7 @@ date: 2026-11-17
 > | 2 | 2026-11-18 | table covariance $\Sigma$ = survey covariance as in the standard PMEDM (untapered, $\alpha = 0.01$, zero-count variance floor) plus the model-gap term $\omega^2 I$, the standard PMEDM's multiplier prior in covariance form |
 > | 3 | 2026-11-20 | the block deviations $u_b$ get their own basis $g$ (separate from the PUMA reference's $h$); version 2 is the case $g = h$. Step 3b tests $g$ = `kern30`, `kern100`, `kern200` |
 > | 4 | 2026-11-22 | realized level: the PUMA total $N_P$ is known and the block totals are random; the realized population over (block, atom) pairs is Dirichlet-multinomial around $q_{bi} = \pi^0_b p_{bi}$, with prior shares $\pi^0_b = \hat N_b/N_P$ as in the PMEDM's $q_{ib} = d_i N_b/N$ and overdispersion $\kappa$; $\kappa = n_P$ reproduces the PMEDM's entropy weight. Version 3's independent multinomial per block (fixed $N_b$) underestimated uncertainty for real blocks, which are not in the model's family |
+> | 5 | 2026-11-24 | free block shares and a cut posterior (draft `MODEL_latent_v5_draft.md`, tested in steps 4d and 4e). The prior shares $\pi^0$ leave the model: the block shares get a weak $\mathrm{Dirichlet}(\tfrac12)$ prior, and given the totals each block's composition is $\mathrm{DirMult}(N_b, \kappa s_b p_b)$ (version 4 used the survey's block totals both in $\pi^0$ and in $Y$, which made the totals over-confident: step 4c, arm P0). Inference uses a cut posterior: block totals from a totals module (the unit-type cells and $N_P$ alone), the composition given them, because with free shares the model's composition pulled the totals (step 4d). Stage 3 is now an exact sampler for $C$ given a parameter draw (step 5) |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -55,7 +56,9 @@ the target.
 Tilts depend only on $z$: they change the mix of types and leave the
 records within a type at their statewide variety. Each block's type mix is
 the PUMA's, tilted by a block deviation $u_b$ on its own basis $g$; the
-deviations are pooled within the PUMA by shrinkage towards zero.
+deviations are pooled within the PUMA by shrinkage towards zero. The block
+totals are random, with a weak prior on the block shares; given the totals,
+each block's composition scatters around its superpopulation.
 
 $$
 \begin{aligned}
@@ -70,10 +73,11 @@ q^P_i(\theta_P) &= q_i\, \gamma^{\,d(P,i)}
 p_{bi}(\theta_P, u_b) &= q_i\, \gamma^{\,d(P,i)}
   \exp\{\theta_P' h(z_i) + u_b' g(z_i) - A_P(\theta_P, u_b)\}
   && \text{block superpopulation}\\
-q_{bi} &= \pi^0_b\, p_{bi}(\theta_P, u_b)
-  && \text{base over (block, atom) pairs}\\
-C \mid \theta_P, U &\sim \mathrm{DirMult}(N_P,\, \kappa\, q)
-  && \text{realized population over pairs}\\
+s &\sim \mathrm{Dirichlet}(a\,\mathbf 1_B),
+  \quad N_b = N_P\, s_b,\ a = \tfrac12
+  && \text{block shares and totals}\\
+C_b \mid N_b, \theta_P, u_b &\sim \mathrm{DirMult}\big(N_b,\ \kappa\, s_b\, p_b(\theta_P, u_b)\big)
+  && \text{realized composition, blocks independent given the totals}\\
 Y \mid C &\sim \mathcal N\big(\mathcal A(C),\, \Sigma\big),
   \quad \mathcal A(C) = \textstyle\sum_b D_b T' C_b
   && \text{published tables}\\
@@ -92,29 +96,36 @@ $$
   more; $\gamma = 1$ uses the full statewide variety.
 * **Totals.** The PUMA total $N_P$ (units: households and group-quarters
   persons) is known: it is a hard control in ACS post-stratification, or
-  large enough for its error to be negligible. The block totals
-  $N_b = \sum_i C_{bi}$ are random, with $\sum_b N_b = N_P$.
-* **Prior shares** $\pi^0_b = \hat N_b/N_P$, from estimated block totals
-  (published block-group unit estimates, or counts), as in the PMEDM's
-  design prior $q_{ib} = d_i N_b/N$. Here $p_{bi}$ plays the part of $d_i$.
-* **Overdispersion $\kappa$.** $C \sim \mathrm{DirMult}(N_P, \kappa q)$
-  means $\tilde q \sim \mathrm{Dirichlet}(\kappa q)$, then
-  $C \sim \mathrm{Multinomial}(N_P, \tilde q)$: a real block's composition
-  scatters around the model's family before its people are drawn.
-  - Moments (standard): $\mathbb E\, C = N_P q$,
-    $\mathrm{Cov}\, C = \varphi N_P(\mathrm{diag}\,q - qq')$,
-    $\varphi = (N_P + \kappa)/(1 + \kappa)$.
-  - By the Dirichlet's aggregation property, the block totals are
-    $\mathrm{DirMult}(N_P, \kappa\pi^0)$, and given them each block's
-    population is $\mathrm{DirMult}(N_b, \kappa\pi^0_b p_b)$.
-  - Equivalently (standard): independent Gamma–Poisson counts per pair,
-    $C_{bi} \sim \mathrm{Poisson}(\lambda_{bi})$,
-    $\lambda_{bi} \sim \mathrm{Gamma}(\kappa q_{bi}, \beta)$, conditioned
-    on their total $N_P$.
-  - $\kappa \to \infty$ gives independent units (version 3's multinomial,
-    with the block totals then also multinomial). $\kappa = n_P$, the
-    PUMA's number of records, reproduces the standard PMEDM's entropy weight
-    (below); $\varphi \approx N_P/n_P$ is then the mean design weight.
+  large enough for its error to be negligible. The block totals $N_b$ are
+  random, with $\sum_b N_b = N_P$, and their shares have a weak
+  $\mathrm{Dirichlet}(\tfrac12)$ prior: the tables, not a prior, determine
+  them. (Version 4 centred them on prior shares $\pi^0_b = \hat N_b/N_P$
+  from the same survey totals that are in $Y$, which used those totals
+  twice.)
+* **Overdispersion $\kappa$.** Given the totals,
+  $C_b \sim \mathrm{DirMult}(N_b, \kappa s_b p_b)$ means
+  $\tilde p_b \sim \mathrm{Dirichlet}(\kappa s_b p_b)$, then
+  $C_b \sim \mathrm{Multinomial}(N_b, \tilde p_b)$: a real block's
+  composition scatters around the model's family before its people are
+  drawn.
+  - Moments (standard): $\mathbb E\, C_b = N_b p_b$,
+    $\mathrm{Cov}\, C_b = \varphi_b N_b(\mathrm{diag}\,p_b - p_b p_b')$,
+    $\varphi_b = (N_b + \kappa s_b)/(1 + \kappa s_b) \approx N_P/\kappa$,
+    the same for every block ("self-weighted": concentration
+    $\kappa s_b$).
+  - $\kappa \to \infty$ gives independent units. $\kappa = n_P$, the PUMA's
+    number of records, reproduces the standard PMEDM's entropy weight;
+    steps 4b and 4c chose $\kappa \approx n_P/4$ by the held-out tables.
+* **Where this form comes from** (derived here). Version 4's
+  Dirichlet-multinomial over (block, atom) pairs with its prior shares
+  replaced by the blocks' own realized shares,
+  $\Pr(C) \propto \mathrm{DirMult}(C; N_P, \kappa q(C))$ with
+  $q_{bi}(C) = (N_b(C)/N_P)\,p_{bi}$, factorizes exactly (aggregation
+  property) into the blocks' composition above and a density on the totals
+  which, for $N_P \gg \kappa$ and every $\kappa s_b$ large (Stirling), is
+  close to the $\mathrm{Dirichlet}(\tfrac12)$ kernel. The specification
+  states that prior directly. It is a two-level Dirichlet tree: a near-flat
+  root and the blocks' composition below it.
 * $\Sigma$ is the table covariance, used everywhere below:
   $$
   \Sigma = \Sigma_{\mathrm{survey}} + \omega^2 I,
@@ -149,50 +160,88 @@ no tables.
 
 ## Posterior
 
+**The model's posterior** is
+
 $$
-\pi(\theta_P, U, \tau, C \mid Y, \mathcal P) \propto
-  \pi(\theta_P)\, \pi(\tau)\, \prod_b \pi(u_b \mid \tau)\;
+\pi(\theta_P, U, \tau, s, C \mid Y, \mathcal P) \propto
+  \pi(\theta_P)\, \pi(\tau)\, \prod_b \pi(u_b \mid \tau)\; \pi(s)\;
   e^{\ell_P(\theta_P)}
-  \mathrm{DirMult}\big(C;\, N_P, \kappa\, q(\theta_P, U)\big)\;
+  \prod_b \mathrm{DirMult}\big(C_b;\, N_b, \kappa s_b p_b\big)\;
   \exp\!\Big\{-\tfrac12\, e'\Sigma^{-1} e\Big\},
 $$
 
-with $e = Y - \mathcal A(C)$ and $U = (u_1, \dots, u_B)$.
+with $e = Y - \mathcal A(C)$, $U = (u_1, \dots, u_B)$ and $N_b = N_P s_b$.
+In it every table informs the block totals, and so does the model's
+composition: a person table measures units times mean household size under
+the composition. Where a block's composition departs from the model's family
+(as real blocks do), that departure pulls its total (step 4d).
+
+**The cut posterior,** used for inference, keeps the totals from that
+contamination. Two modules, the feedback from the second to the first cut:
+
+1. **Totals.** $x_b$, block $b$'s direct unit total (the sum of its
+   unit-type cells: households and group-quarters persons), with its survey
+   covariance $\Sigma_x = A_u \Sigma_{\mathrm{survey}} A_u'$ ($A_u$ sums each
+   block's unit-type cells; no model-gap term, since no model enters). With
+   $x \sim \mathcal N(N, \Sigma_x)$, a flat prior on the shares and
+   $\sum_b N_b = N_P$ known (standard Gaussian conditioning on a linear
+   constraint):
+   $$
+   N \mid x \sim \mathcal N\Big(x + \Sigma_x \mathbf 1\,\frac{N_P - \mathbf 1'x}{\mathbf 1'\Sigma_x\mathbf 1},\;
+   \Sigma_x - \frac{\Sigma_x \mathbf 1\mathbf 1'\Sigma_x}{\mathbf 1'\Sigma_x\mathbf 1}\Big).
+   $$
+2. **Composition given the totals:** the model's posterior with $N$ fixed,
+   $\pi(\theta_P, U, \tau, C \mid N, Y, \mathcal P)$, over all tables
+   (unit-type cells included: they still inform, for example, the split
+   between households and group quarters within a block).
+
+$$
+\pi_{\mathrm{cut}}(N, \theta_P, U, \tau, C \mid Y, \mathcal P) =
+  p(N \mid x)\; \pi(\theta_P, U, \tau, C \mid N, Y, \mathcal P).
+$$
+
+It is not the joint posterior of one model. It is the remedy for one module
+being misspecified and contaminating another (cut distributions; Plummer
+2015, as recalled, to verify). On simulation S it is calibrated in every
+class; the model's own posterior (free shares, step 4d) is not, for the
+totals.
 
 * Any realized table, published or not, is a linear functional $g'C_b$
   (for example $g = T e_c$ for cell $c$).
 * $x_b \mid Y$ is the posterior over $C_b$ read as weighted records.
 * $z_b \mid Y$ is its image $\sum_i C_{bi}\,\delta_{z_i} / N_b$, and the
-  block total $N_b \mid Y$ is part of the posterior.
+  block total $N_b \mid Y$ comes from the totals module.
 
 ## Collapsed likelihood for the parameters
 
-Integrating $C$ out with a central-limit approximation (derived here):
+Given the totals, integrating $C$ out with a central-limit approximation
+(derived here):
 
 $$
-Y \mid \theta_P, U \;\dot\sim\; \mathcal N\big(m,\, S\big),
+Y \mid \theta_P, U, N \;\dot\sim\; \mathcal N\big(m,\, S\big),
 \qquad
-m = N_P\, v,
+m = \sum_b N_b\, D_b T' p_b,
 \qquad
-v = \sum_b \pi^0_b D_b T' p_b,
+S = \Sigma + \sum_b \varphi_b N_b\, D_b V_b D_b',
+\quad V_b = T'(\mathrm{diag}\,p_b - p_b p_b')T .
 $$
 
-$$
-S = \Sigma + \varphi N_P\Big[\sum_b \pi^0_b D_b T'\mathrm{diag}(p_b) T D_b'
-  - v v'\Big].
-$$
-
-$S$ adds the variance of realizing the PUMA's $N_P$ individuals over
-(block, atom) pairs, overdispersed by $\varphi$, to the table covariance
-$\Sigma$. The $-vv'$ term couples blocks (their totals sum to $N_P$); it is
-rank one. Both $m$ and $S$ depend on the parameters, so
+$S$ adds the variance of realizing each block's $N_b$ individuals,
+overdispersed by $\varphi_b$, to the table covariance $\Sigma$. Given the
+totals the blocks are independent: $S$ is block-diagonal by tract plus the
+survey's low rank (step 2's engine, with separate weights $N_b$ for the mean
+and $\varphi_b N_b$ for the covariance). Both $m$ and $S$ depend on the
+parameters, so
 
 $$
-\log \pi(\theta_P, U, \tau \mid Y, \mathcal P) \approx
+\log \pi(\theta_P, U, \tau \mid N, Y, \mathcal P) \approx
   \log\pi(\theta_P) + \log\pi(\tau) + \sum_b \log\pi(u_b\mid\tau)
   + \ell_P(\theta_P)
   - \tfrac12 (Y - m)' S^{-1} (Y - m) - \tfrac12 \log\det S + \text{const}.
 $$
+
+(With free shares, as in the model's own posterior, $N_b = N_P s_b$ and the
+shares join the parameters, with the $\mathrm{Dirichlet}(\tfrac12)$ prior.)
 
 ## Inference
 
@@ -200,157 +249,127 @@ $$
 
 0. $\hat\theta_P = \arg\max\, \ell_P(\theta_P) + \log\pi(\theta_P)$, from the
    PUMA's records alone (concave).
-1. $(\hat U, \hat\tau)$, and optionally a joint update of $\theta_P$,
-   maximizing the collapsed posterior.
-2. Given the parameters, the realized composition's MAP (fractional,
-   $r = C/N_P$ over (block, atom) pairs) is the conditional PMEDM (derived
-   here, to second order, with $W = N_P/\varphi \approx \kappa$):
+1. The totals module's mean $\bar N$ (above).
+2. $(\hat U, \hat\tau)$ given $\bar N$, maximizing the collapsed posterior;
+   in practice $\tau$ (and $\kappa = c\,n_P$) chosen on a grid by the
+   held-out tables' predictive log density (steps 3b, 4c).
+3. Given the parameters, the realized composition's MAP (fractional,
+   $r = C/N_P$ over (block, atom) pairs) with the block totals fixed at
+   $\bar N$ is the conditional PMEDM (derived here, to second order, with
+   $W = N_P/\varphi$ and $\bar s_b = \bar N_b/N_P$):
 
 $$
-\min_{r} W\, \mathrm{KL}\big(r \,\Vert\, q\big)
-  + \tfrac12\, e'\Sigma^{-1}e,
+\min_{r} W \sum_b \mathrm{KL}\big(r_{b\cdot} \,\Vert\, \bar s_b\, p_b\big)
+  + \tfrac12\, e'\Sigma^{-1}e
+\quad \text{s.t. } \textstyle\sum_i r_{bi} = \bar s_b,
 \qquad e = N_P \textstyle\sum_b D_b T' r_b - Y,
 $$
 
 $$
 f(\lambda) = \lambda' Y
-  + W \log \sum_{b,i} q_{bi}\, e^{-\varphi\, t(x_i)' D_b' \lambda}
+  + W \sum_b \bar s_b \log \sum_i p_{bi}\, e^{-(N_P/W)\, t(x_i)' D_b' \lambda}
   + \tfrac12 \lambda'\Sigma\lambda,
 \qquad
-r_{bi} \propto q_{bi}\, e^{-\varphi\, t(x_i)' D_b' \lambda}.
+r_{bi} \propto \bar s_b\, p_{bi}\, e^{-(N_P/W)\, t(x_i)' D_b' \lambda},
 $$
 
-This is the existing PMEDM dual over statewide atoms, with base
-$q_{bi} = \pi^0_b p_{bi}$ in place of the design distribution and the block
-shares free, as in the PMEDM. With $\kappa = n_P$ and no type tilt it is
-the standard PMEDM: its primal is $n\,\mathrm{KL}(r \Vert q)$ over (unit,
-zone) pairs with $q_{ib} = d_i N_b/N$. Its $\Sigma$ includes $\omega^2 I$,
-the standard PMEDM's multiplier prior in covariance form.
-Its size is $B \times M$ pairs per PUMA (about 15 million for 100 block
-groups): GPU scale.
+one normalizer per block. With the block shares free instead of fixed it
+is the existing PMEDM dual with base $\bar s \otimes p$, whose
+$\mathrm{KL}(\pi \Vert \bar s)$ term lets the shares float; with
+$\kappa = n_P$, no type tilt and $p_b$ the design distribution it is the
+standard PMEDM, whose primal is $n\,\mathrm{KL}(r \Vert q)$ over (unit, zone)
+pairs with $q_{ib} = d_i N_b/N$. Its $\Sigma$ includes $\omega^2 I$, the
+standard PMEDM's multiplier prior in covariance form. Its size is
+$B \times M$ pairs per PUMA (about 15 million for 100 block groups): GPU
+scale.
 
 ### Stage 2: Laplace for the parameters, Gaussian conditioning for $C$
 
-* $(\theta_P, U) \sim \mathcal N(\text{MAP}, H^{-1})$, with $H$ the Hessian
-  of the negative collapsed log posterior (at $\hat\tau$).
-* Given the parameters, approximate $C$ by its Dirichlet-multinomial
-  moments, $\mathbb E C = N_P q$ and
-  $\mathrm{Cov}\, C = \varphi N_P(\mathrm{diag}\,q - qq')$ over (block,
-  atom) pairs, and condition on $Y$. For any functional $g'C$, with $g$ over
-  pairs (for example a block's cell, or its total $N_b$) (derived here):
+* Totals: draws from the totals module.
+* $U \sim \mathcal N(\hat U, H^{-1})$, with $H$ the Gauss–Newton information
+  of the collapsed likelihood plus $\tau^{-2} I$, at $\bar N$ ($\hat U$'s
+  dependence on $N$ within the totals' uncertainty, about 1%, is ignored).
+* Given a draw, each block's composition is conditioned on $Y$ given its
+  total, blocks independent before conditioning (derived here). For a
+  functional $g$ of block $b$, with $Eg = g'p_b$, $E_2 = (g\circ g)'p_b$,
+  $k_1 = T'\mathrm{diag}(p_b)\,g$, $\kappa_g = k_1 - Eg\, T'p_b$,
+  $r = S^{-1}(Y - m)$ and $G_b = [S^{-1}]_{bb}$:
 
 $$
 \begin{aligned}
-\mathbb E[g'C \mid \cdot, Y] &= N_P\, g'q + k' S^{-1}(Y - m),\\
-\mathrm{Var}[g'C \mid \cdot, Y] &= \varphi N_P\, g'(\mathrm{diag}\,q - qq')\,g - k' S^{-1} k,\\
-k &= \varphi N_P\, \mathcal D T'(\mathrm{diag}\,q - qq')\, g,
+\mathbb E[g'C_b \mid \cdot, Y] &= N_b\, Eg + \varphi_b N_b\, \kappa_g' r_b,\\
+\mathrm{Var}[g'C_b \mid \cdot, Y] &= \varphi_b N_b (E_2 - Eg^2) - (\varphi_b N_b)^2\, \kappa_g' G_b \kappa_g .
 \end{aligned}
 $$
 
-  with $\mathcal D T'$ mapping pair counts to published rows
-  ($\sum_b D_bT'C_b$).
+  A block's total ($g = 1$) is then exactly $N_b$: all its uncertainty is
+  in the totals module.
+* Mix over draws. This gives closed-form intervals for every table, every
+  rare-group total and every joint-structure cell, including tables never
+  fitted.
+* Weak spot: small counts, where the Gaussian puts mass below zero and
+  departs from the exact posterior (step 5's gate), and no draws of $C$
+  itself. Hence stage 3.
 
-* Mix over parameter draws. This gives closed-form intervals for every
-  table, every rare-group total and every joint-structure cell, including
-  tables never fitted.
-* Weak spot: very small counts, where the Gaussian can put mass below zero.
+### Stage 3: sampling the realized populations
 
-### Stage 3: sampling
+The target's draws: non-negative integer counts on real records
+(`PLAN_latent_step5.md`). **A hybrid:** the parameters and the block totals
+are drawn as in stage 2 (totals module, Laplace for $U$), and $C$ given each
+draw is sampled exactly by MCMC. Full MCMC over the parameters (collapsed
+HMC, or Gibbs alternating with $C$) is deferred.
 
-> **To revise for version 4 (step 5).** The samplers below were written for
-> version 3's multinomial per block with fixed $N_b$. Under version 4, moves
-> relabel an individual's (block, atom) pair, the prior ratio becomes the
-> Dirichlet-multinomial's, and the parameters' conditional given $C$ is no
-> longer the simple exponential-family form. They are kept as the starting
-> point.
+**Target given a draw:**
+$\pi(C \mid \cdot, Y) \propto \prod_b \mathrm{DirMult}(C_b; N_b, \kappa s_b p_b)\,
+\exp\{-\tfrac12 e'\Sigma^{-1}e\}$. The totals are fixed within a draw, so
+moves stay within a block.
 
-**Parameters (all variants): HMC.** Two schemes.
+**State:** each block's $N_b$ individuals as atom labels, the counts, the
+residual $e = Y - \mathcal A(C)$ and what is needed of $\Sigma^{-1}e$.
 
-* **Collapsed.** HMC on the collapsed posterior of $(\theta_P, U, \tau)$;
-  then $C$ given each draw. Exact up to the central-limit approximation.
-* **Data augmentation (Gibbs).** Alternate the parameters given $C$ and
-  $C \mid \text{parameters}, Y$. Given $\tau$, the first is log-concave:
-
-$$
-\log \pi(\theta_P, U \mid C, \tau, \mathcal P) =
-  \log\pi(\theta_P) + \sum_b \log\pi(u_b\mid\tau) + \ell_P(\theta_P)
-  + \sum_b \big[\theta_P' H' C_b + u_b' G' C_b - N_b A_P(\theta_P, u_b)\big]
-  + \text{const},
-$$
-
-  with $H$ and $G$ the matrices with rows $h(z_i)'$ and $g(z_i)'$. It is exact for the model, but
-  may mix slowly when $N_b$ is large, because the parameters and $C$ are
-  then tightly coupled.
-
-**$C \mid \text{parameters}, Y$: three options.** All use the residual
-$e = Y - \mathcal A(C)$. Moving one individual of area $b$ from atom $i$ to
-atom $j$ changes it by $d = D_b\{t(x_j) - t(x_i)\}$, with likelihood ratio
+**Move.** In block $b$ pick an individual uniformly (its atom $i$), propose
+atom $j \sim Q$, accept with probability (derived here; checked by
+enumeration of exact posteriors)
 
 $$
-L_{ij} = \exp\{d'\Sigma^{-1}e - \tfrac12 d'\Sigma^{-1}d\}.
+\alpha = \min\Big\{1,\;
+\frac{C_{bj} + \kappa s_b p_{bj}}{C_{bi} - 1 + \kappa s_b p_{bi}}\;
+\frac{Q_i(C')}{Q_j(C)}\;
+\exp\{d'\Sigma^{-1}e - \tfrac12 d'\Sigma^{-1}d\}\Big\},
+\qquad d = D_b\{t(x_j) - t(x_i)\},
 $$
 
-The state is the $N_b$ individuals' labels, whatever the number of atoms.
+$C'$ the state after the move ($\kappa = \infty$: the first factor is
+$p_{bj}/p_{bi}$).
 
-**(i) Swap MCMC.** Pick an individual uniformly (an atom-$i$ individual
-with probability $C_{bi}/N_b$), propose atom $j \sim Q$, and accept with
-probability (derived here; the count terms cancel)
+**Proposals,** a mixture whose state-dependent parts are evaluated exactly
+at $C$ and $C'$:
 
-$$
-\alpha = \min\Big\{1,\; \frac{p_{bj}\, Q_i}{p_{bi}\, Q_j}\, L_{ij}\Big\}.
-$$
+* (a) occupancy: another individual's atom in the same block,
+  $Q_j = C_{bj}/N_b$ (alone it cannot reach empty atoms: reducible; used
+  only in the mixture);
+* (b) the realized MAP $\hat r_b$, fixed within a draw: a PMEDM-shaped
+  proposal that already reflects the tables and reaches rare types;
+* (c) the superpopulation $p_b$;
+* (d) if (a)–(c) mix too slowly: tables-informed, locally balanced,
+  $Q_j(C) \propto p_{bj}\exp\{\tfrac12\, t(x_j)'D_b'\Sigma^{-1}e(C)\}$, with
+  its reverse normalizer (references, to verify: Zanella 2020, *JASA*,
+  locally balanced proposals; Grathwohl et al. 2021, Gibbs with
+  gradients). Each move needs scores over all atoms: GPU-friendly.
 
-* With $Q = p_b$, $\alpha = \min\{1, L_{ij}\}$.
-* With $Q = \hat r_b$ (the stage 1 MAP), proposals already reflect the
-  tables.
-* Cost per move: $O(J)$, plus updating $\Sigma^{-1}e$ (low rank plus
-  diagonal).
-* Risk: rare-type atoms are rarely proposed, so rare cells mix slowly.
+**Linear algebra.** $d$ touches only block $b$'s rows and the nonzero cells
+of $t(x_j) - t(x_i)$. With $\Sigma$ block-diagonal by block (simulation S),
+each block's $\Sigma^{-1}$ is held dense and blocks move independently in
+parallel. With the survey's replicate covariance coupling blocks,
+$\Sigma = D + LL'$ (rank about 80): keep $e$, $z = L'D^{-1}e$ and
+$K^{-1}z$ ($K = I + L'D^{-1}L$); a move costs about
+$\mathrm{rank}\times\mathrm{nnz}(d) + \mathrm{rank}^2$, and blocks move in a
+random scan within a chain (derived here).
 
-**(ii) Gradient-informed swap.** As (i), but the proposal depends on the
-current state through a first-order (locally balanced) score:
-
-$$
-Q_j(C) \propto p_{bj}\, \exp\{\tfrac12\, t(x_j)' D_b' \Sigma^{-1} e(C)\},
-\qquad
-\alpha = \min\Big\{1,\; \frac{p_{bj}\, Q_i(C')}{p_{bi}\, Q_j(C)}\, L_{ij}\Big\}.
-$$
-
-* The proposal is a PMEDM-shaped tilt of the block superpopulation,
-  refreshed by the current misfit, so it targets atoms that reduce misfit,
-  including rare types.
-* Cost: one product $T\,(D_b'\Sigma^{-1}e)$ of size $M \times J$ for the
-  scores, and one more for the reverse normalizer $Q(C')$. GPU-cheap; the
-  scores can be reused over several moves while $e$ changes little.
-* Exact, with integer counts. References (to verify): Zanella (2020, JASA),
-  locally balanced proposals; Grathwohl et al. (2021), Gibbs with
-  gradients.
-
-**(iii) Continuous HMC on a relaxation.** Replace $C_b$ by $N_b r_b$ with
-$r_b$ on the simplex, density
-$\propto \exp\{-N_b \mathrm{KL}(r_b \Vert p_b) - \tfrac12 e'\Sigma^{-1}e\}$,
-sampled in softmax coordinates (Jacobian $\prod_i r_{bi}$).
-
-* Smooth, standard HMC, and positivity is kept.
-* Agrees with the multinomial only to second order. With statewide atoms,
-  $M \approx 155{,}000 \gg N_b$, so nearly every atom holds 0 individuals,
-  where Stirling's approximation fails. The relaxation is poor at the atom
-  level (sums over many atoms may still be fine).
-* Dimension $M$ per area.
-* If the parameters are sampled jointly with $r$, the relaxation's
-  normalizer depends on them; to leading order
-  $\log Z \approx \tfrac12 \sum_i \log p_{bi} + \text{const}$
-  (derived here, Laplace).
-
-| | exact for the model | integer | state size | main risk |
-|---|---|---|---|---|
-| (i) swap | yes | yes | $N_b$ labels | slow mixing of rare cells |
-| (ii) gradient-informed swap | yes | yes | $N_b$ labels | cost of scores and normalizers |
-| (iii) continuous HMC | no (relaxation) | no | $M$ fractions | poor at small counts; nearly all atoms empty |
-
-Plan: stage 2 first; (ii) if rare-group coverage fails; (i) as its simple
-baseline; (iii) only if both mix badly. Choose by effective samples per
-second at real block-group sizes.
+**Implementation** (step 5): one chain per parameter draw; a compiled
+kernel (numba), chains in parallel. A continuous relaxation of $C$ on the
+simplex with HMC (agreeing with the multinomial only to second order, poor
+at the atom level where nearly every atom is empty) is set aside.
 
 ## Outputs
 
@@ -369,8 +388,11 @@ second at real block-group sizes.
   - Support: the PUMA's own records vs statewide atoms with the PUMA tilt.
   - MAP: per-zone joint structure (TVD, log-odds-ratio error), rare-group
     totals and spread, misfit in SE units, transfer between table sets.
-  - Posterior: coverage of 50% and 90% intervals for held-out cells and
-    rare-group totals.
+  - Posterior: coverage of 50% and 90% intervals for fitted and held-out
+    cells, joint cells, rare-group totals and block totals, with $Y$ drawn
+    with survey error around a realized truth (steps 4–4e).
+  - Stage 3: exactness by enumeration of small posteriors; agreement with
+    stage 2 where the Gaussian is accurate; mixing (step 5).
 
 ## Comments: open forks
 
@@ -396,11 +418,20 @@ changes the generative model above is a model change.
    records' $x$ from $z$ across PUMAs.
 6. **Integer or fractional** realized populations as the reported product.
 7. **Overdispersion $\kappa$.** $\kappa = n_P$ (the PMEDM-equivalent) or
-   $\kappa = c\,n_P$ with $c$ chosen without truth (step 4b). The
+   $\kappa = c\,n_P$ with $c$ chosen without truth; steps 4b and 4c chose
+   $c \approx 0.25$ by the held-out tables' predictive log density. The
    realized-population MAP's entropy weight is $N_P/\varphi \approx \kappa$.
-8. **Prior shares $\pi^0$.** From published block-group unit estimates, or
-   from counts (for example the decennial census), and how much weight they
-   get. $N_P$ is known; block totals are random.
+8. **Block totals.** Version 5: a weak prior on the shares and, for
+   inference, the totals module (the unit-type cells and $N_P$). Counts
+   independent of $Y$ (for example 2020 decennial housing-unit counts, held
+   invariant at block level, with a date gap and occupancy between them)
+   could enter the totals module as a second, independent measurement. The
+   prior's parameter $a$ ($\tfrac12$ or 1) should hardly matter; to confirm.
+   **Open for the real application:** group quarters are published only by
+   tract (`B26001`), so block-group unit totals are not directly available.
+   The totals module then needs a two-level form (tract group-quarters
+   totals, split among the tract's block groups by the composition module,
+   a partial cut) or another source.
 9. **Calibration test.** The regional run's $Y$ equals the truth's tables
    exactly. Testing coverage needs $Y$ drawn with survey error around the
    truth.
@@ -423,4 +454,12 @@ changes the generative model above is a model change.
 16. **Set aside.** Mean coordinates and $G_T$; the PMEDM dual posterior; the
     donor kernel; random table rotation.
 17. **Citations to verify.** The discrete-sampler references; scaling
-    pseudo-likelihood weights to the sample size.
+    pseudo-likelihood weights to the sample size; cut distributions
+    (Plummer 2015).
+18. **Cut or full posterior.** The cut posterior is used because the
+    model's composition pulls the totals under the full posterior (step 4d).
+    A better-specified composition (for example per-margin overdispersion,
+    a Dirichlet tree over table margins) might make the cut unnecessary.
+19. **$\hat U$ at the totals' mean.** Stages 2 and 3 take $U$'s Laplace
+    approximation at the totals module's mean, ignoring $\hat U$'s
+    dependence on the totals within their uncertainty (about 1%).

@@ -1,9 +1,11 @@
 # Model version 5 (draft): free block shares
 
-> **Status: draft, for review.** A proposed change to `MODEL_latent.qmd`
-> (version 4). Nothing here is fixed. On approval it is merged into
-> `MODEL_latent.qmd` as version 5, with an entry in its change table, and
-> this file is removed. Notation follows `MODEL_latent.qmd`: PUMA $P$,
+> **Status: merged.** Merged into `MODEL_latent.qmd` as version 5 after
+> step 4e (free shares as the model, the cut posterior of §7 for inference).
+> `MODEL_latent.qmd` is the specification; this file is kept, unchanged
+> below, for its derivations and because fixed plans and code cite its
+> sections. (It was to be removed on merging; it is kept so those citations
+> still resolve.) Notation follows `MODEL_latent.qmd`: PUMA $P$,
 > blocks $b$ (zones in the regional run), atoms $i$, $N_P$ units, $n_P$
 > records.
 >
