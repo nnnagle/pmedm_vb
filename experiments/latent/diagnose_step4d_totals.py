@@ -22,6 +22,12 @@ it). All three share S's survey draws, so the direct estimates are the same.
    truth and the sample, so a pull that persists by zone is systematic: it
    comes from the zone itself (its composition against the model), not from
    that replicate's survey error.
+3. **The pull split in two** (added after the first run): the direct
+   estimates rescaled so that the region's zones sum to the known ``N_A``
+   (the true region total in the simulation) are the constraint's own
+   estimator, with no model in it. ``pull = constraint part (rescaled -
+   direct) + model part (posterior mean - rescaled)``. The rescaled
+   estimator's error is reported beside the direct one.
 
 Writes ``<root>/diagnostics/totals_by_unit.csv`` and
 ``<root>/diagnostics/totals_summary.txt``.
@@ -82,6 +88,11 @@ def main() -> None:
     f["sd_rel"] = f["sd"] / f["truth"]
     f["direct_se_rel"] = f["direct_se"] / f["truth"]
     f["direct_z"] = (f["direct"] - f["truth"]) / f["direct_se"]
+    unit = f.groupby(["arm", "region", "replicate"])
+    f["rescaled"] = f["direct"] * unit["truth"].transform("sum") / unit["direct"].transform("sum")
+    f["rescaled_err"] = (f["rescaled"] - f["truth"]) / f["truth"]
+    f["constraint_part"] = (f["rescaled"] - f["direct"]) / f["truth"]
+    f["model_part"] = (f["mean"] - f["rescaled"]) / f["truth"]
     for col in ("cover90", "cover50"):
         f[col] = f[col].astype(bool)
 
@@ -95,13 +106,16 @@ def main() -> None:
         "rms_rel_error": [float(np.sqrt(np.mean(d["survey_err"] ** 2)))],
         "mean_rel_se": [float(d["direct_se_rel"].mean())],
         "mean_rel_error": [float(d["survey_err"].mean())]}, index=["direct (HT)"])
+    direct.loc["rescaled to N_A", ["n", "rms_rel_error", "mean_rel_error"]] = [
+        len(d), float(np.sqrt(np.mean(d["rescaled_err"] ** 2))),
+        float(d["rescaled_err"].mean())]
     by_region_direct = d.assign(inside=np.abs(d["direct_z"]) <= Z90,
                                 z2=d["direct_z"] ** 2).groupby("region").agg(
         n=("inside", "size"), cover90=("inside", "mean"), mean_z2=("z2", "mean"))
     by_region_direct["rms_z"] = np.sqrt(by_region_direct.pop("mean_z2"))
 
     # 2. decomposition per arm
-    rows = {}
+    rows, split = {}, {}
     for arm, g in f.groupby("arm"):
         slope = float(np.polyfit(g["survey_err"], g["pull"], 1)[0])
         rows[arm] = {
@@ -117,7 +131,20 @@ def main() -> None:
             "survey_err_between_zone_share": persistence(g, "survey_err"),
             "mean_sd_rel": float(g["sd_rel"].mean()),
             "median_sd_over_direct_se": float((g["sd"] / g["direct_se"]).median())}
-    decomposition = pd.DataFrame(rows).T.reindex([a for a in ("FS", "S", "P0") if a in rows])
+        split[arm] = {
+            "rms_error": float(np.sqrt(np.mean(g["err"] ** 2))),
+            "rms_rescaled_error": float(np.sqrt(np.mean(g["rescaled_err"] ** 2))),
+            "rms_constraint_part": float(np.sqrt(np.mean(g["constraint_part"] ** 2))),
+            "rms_model_part": float(np.sqrt(np.mean(g["model_part"] ** 2))),
+            "corr_model_part_rescaled_err": float(np.corrcoef(g["rescaled_err"],
+                                                              g["model_part"])[0, 1]),
+            "slope_model_part_on_rescaled_err": float(
+                np.polyfit(g["rescaled_err"], g["model_part"], 1)[0]),
+            "model_part_between_zone_share": persistence(g, "model_part"),
+            "rescaled_err_between_zone_share": persistence(g, "rescaled_err")}
+    order = [a for a in ("FS", "S", "P0") if a in rows]
+    decomposition = pd.DataFrame(rows).T.reindex(order)
+    split_table = pd.DataFrame(split).T.reindex(order)
 
     out = args.root / "diagnostics"
     out.mkdir(parents=True, exist_ok=True)
@@ -130,7 +157,9 @@ def main() -> None:
                 "   by region", by_region_direct.round(3).to_string(), "",
                 "2. Each arm's posterior mean: error = survey error + pull (relative to the "
                 "truth); persistence = share of variance between zones",
-                decomposition.round(4).to_string(), ""]
+                decomposition.round(4).to_string(), "",
+                "3. The pull split: constraint part (direct rescaled to N_A - direct) and "
+                "model part (posterior mean - rescaled)", split_table.round(4).to_string(), ""]
     write_text(out / "totals_summary.txt", "\n".join(text) + "\n")
     print("\n".join(text))
 
