@@ -13,6 +13,7 @@
 > | 4 | 2026-11-23 | step 4b found K2 ($\kappa \approx n_A/4$) close to calibrated, with $\tau$ at its grid's edge; step 4c added (`PLAN_latent_step4c.md`): $(\tau, \kappa)$ chosen jointly, a wider band for never-used tables, and an optional post-stratified simulation |
 > | 5 | 2026-11-24 | step 4c failed only on zone totals, traced (arm P0) to the survey's totals used both in the prior shares and in $Y$; step 4d added (`PLAN_latent_step4d.md`, draft): the free-shares realized level of the draft model version 5 (`MODEL_latent_v5_draft.md`), one arm on simulation S |
 > | 6 | 2026-11-24 | step 4d (free shares) failed only on zone totals; its review found the model's composition pulling the totals and a totals module from the unit-type cells and $N_A$ alone calibrated; step 4e added (`PLAN_latent_step4e.md`, draft): the cut form of the draft model version 5 (`MODEL_latent_v5_draft.md` §7) |
+> | 7 | 2026-11-24 | step 5 made unconditional and redefined (`PLAN_latent_step5.md`, draft): the target is draws of the realized populations, which stage 2's Gaussian (real-valued, can go below zero) does not give, whatever step 4 finds. Piece C3 becomes an exact sampler for $C$ given the parameters, with the parameters drawn as in stage 2 (a hybrid); C4, full parameter MCMC, is deferred. Versions 1–6 had made step 5 conditional on rare groups failing, which conflated the posterior's accuracy for linear functionals with delivering the target |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -53,9 +54,13 @@
   weight $N_b$. About 15 million pairs per PUMA: GPU path.
 * **C2. Stage 2 Gaussian conditioning.** Closed form with B2's solver;
   batched solves for many functionals.
-* **C3. Samplers for $C$.** Swap and gradient-informed swap: incremental
-  residual updates, parallel by tract.
+* **C3. Samplers for $C$.** Exact MCMC for $C$ given a parameter draw:
+  swap moves within a zone with mixture proposals (occupancy, the realized
+  MAP, the superpopulation; tables-informed if needed), incremental residual
+  updates, chains batched (CPU or GPU). The target's draws come from here
+  (version 7).
 * **C4. Samplers for the parameters.** Collapsed HMC, or Gibbs with C3.
+  Deferred (version 7): the parameters are drawn as in stage 2.
 
 ### D. Validation
 
@@ -81,8 +86,8 @@ stop the work before the expensive pieces are built.
 | 4c | as 4b, with $(\tau, \kappa)$ chosen jointly | whether the posterior is calibrated with both chosen together | yes, as step 4 |
 | 4d | C2, D2 coverage under the draft model version 5 | whether free zone shares (the survey's totals used once) calibrate the zone totals without harming the other classes | yes, as step 4 |
 | 4e | as 4d, the cut form | whether totals from the unit-type cells and $N_A$ alone, with the composition fitted given them, calibrate every class | yes, as step 4 |
-| 5 | C3, C4 | only if step 4 fails for rare groups | yes |
-| 6 | D3 | the real application | yes |
+| 5 | C3 | draws of the realized populations: an exact sampler for $C$ given the parameters, checked against stage 2 and calibrated on the regional run | yes |
+| 6 | D3 | the real application, reporting draws of $C$ (step 5) | yes |
 
 ## Adopted defaults
 
