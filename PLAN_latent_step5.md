@@ -9,6 +9,7 @@
 > |---|---|---|
 > | 1 | 2026-11-24 | approved; every item of §7 as drafted (items 1 and 2 with the reasons now given) |
 > | 2 | 2026-11-25 | after the pilot (§8): proposal (d) is dropped; two moves are added, the user's kernel proposal (e) and exact two-atom pile moves (§3a); a phase 1b gate for them, and the pilot is rerun (§4). Thresholds unchanged |
+> | 3 | 2026-11-25 | after the second pilot (§8): pile pairs chosen from occupied records, as a Metropolis–Hastings move (§3b), with an ablation of the kernel's part in choosing the second record; warm-started parameter-draw chains; the mixing rule restated in terms of a compute budget of 30 minutes per regional unit (§5); a phase 1c gate and a third pilot (§4) |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -161,6 +162,42 @@ exact within-class Gibbs over whole classes (covered for pairs by the pile
 moves), tempering, the continuous relaxation; they are the options if the
 rerun pilot fails.
 
+## 3b. Pile pairs from occupied records (version 3)
+
+In the second pilot 66–71% of pile pairs held no units, because the first
+record is drawn from $\hat r_b$ and most such records are empty in a lumpy
+state. Version 3 draws the first record from the occupied ones.
+
+**The move** (derived here). In zone $b$: pick a unit uniformly (its record
+$i$, so $i$ with probability $C_{bi}/N_b$); pick $j$ from $i$ (by the kernel
+route of (e), or from $\hat r_b$ in the ablation); propose a new split of
+$n = C_{bi} + C_{bj}$ drawn exactly from the pair's conditional
+$\pi(m \mid n)$ of §3a; accept with probability
+
+$$
+\min\Big\{1,\ \frac{s(C')}{s(C)}\Big\},
+\qquad
+s(C) = \frac{C_{bi}}{N_b}\, Q(j \mid i) + \frac{C_{bj}}{N_b}\, Q(i \mid j),
+$$
+
+$s$ the probability of choosing the unordered pair $\{i, j\}$ in state $C$
+(either record can be picked first), $C'$ the proposed state. Because the
+split is proposed from its exact conditional, the target and proposal terms
+cancel and only the pair-choice probabilities remain. Every pair now holds
+units ($n \ge 1$).
+
+**Ablation.** The same move with the second record from $\hat r_b$ instead
+of the kernel route, to measure the kernel's contribution.
+
+**Warm-started parameter draws.** In the hybrid each parameter draw has its
+own chain, and a cold start needs about 300 sweeps of burn-in (§8), which
+for 50 draws would take most of the budget (§5). Version 3 starts each
+draw's chain from a burned-in state (the MAP chains' state after burn-in),
+with its zone totals adjusted to the draw's by adding units drawn from
+$\hat r_b$ to zones that gain and removing units at random from zones that
+lose, and then a short re-burn whose length the third pilot measures.
+Starting points do not affect the target; only the burn-in length does.
+
 ## 4. Phases
 
 1. **Exactness** (gate): enumeration checks as above for the full code path
@@ -190,6 +227,17 @@ beside the first pilot's, for the move settings chosen (kernel basis, pile
 moves per sweep), plus households by size (units with 1, …, 7+ persons and
 persons in households of 7+) among the traced functionals.
 
+**Version 3:** 1c. **Exactness of the occupied-record pile move**
+(gate): enumeration checks as phase 1, for the move alone and with the
+single-unit mixture, both second-record choices (kernel, $\hat r_b$), both
+covariance backends; broken variant: the move accepted without its
+pair-choice ratio. 2c. **The third pilot:** the same two regions and lengths
+as §8, two arms (second record by the kernel route; by $\hat r_b$), each
+reporting the diagnostics of the second pilot beside it, plus the warm
+start: parameter-draw chains started from the MAP chains' burned-in state,
+with the re-burn needed (by the log target's trace) and the projected
+effective draws per unit under the budget (§5).
+
 ## 5. Decision rules (fixed before results)
 
 * **Gate (phase 1):** total variation against enumeration within Monte
@@ -201,6 +249,17 @@ persons in households of 7+) among the traced functionals.
   build proposal (d); if that fails too, review. (Version 2: the first pilot
   failed this rule; (d) is replaced by §3a's moves, judged by the same rule
   in phase 2b; if they fail, review, with §3a's remaining options.)
+* **Mixing, version 3** (replaces the rule above from phase 2c; chosen
+  here). With the hybrid's settings (50 parameter draws per unit, chains
+  warm-started), on one 16-core node in **30 minutes per regional unit**:
+  - the projected effective draws per unit, from the pilot's effective
+    samples per second and its burn-in and re-burn costs, are at least 100
+    (bulk and tail) for the median functional of every class;
+  - $\hat R < 1.01$ for at least 95% of the functionals in every class, and
+    below 1.05 for all, at the MAP parameters.
+
+  Otherwise review; the options then are tempering, the exact Gibbs move
+  of a unit over all records (on a GPU), or the continuous relaxation.
 * **Agreement with stage 2 (phase 3):** for cells with posterior mean at
   least 50, mean differences within 0.1 posterior sd and variance ratios
   within $[0.8, 1.25]$ in at least 90% of cells (chosen here). A larger
@@ -256,3 +315,33 @@ threads.
 * **Fitted profiles:** 155,047 atoms have 94,463 distinct fitted profiles;
   46% of atoms share one, mostly in pairs (median class size 1, 99th
   percentile 13).
+
+## 8b. The second pilot (version 2's moves)
+
+As §8, with proposal mix 0.3/0.2/0.2/0.3 (kernel `kern30`) and one pile
+move per unit per sweep.
+
+* **Converged where the first pilot was not:** log target $\hat R$ 1.003
+  and 1.0006, burn-in about 300 sweeps.
+* **Mixing** (median bulk ESS per sweep; gain per second over the first
+  pilot; max $\hat R$):
+
+  | class | knoxville_core | nashville_core |
+  |---|---|---|
+  | fitted | 0.47; ×14; 1.003 | 0.27; ×9; 1.010 |
+  | rare | 0.26; ×7.7; 1.010 | 0.16; ×5.4; 1.052 |
+  | B1, B2, joint | 0.065–0.073; ×20; 1.018–1.030 | 0.015–0.020; ×14–15; 1.07–1.15 |
+  | households by size | 0.42; 1.002 | 0.24; 1.004 |
+
+  0.23 and 0.35 s per sweep (1.3–1.6 times the first pilot's). Version
+  2's mixing rule fails, narrowly in knoxville_core.
+* **Pile moves:** 66–71% of pairs held no units; mean pile among the rest
+  39–61 units, a third of drawn splits changed.
+* **Households by size:** persons from the B01001 cells match each record's
+  household size exactly; 1,483 households of 7 or more persons among the
+  atoms; their counts mix well.
+* **Agreement with stage 2,** now at Monte Carlo error 0.01–0.05 sd:
+  variances agree (median ratio 0.85–1.0), means differ by a median of
+  0.05–0.09 sd (households by size 0.16–0.17), tails to 1–1.9 sd; the 90%
+  rule fails on the tails. The sampler being exact, this is the Gaussian's
+  error; its consequence for calibration is phase 3's question.
