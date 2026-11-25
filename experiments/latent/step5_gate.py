@@ -1,5 +1,5 @@
-"""Step 5, phase 1 (and 1b): the exactness gate of the realized-population
-sampler (``PLAN_latent_step5.md`` version 2, §4 items 1 and 1b, §5 first
+"""Step 5, phase 1 (and 1b, 1c): the exactness gate of the realized-population
+sampler (``PLAN_latent_step5.md`` version 3, §4 items 1, 1b and 1c, §5 first
 bullet; :mod:`pmedm_vb.latent.sampler`, and its numba version
 :mod:`pmedm_vb.latent.sampler_numba`).
 
@@ -56,6 +56,26 @@ Prints a report; writes nothing. Three parts:
    state is recorded once per sweep at every sweep, whatever the moves did
    (a pile move with ``n = 0`` included). The last columns give the share of
    pile splits that changed the counts and the mean ``|Δ|``.
+
+   **Phase 1c** (``--engine numba`` only): the version 3 occupied-record
+   pile move (:mod:`pmedm_vb.latent.sampler_numba`'s module notes) on the
+   same toy and kernel, with the second record by the kernel route and by
+   ``r̂_b`` (restricted to the zone's support): the move alone (3 per zone
+   per sweep, no single-unit moves; irreducible on the toy, as the version 2
+   move: ``Q(j | i) > 0`` for every pair of support atoms under both choices,
+   and the split's conditional puts mass on every ``m``), with the
+   single-unit mixture with (e) (2 per zone per sweep), ``κ`` finite and
+   ``κ = ∞``; and with the kernel truncated at ``ε = 0.4``, which leaves
+   atom 1 out of every centre's table (checked: it is then never a second
+   record, so ``Q(j | 1) > 0 = Q(1 | j)`` for the other support atoms, and
+   zone 2 keeps its empty table), so the ratio's zero branch (``s(C') = 0``
+   when the split empties atom 1, always rejected) is exercised; the single
+   moves keep the chain irreducible there. Broken variants: the move alone accepted
+   without its pair-choice ratio, for both second-record choices. The state
+   is recorded at every sweep whatever the moves did (null pairs, rejected
+   and unchanged splits included: recording only after a change would bias
+   the frequencies). The last columns add the move's acceptance (of drawn
+   splits, and of proposed changes) and its share of null pairs.
 2. **Agreement with stage 2.** A synthetic problem where the Gaussian is
    accurate (run also with ``N`` and ``κ`` scaled by 1/4, where it is less
    so: a gap that is the Gaussian's should shrink about 2× from that run to
@@ -275,6 +295,36 @@ def phase1b_configs() -> list:
     ]
 
 
+def phase1c_configs() -> list:
+    """Phase 1c rows (module notes): the occupied-record pile move."""
+    from pmedm_vb.latent.sampler_numba import ProposalMix4
+
+    ker, ker_t = enumeration_kernel(), enumeration_kernel(0.4)
+    mix_e = ProposalMix4(0.3, 0.2, 0.2, 0.3)
+    rows = []
+    for second in ("kernel", "r_hat"):
+        occ = {"pile_first": "occupied", "pile_second": second}
+        rows += [
+            (f"occ pile alone (3/zone), 2nd {second}", mix_e, "finite", "full",
+             {"kernel": ker, "pile_moves": 3, "single_moves": False, **occ}),
+            (f"occ pile (2/zone) + mixture (e), 2nd {second}", mix_e, "finite", "full",
+             {"kernel": ker, "pile_moves": 2, **occ}),
+            (f"occ pile + mix (e), kappa=inf, 2nd {second}", mix_e, "inf", "full",
+             {"kernel": ker, "pile_moves": 2, **occ}),
+        ]
+    rows += [
+        ("occ pile + mix (e), 2nd kernel trunc eps 0.4", mix_e, "finite", "full",
+         {"kernel": ker_t, "pile_moves": 2, "pile_first": "occupied", "pile_second": "kernel"}),
+        ("BROKEN: occ pile alone, 2nd kernel, no s-ratio", mix_e, "finite", "full",
+         {"kernel": ker, "pile_moves": 3, "single_moves": False, "pile_first": "occupied",
+          "pile_second": "kernel", "pile_drop_ratio": True}),
+        ("BROKEN: occ pile alone, 2nd r_hat, no s-ratio", mix_e, "finite", "full",
+         {"kernel": ker, "pile_moves": 3, "single_moves": False, "pile_first": "occupied",
+          "pile_second": "r_hat", "pile_drop_ratio": True}),
+    ]
+    return rows
+
+
 def run_enumeration(args) -> None:
     n_chains, long, burn = args.enum_chains, args.enum_sweeps, args.enum_burn
     short = long // 10
@@ -293,19 +343,24 @@ def run_enumeration(args) -> None:
                ("BROKEN: mixture, correction dropped",
                 ProposalMix(0.4, 0.3, 0.3, drop_correction=True), "finite", "full")]
     configs = [(*c, {}) for c in configs]
-    if args.engine == "numba" and "b" in args.enum_sets:
-        if "a" not in args.enum_sets:
-            configs = []
-        configs += phase1b_configs()
-    elif args.engine == "torch":
-        print("  (torch engine: phase 1b's kernel proposal and pile moves are numba-only, skipped)")
+    if "a" not in args.enum_sets:
+        configs = []
+    if args.engine == "numba":
+        if "b" in args.enum_sets:
+            configs += phase1b_configs()
+        if "c" in args.enum_sets:
+            configs += phase1c_configs()
+    else:
+        print("  (torch engine: phases 1b and 1c (kernel proposal, pile moves) are numba-only, "
+              "skipped)")
     problems = {}
     for kap in ("finite", "inf"):
         inp, block, lowrank, extra = enumeration_problem(6.0 if kap == "finite" else np.inf)
         problems[kap] = (inp, block, lowrank, extra)
     header = (f"  {'backend':8s} {'proposal':46s} {'states':>6s} | {'TV short':>8s} "
               f"{'noise':>7s} {'ratio':>5s} | {'TV long':>8s} {'noise':>7s} {'ratio':>5s} | "
-              f"{'shrink':>6s} | accept a/b/c" + ("/e; piles changed, mean|D|"
+              f"{'shrink':>6s} | accept a/b/c" + ("/e; piles changed, mean|D|[; occ acc "
+                                                  "(of changes), null]"
                                                   if args.engine == "numba" else ""))
     print(header)
     print("  " + "-" * (len(header) - 2))
@@ -346,6 +401,10 @@ def run_enumeration(args) -> None:
             piles = getattr(res, "piles", None)
             if piles is not None:
                 rates += (f"; {piles['share_changed']:.2f}, {piles['mean_abs_delta']:.2f}")
+                if extra.get("pile_first") == "occupied":
+                    rates += (f"; occ acc {piles['acceptance']:.3f} (of changes "
+                              f"{piles['acceptance_of_changes']:.3f}), null "
+                              f"{piles['share_null']:.2f}")
             n_states = int((pi > 0).sum())
             print(f"  {backend:8s} {name:46s} {n_states:6d} | {out[0][0]:8.4f} {out[0][1]:7.4f} "
                   f"{out[0][0] / out[0][1]:5.2f} | {out[1][0]:8.4f} {out[1][1]:7.4f} "
@@ -686,9 +745,10 @@ def main() -> None:
                         default=[1, 2, 4, 8, 16], help="numba engine, part 3: thread counts")
     parser.add_argument("--quick", action="store_true", help="shorter runs (a smoke test)")
     parser.add_argument("--parts", default="123")
-    parser.add_argument("--enum-sets", default="ab",
+    parser.add_argument("--enum-sets", default="abc",
                         help="part 1 rows: a = phase 1 (version 1 moves), b = phase 1b (numba "
-                             "only: kernel proposal and pile moves); default both")
+                             "only: kernel proposal and pile moves), c = phase 1c (numba only: "
+                             "the occupied-record pile move); default all")
     args = parser.parse_args()
     q = args.quick
     args.enum_chains = 256

@@ -31,6 +31,22 @@
 #       --mix 0.3,0.2,0.2,0.3 --kernel-basis kern30 --pile-moves 1N \
 #       --out $R/latent/step5_pilot2 --compare-root $R/latent/step5_pilot --threads 16
 #
+# Phase 2c (PLAN_latent_step5.md version 3): the third pilot, two arms (the
+# pile pair's second record by the kernel route; by r_hat), occupied-record
+# pile pairs and warm-started parameter draws, beside the second pilot; the
+# two jobs can run at the same time (one node each):
+#
+#   sbatch experiments/latent/step5_pilot.sbatch \
+#       ... (the data arguments above) ... --sweeps 5000 --burn 1000 \
+#       --mix 0.3,0.2,0.2,0.3 --kernel-basis kern30 --pile-moves 1N \
+#       --pile-first occupied --pile-second kernel --draw-start warm \
+#       --out $R/latent/step5_pilot3_kernel --compare-root $R/latent/step5_pilot2 --threads 16
+#   sbatch experiments/latent/step5_pilot.sbatch \
+#       ... (the data arguments above) ... --sweeps 5000 --burn 1000 \
+#       --mix 0.3,0.2,0.2,0.3 --kernel-basis kern30 --pile-moves 1N \
+#       --pile-first occupied --pile-second r_hat --draw-start warm \
+#       --out $R/latent/step5_pilot3_rhat --compare-root $R/latent/step5_pilot2 --threads 16
+#
 # PMEDM_VB_ENV MUST point to the numba environment (pmedm_vb_numba: numba,
 # arviz, torch); the default environment below has no numba, and the job
 # stops if numba cannot be imported. sbatch passes the submitting shell's

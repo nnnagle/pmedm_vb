@@ -1,6 +1,7 @@
 """Exact MCMC for the realized populations given one parameter draw, compiled
 with numba (step 5, phase 2; ``PLAN_latent_step5.md`` version 1, §3–§4;
-version 2's kernel proposal and pile moves, §3a, below).
+version 2's kernel proposal and pile moves, §3a, and version 3's
+occupied-record pile move, §3b, below).
 
 The sampler of :mod:`pmedm_vb.latent.sampler` (its module notes state the
 target, the move, the acceptance ratio, the proposals and both covariance
@@ -176,10 +177,63 @@ the labels' rebuild, then the refresh. Pile statistics
 off-support pairs, splits drawn and changed, mean ``|Δ|`` and ``n``, and a
 histogram of ``n`` (bins by powers of 2).
 
+**Version 3: pile pairs from occupied records** (``PLAN_latent_step5.md``
+version 3, §3b; ``pile_first="occupied"``; off by default, and with the
+default ``pile_first="r_hat"`` the sampler makes exactly version 2's random
+choices). In zone ``b``: pick a unit uniformly, i.e. record ``i`` with
+probability ``C_bi/N_b``; pick ``j`` from ``i`` by the kernel route of (e)
+(``pile_second="kernel"``, the same tables) or from ``r̂_b`` restricted to
+the zone's support (``pile_second="r_hat"``, the ablation; the integer table
+of version 2's first record); draw ``m`` = the new ``C_bi`` from the pair's
+exact conditional ``π(m | n)``, ``n = C_bi + C_bj ≥ 1`` (the version 2
+conditional, :func:`_pile_split`); accept with probability
+
+    min{1, s(C')/s(C)},   s(C) = (C_bi/N_b) Q(j | i) + (C_bj/N_b) Q(i | j),
+
+``s(C)`` the probability of choosing the unordered pair ``{i, j}`` in state
+``C`` (either record first) and ``Q`` the second-record probability actually
+used: the kernel's ``Q_e`` from the integer tables (:func:`_kernel_q`, both
+directions) or ``r̂``'s table widths over 2⁵³.
+
+*Why it is exact* (derived here). The proposal ``C → C'`` (``C'`` differs
+from ``C`` only at ``i``, ``j``, with the same ``n``) can arise only from the
+pair ``{i, j}``, so its probability is ``s(C) π(C')/π_n``, ``π_n`` the sum of
+``π`` over the splits of ``n`` with the rest of the state held. Then
+``π(C) s(C) (π(C')/π_n) min{1, s(C')/s(C)} = π(C) π(C') min{s(C), s(C')}/π_n``
+is symmetric in ``C``, ``C'``: detailed balance. The target and the
+conditional's terms cancel, leaving the pair-choice ratio. A pair with
+``Q(i | j) = 0`` (e.g. a truncated kernel table) can give ``s(C') = 0``
+(``m = 0``), always rejected, which keeps the balance. ``j = i`` (or an empty
+kernel table) leaves the state as it is and is counted as a null pair; a
+drawn split equal to the current one (``m = C_bi``) is a no-op with ratio 1.
+The user's own check of this move against enumeration (5 atoms, 7 units,
+330 states, second record from a fixed random matrix): total variation 0.004
+at noise level, acceptance 0.976; without the ratio, 0.107 (reported by the
+user, not rerun here; the gate's phase 1c rows are this module's check).
+
+*Drawing ``i``* from the current counts, not from the labels: the labels
+are rebuilt only after a sweep's pile moves, so during them they lag the
+counts. Each slot (block) or each zone of a chain (low rank) builds a
+Fenwick tree of its counts at the start of its pile moves (``O(M)``), draws
+``u`` uniform below ``N_b`` (exactly, as the single moves) and finds the atom
+whose cumulative count interval holds ``u`` (``O(log M)``): probability
+``C_bi/N_b`` exactly. An accepted change updates the tree at ``i`` and
+``j``. The tree is a work array (``M + 1`` int64 per thread), not part of
+the state.
+
+*Costs* per move: ``O(log M)`` for ``i``, the second record as version 2
+(kernel) or one binary search (``r̂``), ``Q`` in both directions (kernel:
+two sums over the centres), the split ``O(n)`` as version 2 (but ``n ≥ 1``
+always: no empty pairs), and one uniform for the acceptance when the ratio
+is below 1. Statistics: as version 2, plus ``rejected`` (proposed changes
+rejected by the ratio), the acceptance and the share of null pairs
+(:meth:`NumbaSampler.pile_stats`).
+
 **Gate-only variants** (deliberately wrong samplers): ``ProposalMix4(...,
 kernel_reverse_wrong=True)`` uses ``Q_e(j | i)`` in place of ``Q_e(i | j)``
 in the reverse probability; ``pile_drop_likelihood=True`` draws the pile
-split from the prior part alone.
+split from the prior part alone; ``pile_drop_ratio=True`` accepts the
+occupied-record move's split without the pair-choice ratio.
 
 numba is imported when this module is imported if it is installed; without
 it the module still imports (so no other module needs numba), and
@@ -644,8 +698,11 @@ def _lowrank_moves(moves, labels, counts, Nslot, cumN, Ntot, Z, e, zr, yr, dinv,
 # --------------------------------------------------------------------------
 
 #: Columns of the pile statistics (per slot), then the histogram of ``n``.
+#: ``changed``: splits that changed the counts (for the occupied-record move:
+#: proposed changes accepted); ``rejected``: proposed changes rejected by the
+#: occupied-record move's pair-choice ratio (always 0 for the version 2 move).
 PILE_STATS = ("tried", "null_pair", "n_zero", "off_support", "drawn", "changed",
-              "sum_abs_delta", "sum_n")
+              "sum_abs_delta", "sum_n", "rejected")
 #: Histogram bins of ``n = C_bi + C_bj`` over non-null pairs (bit length).
 PILE_N_BINS = ("0", "1", "2-3", "4-7", "8-15", "16-31", "32-63", "64-127", "128+")
 _NP = len(PILE_STATS)
@@ -895,6 +952,260 @@ def _lowrank_piles(piles, counts, Nslot, Z, e, zr, yr, dinv, LD, Kinv, Tidx, Tva
                 for a in range(nj):
                     e[s, Tidx[j, a]] -= dl * Tval[j, a]
                 for a in range(ni):
+                    e[s, Tidx[i, a]] += dl * Tval[i, a]
+                for r in range(R):
+                    zr[c, r] -= dl * w[r]
+                    yr[c, r] -= dl * Kw[r]
+
+
+# --------------------------------------------------------------------------
+# Occupied-record pile moves (version 3, module notes)
+# --------------------------------------------------------------------------
+
+
+@njit(inline="always", cache=True)
+def _fen_build(tree, counts, s, M):
+    """Fenwick (binary indexed) tree of row ``s`` of the counts: ``tree[k]``
+    (1-based) holds the sum of the counts of atoms ``k - lowbit(k), …, k - 1``
+    (0-based atoms)."""
+    tree[0] = 0
+    for k in range(1, M + 1):
+        tree[k] = counts[s, k - 1]
+    for k in range(1, M + 1):
+        p = k + (k & -k)
+        if p <= M:
+            tree[p] += tree[k]
+
+
+@njit(inline="always", cache=True)
+def _fen_add(tree, M, a, v):
+    """Add ``v`` to atom ``a``'s count in the tree."""
+    k = a + 1
+    while k <= M:
+        tree[k] += v
+        k += k & -k
+
+
+@njit(inline="always", cache=True)
+def _fen_find(tree, M, top, u):
+    """The atom ``a`` with ``Σ_{l<a} C_l ≤ u < Σ_{l≤a} C_l`` (``0 ≤ u < N``;
+    ``top`` the largest power of 2 not above ``M``). Such an atom has
+    ``C_a ≥ 1``; with ``u`` uniform below ``N`` it is atom ``a`` with
+    probability ``C_a/N`` exactly."""
+    pos = 0
+    step = top
+    while step > 0:
+        nxt = pos + step
+        if nxt <= M and tree[nxt] <= u:
+            pos = nxt
+            u -= tree[nxt]
+        step >>= 1
+    return pos
+
+
+@njit(inline="always", cache=True)
+def _occ_pair(s, counts, N, prior, finite, tree, M, top, second_kernel, Ki, kn_ccum, kn_tab,
+              kn_atoms, kn_aoff, kn_cum, kn_coff, kn_aw, kn_wid, rng, r, pstats):
+    """The ordered pair ``(i, j)`` of an occupied-record pile move, ``n`` and
+    the two second-record weights ``q_ji ∝ Q(j | i)``, ``q_ij ∝ Q(i | j)`` (a
+    common positive factor left out; it cancels in the ratio); ``j < 0`` for a
+    null case (counted)."""
+    pstats[s, 0] += 1
+    i = _fen_find(tree, M, top, _below(rng, r, N))
+    if second_kernel:
+        j = _kernel_draw(i, kn_tab[s], kn_ccum, kn_atoms, kn_aoff, kn_cum, kn_coff, rng, r)
+    else:
+        j = _draw_cdf(Ki, s, _k53(rng, r))
+    if j < 0 or j == i:
+        pstats[s, 1] += 1
+        return i, -1, 0, 0.0, 0.0
+    n = counts[s, i] + counts[s, j]
+    pstats[s, _NP + _n_bin(n)] += 1
+    if not (_on_support(prior, s, i, finite) and _on_support(prior, s, j, finite)):
+        pstats[s, 3] += 1
+        return i, -1, 0, 0.0, 0.0
+    if second_kernel:
+        t = kn_tab[s]
+        qji = _kernel_q(i, j, t, kn_aw, kn_wid)
+        qij = _kernel_q(j, i, t, kn_aw, kn_wid)
+    else:
+        qji = np.float64(Ki[s, j + 1] - Ki[s, j])
+        qij = np.float64(Ki[s, i + 1] - Ki[s, i])
+    return i, j, n, qji, qij
+
+
+@njit(inline="always", cache=True)
+def _occ_accept(m, n, Ci, qji, qij, rng, r):
+    """Accept the split ``m`` with probability ``min{1, s(C')/s(C)}``,
+    ``s(C) ∝ C_bi Q(j | i) + C_bj Q(i | j)`` (module notes; ``N_b`` and the
+    common factor of the ``q`` cancel)."""
+    den = Ci * qji + (n - Ci) * qij
+    if not den > 0.0:                                     # cannot happen: j was drawn from i
+        return False
+    ratio = (m * qji + (n - m) * qij) / den
+    if ratio >= 1.0:
+        return True
+    return _uniform_open(rng, r) < ratio
+
+
+@njit(parallel=True, cache=True)
+def _block_piles_occ(piles, counts, Nslot, zone_of, e, g, P, diagq, Tidx, Tval, Tnnz, prior,
+                     finite, second_kernel, Ki, kn_ccum, kn_tab, kn_atoms, kn_aoff, kn_cum, kn_coff,
+                     kn_aw, kn_wid, droplik, dropratio, rng, pstats):
+    """``piles[s]`` occupied-record pile moves in every slot ``s`` (block
+    backend; stream ``s``, continuing after the slot's single moves)."""
+    S, M = counts.shape
+    top = 1
+    while top * 2 <= M:
+        top *= 2
+    for s in prange(S):
+        N = Nslot[s]
+        if N <= 0 or piles[s] <= 0:
+            continue
+        z = zone_of[s]
+        buf = np.empty(N + 1)
+        tree = np.empty(M + 1, dtype=np.int64)
+        _fen_build(tree, counts, s, M)
+        for _ in range(piles[s]):
+            i, j, n, qji, qij = _occ_pair(s, counts, N, prior, finite, tree, M, top,
+                                          second_kernel, Ki, kn_ccum, kn_tab, kn_atoms, kn_aoff,
+                                          kn_cum, kn_coff, kn_aw, kn_wid, rng, s, pstats)
+            if j < 0:
+                continue
+            lin = 0.0
+            quad = 0.0
+            if not droplik:
+                lin, quad = _block_lin_quad(s, z, i, j, g, P, diagq, Tidx, Tval, Tnnz)
+            Ci = counts[s, i]
+            m = _pile_split(n, Ci, prior[s, i], prior[s, j], finite, lin, quad, buf, rng, s)
+            pstats[s, 4] += 1
+            pstats[s, 7] += n
+            delta = Ci - m
+            if delta == 0:
+                continue
+            if not dropratio and not _occ_accept(m, n, Ci, qji, qij, rng, s):
+                pstats[s, 8] += 1
+                continue
+            pstats[s, 5] += 1
+            pstats[s, 6] += abs(delta)
+            counts[s, i] = m
+            counts[s, j] = n - m
+            _fen_add(tree, M, i, -delta)
+            _fen_add(tree, M, j, delta)
+            _block_apply(s, z, i, j, delta, e, g, P, Tidx, Tval, Tnnz)
+
+
+@njit(inline="always", cache=True)
+def _lowrank_lin_quad(s, b, c, i, j, e, yr, dinv, LD, Kinv, Tidx, Tval, Tnnz, w, Kw):
+    """``d'Σ⁻¹e`` and ``d'Σ⁻¹d`` for ``d = t_j - t_i`` in zone ``b`` of chain
+    ``c`` (low rank, Woodbury), filling ``w = L'D⁻¹d`` and ``Kw = K⁻¹w``
+    (needed for the update); the arithmetic of :func:`_lowrank_piles`."""
+    R = w.shape[0]
+    nj = Tnnz[j]
+    ni = Tnnz[i]
+    for r in range(R):
+        w[r] = 0.0
+    lin = 0.0
+    for a in range(nj):
+        cc = Tidx[j, a]
+        v = Tval[j, a]
+        lin += v * dinv[b, cc] * e[s, cc]
+        for r in range(R):
+            w[r] += v * LD[b, cc, r]
+    for a in range(ni):
+        cc = Tidx[i, a]
+        v = Tval[i, a]
+        lin -= v * dinv[b, cc] * e[s, cc]
+        for r in range(R):
+            w[r] -= v * LD[b, cc, r]
+    dd = 0.0
+    pa = 0
+    pb = 0
+    while pa < nj or pb < ni:
+        if pb >= ni or (pa < nj and Tidx[j, pa] < Tidx[i, pb]):
+            v = Tval[j, pa]
+            dd += v * v * dinv[b, Tidx[j, pa]]
+            pa += 1
+        elif pa >= nj or Tidx[i, pb] < Tidx[j, pa]:
+            v = Tval[i, pb]
+            dd += v * v * dinv[b, Tidx[i, pb]]
+            pb += 1
+        else:
+            v = Tval[j, pa] - Tval[i, pb]
+            dd += v * v * dinv[b, Tidx[j, pa]]
+            pa += 1
+            pb += 1
+    wy = 0.0
+    wKw = 0.0
+    for r in range(R):
+        acc = 0.0
+        for q in range(R):
+            acc += Kinv[r, q] * w[q]
+        Kw[r] = acc
+        wy += w[r] * yr[c, r]
+        wKw += w[r] * acc
+    return lin - wy, dd - wKw
+
+
+@njit(parallel=True, cache=True)
+def _lowrank_piles_occ(piles, counts, Nslot, Z, e, zr, yr, dinv, LD, Kinv, Tidx, Tval, Tnnz,
+                       prior, finite, second_kernel, Ki, kn_ccum, kn_tab, kn_atoms, kn_aoff,
+                       kn_cum, kn_coff, kn_aw, kn_wid, droplik, dropratio, rng, pstats):
+    """Occupied-record pile moves per chain ``c`` (low-rank backend; stream
+    ``c``): zone by zone, ``piles[c Z + b]`` in zone ``b``."""
+    n_chains = zr.shape[0]
+    R = zr.shape[1]
+    M = counts.shape[1]
+    top = 1
+    while top * 2 <= M:
+        top *= 2
+    Nmax = 1
+    for s in range(Nslot.shape[0]):
+        if Nslot[s] > Nmax:
+            Nmax = Nslot[s]
+    for c in prange(n_chains):
+        w = np.empty(R)
+        Kw = np.empty(R)
+        buf = np.empty(Nmax + 1)
+        tree = np.empty(M + 1, dtype=np.int64)
+        for b in range(Z):
+            s = c * Z + b
+            N = Nslot[s]
+            if N <= 0 or piles[s] <= 0:
+                continue
+            _fen_build(tree, counts, s, M)
+            for _ in range(piles[s]):
+                i, j, n, qji, qij = _occ_pair(s, counts, N, prior, finite, tree, M, top,
+                                              second_kernel, Ki, kn_ccum, kn_tab, kn_atoms,
+                                              kn_aoff, kn_cum, kn_coff, kn_aw, kn_wid, rng, c,
+                                              pstats)
+                if j < 0:
+                    continue
+                lin, quad = _lowrank_lin_quad(s, b, c, i, j, e, yr, dinv, LD, Kinv, Tidx, Tval,
+                                              Tnnz, w, Kw)
+                if droplik:
+                    lin = 0.0
+                    quad = 0.0
+                Ci = counts[s, i]
+                m = _pile_split(n, Ci, prior[s, i], prior[s, j], finite, lin, quad, buf, rng, c)
+                pstats[s, 4] += 1
+                pstats[s, 7] += n
+                delta = Ci - m
+                if delta == 0:
+                    continue
+                if not dropratio and not _occ_accept(m, n, Ci, qji, qij, rng, c):
+                    pstats[s, 8] += 1
+                    continue
+                pstats[s, 5] += 1
+                pstats[s, 6] += abs(delta)
+                counts[s, i] = m
+                counts[s, j] = n - m
+                _fen_add(tree, M, i, -delta)
+                _fen_add(tree, M, j, delta)
+                dl = np.float64(delta)
+                for a in range(Tnnz[j]):
+                    e[s, Tidx[j, a]] -= dl * Tval[j, a]
+                for a in range(Tnnz[i]):
                     e[s, Tidx[i, a]] += dl * Tval[i, a]
                 for r in range(R):
                     zr[c, r] -= dl * w[r]
@@ -1202,13 +1513,21 @@ class NumbaSampler:
     per zone per sweep (an integer, or ``(Z,)`` or ``(n, Z)``; default 0);
     ``single_moves=False`` leaves the single-unit moves out of a sweep (the
     gate's "pile moves alone"); ``pile_drop_likelihood``: the gate's broken
-    pile variant."""
+    pile variant.
+
+    Version 3 (module notes): ``pile_first`` ``"r_hat"`` (default: version
+    2's pile move, unchanged) or ``"occupied"`` (the occupied-record
+    Metropolis–Hastings pile move); ``pile_second`` ``"kernel"`` (default)
+    or ``"r_hat"`` (the ablation; only with ``pile_first="occupied"``);
+    ``pile_drop_ratio``: the gate's broken variant of the occupied-record move
+    (accepted without its pair-choice ratio)."""
 
     def __init__(self, inputs: SamplerInputs, cov: BlockCovariance | LowRankCovariance,
                  mix: ProposalMix | ProposalMix4 | None = None, *, seed: int = 0,
                  start_counts: np.ndarray | None = None, threads: int | None = None,
                  kernel: KernelSpec | None = None, pile_moves=0, single_moves: bool = True,
-                 pile_drop_likelihood: bool = False):
+                 pile_drop_likelihood: bool = False, pile_first: str = "r_hat",
+                 pile_second: str = "kernel", pile_drop_ratio: bool = False):
         if not HAVE_NUMBA:
             raise ImportError("numba is not installed: NumbaSampler needs it "
                               "(the torch RealizedSampler does not)")
@@ -1252,9 +1571,22 @@ class NumbaSampler:
         self.has_piles = bool(self.piles.max(initial=0) > 0)
         if not self.single_moves and not self.has_piles:
             raise ValueError("single_moves=False needs pile moves")
+        # version 3: the occupied-record pile move
+        if pile_first not in ("r_hat", "occupied"):
+            raise ValueError("pile_first must be 'r_hat' or 'occupied'")
+        if pile_second not in ("kernel", "r_hat"):
+            raise ValueError("pile_second must be 'kernel' or 'r_hat'")
+        if pile_first == "r_hat" and pile_second != "kernel":
+            raise ValueError("pile_second='r_hat' is implemented for pile_first='occupied' only")
+        if pile_drop_ratio and pile_first != "occupied":
+            raise ValueError("pile_drop_ratio applies to pile_first='occupied' only")
+        self.pile_first, self.pile_second = pile_first, pile_second
+        self.pile_drop_ratio = bool(pile_drop_ratio)
+        needs_kernel = self.w[3] > 0 or (self.has_piles and pile_second == "kernel")
+        needs_ki = self.has_piles and (pile_first == "r_hat" or pile_second == "r_hat")
         self.kernel = kernel
         self.kt = None
-        if self.w[3] > 0 or self.has_piles:
+        if needs_kernel:
             if kernel is None:
                 raise ValueError("the kernel proposal and the pile moves need a KernelSpec")
             if kernel.weights == "p":
@@ -1269,7 +1601,7 @@ class NumbaSampler:
                         np.zeros(2, dtype=np.int64), dummy, np.zeros(1, dtype=np.int64),
                         np.zeros((1, 1)), np.zeros((1, 1, 1)))
         self.Ki = (_integer_cdf(self._start_weights(inputs.r_hat.reshape(S, M), self.support))
-                   if self.has_piles else dummy)
+                   if needs_ki else dummy)
         rows = _zone_rows(C, Z)
         self.Yslot = np.ascontiguousarray(np.tile(inputs.Y[rows], (n, 1)))   # (S, C)
 
@@ -1445,9 +1777,26 @@ class NumbaSampler:
         """``piles[s]`` pile moves in slot ``s``, then the labels' rebuild."""
         old = numba.get_parallel_chunksize()
         numba.set_parallel_chunksize(1)
-        kn_ccum, kn_tab, kn_atoms, kn_aoff, kn_cum, kn_coff, _aw, _wid = self._kn
+        kn_ccum, kn_tab, kn_atoms, kn_aoff, kn_cum, kn_coff, kn_aw, kn_wid = self._kn
         try:
-            if self.cov.kind == "block":
+            if self.pile_first == "occupied":
+                second_kernel = self.pile_second == "kernel"
+                if self.cov.kind == "block":
+                    _block_piles_occ(piles, self.counts, self.Nslot, self.zone_of, self.e, self.g,
+                                     self.P, self.diagq, self.Tidx, self.Tval, self.Tnnz,
+                                     self.prior, self.finite, second_kernel, self.Ki, kn_ccum,
+                                     kn_tab, kn_atoms, kn_aoff, kn_cum, kn_coff, kn_aw, kn_wid,
+                                     self.pile_drop_likelihood, self.pile_drop_ratio, self.rng,
+                                     self.pstats)
+                else:
+                    _lowrank_piles_occ(piles, self.counts, self.Nslot, self.Z, self.e, self.zr,
+                                       self.yr, self.dinv, self.LD, self.Kinv, self.Tidx,
+                                       self.Tval, self.Tnnz, self.prior, self.finite,
+                                       second_kernel, self.Ki, kn_ccum, kn_tab, kn_atoms,
+                                       kn_aoff, kn_cum, kn_coff, kn_aw, kn_wid,
+                                       self.pile_drop_likelihood, self.pile_drop_ratio, self.rng,
+                                       self.pstats)
+            elif self.cov.kind == "block":
                 _block_piles(piles, self.counts, self.Nslot, self.zone_of, self.e, self.g, self.P,
                              self.diagq, self.Tidx, self.Tval, self.Tnnz, self.prior, self.finite,
                              self.Ki, kn_ccum, kn_tab, kn_atoms, kn_aoff, kn_cum, kn_coff,
@@ -1498,10 +1847,12 @@ class NumbaSampler:
     def time_piles(self, piles: int) -> float:
         """Wall seconds for ``piles`` pile moves in every slot (block) or in
         every zone of every chain (low rank), the labels' rebuild included,
-        without refresh; for timing. Needs the kernel tables."""
-        if self.kt is None:
+        without refresh; for timing. Needs the kernel tables (unless the second
+        record is drawn from ``r̂``)."""
+        if self.kt is None and self.pile_second == "kernel":
             raise ValueError("no kernel tables: construct with a KernelSpec and pile moves")
-        if self.Ki.shape[0] != self.S:
+        if self.Ki.shape[0] != self.S and (self.pile_first == "r_hat"
+                                           or self.pile_second == "r_hat"):
             self.Ki = _integer_cdf(self._start_weights(self.inputs.r_hat.reshape(self.S, self.M),
                                                        self.support))
         self._set_threads()
@@ -1514,13 +1865,26 @@ class NumbaSampler:
         """Pile moves since the last reset (module notes): counts of
         :data:`PILE_STATS`, ``mean_abs_delta`` (over splits drawn),
         ``mean_n`` (over splits drawn), ``share_changed`` (of splits drawn)
-        and the histogram of ``n`` over non-null pairs (:data:`PILE_N_BINS`)."""
+        and the histogram of ``n`` over non-null pairs (:data:`PILE_N_BINS`).
+        Version 3: ``mode`` (``pile_first/pile_second``); ``acceptance``, the
+        share of drawn splits accepted (a split equal to the current one
+        counts as accepted: its ratio is 1), and ``acceptance_of_changes``,
+        the share of proposed changes accepted (both 1 for the version 2
+        move, a Gibbs step); ``share_null`` (of pairs tried: ``j = i`` or an
+        empty kernel table, ``n = 0``, off the support)."""
         st = self.pstats.sum(0)
         out = {k: int(st[c]) for c, k in enumerate(PILE_STATS)}
+        out["mode"] = f"{self.pile_first}/{self.pile_second}"
         drawn = out["drawn"]
         out["mean_abs_delta"] = out["sum_abs_delta"] / drawn if drawn else float("nan")
         out["mean_n"] = out["sum_n"] / drawn if drawn else float("nan")
         out["share_changed"] = out["changed"] / drawn if drawn else float("nan")
+        prop = out["changed"] + out["rejected"]
+        out["acceptance"] = (drawn - out["rejected"]) / drawn if drawn else float("nan")
+        out["acceptance_of_changes"] = out["changed"] / prop if prop else float("nan")
+        tried = out["tried"]
+        out["share_null"] = ((out["null_pair"] + out["n_zero"] + out["off_support"]) / tried
+                             if tried else float("nan"))
         out["n_histogram"] = {b: int(st[_NP + k]) for k, b in enumerate(PILE_N_BINS)}
         return out
 

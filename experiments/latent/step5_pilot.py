@@ -1,5 +1,5 @@
-"""Step 5, phase 2 (and 2b): the pilot of the realized-population sampler
-(``PLAN_latent_step5.md`` version 2, §4 items 2 and 2b, §5 second bullet;
+"""Step 5, phase 2 (and 2b, 2c): the pilot of the realized-population sampler
+(``PLAN_latent_step5.md`` version 3, §4 items 2, 2b and 2c, §5 second bullet;
 :mod:`pmedm_vb.latent.sampler_numba`; model ``MODEL_latent_v5_draft.md``
 §7, the cut form).
 
@@ -13,6 +13,12 @@
     PYTHONPATH=src python experiments/latent/step5_pilot.py ... (as above) \\
         --sweeps 5000 --burn 1000 --mix 0.3,0.2,0.2,0.3 --kernel-basis kern30 \\
         --pile-moves 1N --out $R/latent/step5_pilot2 --compare-root $R/latent/step5_pilot
+    # phase 2c, the third pilot: two arms, beside the second pilot
+    PYTHONPATH=src python experiments/latent/step5_pilot.py ... (as above) \\
+        --sweeps 5000 --burn 1000 --mix 0.3,0.2,0.2,0.3 --kernel-basis kern30 \\
+        --pile-moves 1N --pile-first occupied --pile-second kernel --draw-start warm \\
+        --out $R/latent/step5_pilot3_kernel --compare-root $R/latent/step5_pilot2
+    #   (and the same with --pile-second r_hat --out $R/latent/step5_pilot3_rhat)
     # the dry run, no project data needed:
     PYTHONPATH=src python experiments/latent/step5_pilot.py --synthetic --out /tmp/pilot \\
         --sweeps 300 --burn 100 --threads 4
@@ -75,6 +81,67 @@ splits drawn and changed, mean ``|Δ|`` and ``n``, the ``n`` histogram).
 ``<root>/<region>/pilot.json`` exists its mixing table (median bulk ESS
 per sweep and max ``R̂`` by class) is printed beside the new one.
 
+**Version 3** (``PLAN_latent_step5.md`` §3b, §4 item 2c, §5's version 3
+rule; :mod:`pmedm_vb.latent.sampler_numba`'s module notes).
+
+* ``--pile-first``: ``r_hat`` (default, version 2's pile pairs, so that the
+  second pilot's command reproduces it) or ``occupied`` (the occupied-record
+  Metropolis–Hastings pile move); ``--pile-second``: ``kernel`` (default) or
+  ``r_hat`` (the ablation; needs ``--pile-first occupied``). With
+  ``--pile-second r_hat`` and kernel weight 0 no kernel tables are built.
+* ``--draw-start``: ``cold`` (default; version 2's ``Multinomial(N_b,
+  r̂_b)``) or ``warm``: parameter draw ``d``'s chain starts from MAP chain
+  ``d mod --chains``'s state after its last sweep (so after burn-in), its
+  zone totals adjusted to the draw's (:func:`warm_starts`): units on records
+  off the draw's support are removed (none when the draw's support is the
+  MAP's; the number is reported), a zone that loses units loses
+  them uniformly at random among its units (a multivariate hypergeometric
+  draw from its counts), a zone that gains units gets them from the draw's
+  ``r̂_b`` restricted to its support. The adjustment uses its own random
+  stream, so the cold runs' random choices are unchanged. Starts do not
+  change the target, only the burn-in needed. **Re-burn**
+  (:func:`reburn`): per draw chain, the first sweep at which its log target
+  crosses the median of its *own* second half (the draws have different
+  targets, so neither a pooled median nor ``R̂`` across them applies), and the
+  start's distance from that median in second-half standard deviations. It
+  measures the log target's settling only; a slow functional could take
+  longer to forget the start (not checked by this statistic).
+* **The mixing rule, version 3** (:func:`rule_v3`; §5, fixed before
+  results): with 50 parameter draws per unit and 1,800 s on one 16-core
+  node, the projected effective draws per unit for the median functional of
+  every class are at least 100 (bulk and tail), and ``R̂ < 1.01`` for at
+  least 95% of each class's functionals and below 1.05 for all (at the MAP
+  chains). Projection (derived here): per class the median ESS per
+  chain-sweep ``e`` at the MAP chains (bulk, tail: ESS over all chains' kept
+  sweeps divided by their number); the cold burn-in ``B_c`` (once: the MAP
+  chains' suggested burn-in, else ``--burn``), the re-burn ``B_w`` (the
+  largest over the draw chains); then each of the 50 draw chains gets
+  ``(1800 - B_c t_c)/t_d`` sweeps, of which ``K`` after the re-burn, and the
+  unit's effective draws are ``50 K e``. **Cost model** (an assumption): a
+  slot-sweep (one sweep of one zone of one chain) costs a fixed
+  ``c = t min(P, S)/S`` thread-seconds, ``t`` the measured median seconds
+  per sweep (moves and refresh) with ``S`` slots on ``P`` threads, and ``S'``
+  slots on the node take ``t' = c S'/min(16, S')`` s per sweep (``t_c`` for
+  the cold chains' ``chains × Z`` slots, ``t_d`` for the draws' ``50 Z``).
+  Basis: the block backend runs every slot in parallel with dynamic
+  scheduling of one slot per chunk, so with at least 16 slots all threads
+  stay busy and wall time is total work over threads. Not modelled:
+  unequal zone sizes at the end of a sweep (the last slots), memory
+  bandwidth shared by more slots, the refresh's serial numpy part, the
+  set-up (MAP fit, the draws' ``r̂`` refits, kernel tables; reported, not
+  in the budget), and memory (the kernel tables are about 16 K M bytes per
+  zone and draw: run the draws in batches of at least 16 slots, which leaves
+  the cost unchanged under the model). It also assumes the draw chains mix
+  as the MAP chains do (the draws' own median ESS per sweep, a one-chain
+  estimate, gives the column ``proj_bulk_draws_ess`` as a check). The
+  verdict is printed as PASS only with ``--draw-start warm`` (the rule's
+  setting). Version 2's rule is still printed, labelled as replaced.
+* ``--compare-root`` may be repeated (e.g. the first and the second
+  pilot's roots): for each, the per-class table of median bulk and tail ESS
+  per sweep, bulk ESS per second, max ``R̂`` and the share below 1.01, new
+  beside previous with the bulk ratios, and the two runs' pile settings and
+  shares of null pile pairs.
+
 **At the MAP parameters:** ``--chains`` (4) chains from dispersed starts,
 chain ``k`` drawn ``Multinomial(N_b, q_k)`` with ``q`` cycling through
 ``r̂_b``, ``p_b``, ``½(r̂_b + p_b)`` and ``p_b^{1/2}`` (normalized; flatter
@@ -94,9 +161,9 @@ first sweep at which it crosses the median of the pooled second half of the
 run, and ``R̂`` of the log target over ``[t, end)`` for ``t`` on a grid; the
 suggested burn-in is the smallest grid ``t`` after every chain's crossing
 with that ``R̂ < 1.01`` (a heuristic, derived here). **Decision rule** (§5,
-second bullet): median ESS per sweep ≥ 0.1 in every class and ``R̂ < 1.01``
-(the largest over the non-constant functionals reported beside the share
-below 1.01).
+second bullet, version 2's; replaced from phase 2c by version 3's, above):
+median ESS per sweep ≥ 0.1 in every class and ``R̂ < 1.01`` (the largest
+over the non-constant functionals reported beside the share below 1.01).
 
 **Agreement with stage 2** (§5's third-bullet thresholds, applied here at
 the MAP parameters): the pooled chains' means and variances against
@@ -112,8 +179,9 @@ Gaussian approximation, derived here) so that a gap can be told from noise.
 (totals from the module, rounded as above; ``U`` from its Laplace
 approximation), one chain each, all run together as one batch, with their
 own ``r̂`` (``--draw-rhat refit``, the default) or the MAP's (``map``), each
-started from ``Multinomial(N_b, r̂_b)``: ESS per sweep per class for each
-draw, to see whether mixing differs from the MAP parameters.
+started from ``Multinomial(N_b, r̂_b)`` or warm (``--draw-start``, above):
+ESS per sweep per class for each draw, to see whether mixing differs from
+the MAP parameters, and the re-burn.
 
 **Torch** (``--torch-chains k``, default 0): ``k`` chains of the torch
 sampler at the MAP parameters, ``--torch-steps`` timed steps after a warm-up,
@@ -178,6 +246,15 @@ AGREE_SHARE = 0.9
 AGREE_MIN_MEAN = 50.0
 #: Household sizes of the ``hhsize`` class (the last one is "7 or more").
 HHSIZE_MAX = 7
+#: The mixing rule, version 3 (§5): budget per regional unit, parameter
+#: draws per unit, the node's cores, effective draws per unit for the median
+#: functional of every class (bulk and tail), and the R-hat shares.
+BUDGET_SECONDS = 1800.0
+BUDGET_DRAWS = 50
+NODE_THREADS = 16
+ESS_UNIT_MIN = 100.0
+RHAT_SHARE_MIN = 0.95
+RHAT_ALL_MAX = 1.05
 
 
 # --------------------------------------------------------------------------
@@ -651,10 +728,13 @@ def pile_counts(spec: tuple[str, float], N: np.ndarray) -> np.ndarray:
 def run_chains(engine: str, inputs: SamplerInputs, cov, mix: ProposalMix4, *, seed: int,
                start_counts: np.ndarray | None, sweeps: int, G: sp.csr_matrix,
                threads: int | None, kernel: KernelSpec | None = None,
-               piles: np.ndarray | None = None) -> dict:
+               piles: np.ndarray | None = None, pile_first: str = "r_hat",
+               pile_second: str = "kernel") -> dict:
     """Every sweep recorded: functionals, log target, totals check, seconds.
     ``kernel``, ``piles`` (pile moves per zone per sweep, ``(n, Z)``): the
-    version 2 moves (numba only)."""
+    version 2 moves (numba only); ``pile_first``, ``pile_second``: version
+    3's choice of the pile pair (numba only). ``final_counts``: the chains'
+    counts after the last sweep (``(n, Z, M)``; the warm starts' source)."""
     has_piles = piles is not None and np.max(piles, initial=0) > 0
     if engine == "numba":
         from pmedm_vb.latent.sampler_numba import NumbaSampler
@@ -662,7 +742,8 @@ def run_chains(engine: str, inputs: SamplerInputs, cov, mix: ProposalMix4, *, se
         t0 = time.perf_counter()
         sm = NumbaSampler(inputs, cov, mix, seed=seed, start_counts=start_counts,
                           threads=threads, kernel=kernel,
-                          pile_moves=piles if has_piles else 0)
+                          pile_moves=piles if has_piles else 0, pile_first=pile_first,
+                          pile_second=pile_second)
         setup = time.perf_counter() - t0
         res = sm.run(sweeps, thin=1, G=G, trace=True)
         return {"functionals": res.functionals.astype(np.float32), "log_target": res.log_target,
@@ -671,11 +752,11 @@ def run_chains(engine: str, inputs: SamplerInputs, cov, mix: ProposalMix4, *, se
                 "moves_per_sweep": res.steps_per_sweep, "threads": res.threads,
                 "seconds_setup": setup, "seconds_trace": res.seconds_functionals,
                 "piles": res.piles, "piles_per_sweep": res.piles_per_sweep,
-                "kernel": sm.kernel_info()}
+                "kernel": sm.kernel_info(), "final_counts": sm.counts_numpy()}
     from pmedm_vb.latent.sampler import RealizedSampler
     from pmedm_vb.latent.sampler_numba import log_target_numpy
 
-    if mix.kernel > 0 or has_piles:
+    if mix.kernel > 0 or has_piles or pile_first != "r_hat" or pile_second != "kernel":
         raise ValueError("the torch engine has no kernel proposal or pile moves: use "
                          "--mix with three weights and --pile-moves 0")
     mix = ProposalMix(mix.occupancy, mix.realized, mix.prior)
@@ -701,7 +782,8 @@ def run_chains(engine: str, inputs: SamplerInputs, cov, mix: ProposalMix4, *, se
             # torch: a block step moves every zone once, a low-rank step one zone
             "moves_per_sweep": sm.steps_per_sweep * (Z if cov.kind == "block" else 1),
             "threads": None, "seconds_setup": setup, "seconds_trace": t_trace,
-            "piles": None, "piles_per_sweep": 0, "kernel": None}
+            "piles": None, "piles_per_sweep": 0, "kernel": None,
+            "final_counts": sm.counts_numpy()}
 
 
 # --------------------------------------------------------------------------
@@ -757,6 +839,7 @@ def class_table(cls: np.ndarray, mix_: dict, draws_total: int, seconds_kept: flo
                 "ess_tail_per_sweep_median": float(np.median(et)) / draws_total,
                 "ess_tail_per_sweep_min": float(np.min(et)) / draws_total,
                 "ess_bulk_per_second_median": float(np.median(eb)) / max(seconds_kept, 1e-300),
+                "ess_tail_per_second_median": float(np.median(et)) / max(seconds_kept, 1e-300),
                 "rhat_max": float(np.max(rh)), "rhat_share_below": float(np.mean(rh < RHAT_MAX))})
         rows.append(row)
     return pd.DataFrame(rows)
@@ -846,35 +929,176 @@ def kernel_text(info: dict | None) -> str:
             f"{info['empty_tables']} empty tables, {info['megabytes']:.1f} MB")
 
 
-def compare_table(root: Path | None, region: str, tab: pd.DataFrame) -> tuple[list, dict | None]:
-    """Lines comparing the mixing table with a first pilot's (module notes):
-    per class the median bulk ESS per sweep and per second and the max R-hat,
-    new and first, and the new/first ratios (per second: all chains' kept
-    sweeps' wall time, so it includes the new moves' cost)."""
-    if root is None:
+def compare_table(roots, region: str, tab: pd.DataFrame, piles: dict | None = None
+                  ) -> tuple[list, list | None]:
+    """Lines comparing the mixing table with earlier pilots' (module notes),
+    one block per root in ``roots`` (a path, a list of paths or ``None``):
+    per class the median bulk and tail ESS per sweep, the median bulk ESS per
+    second, the max R-hat and the share below 1.01, new and earlier ("prev"),
+    and the new/prev ratios of the bulk ESS (per second: all chains' kept
+    sweeps' wall time, so it includes the moves' cost); then the two runs'
+    pile settings and share of null pile pairs."""
+    if roots is None:
         return [], None
-    path = Path(root) / region / "pilot.json"
-    if not path.exists():
-        return [f"  (compare: no {path})"], None
-    old = json.loads(path.read_text())
-    prev = pd.DataFrame(old["mixing"])
-    cols = ["ess_bulk_per_sweep_median", "ess_bulk_per_second_median", "rhat_max"]
-    for c in cols:
-        if c not in prev:
-            prev[c] = np.nan
-    both = (tab.set_index("cls")[cols].join(prev.set_index("cls")[cols], how="outer",
-                                            lsuffix="_new", rsuffix="_first"))
-    both["ratio_per_sweep"] = both["ess_bulk_per_sweep_median_new"] / both[
-        "ess_bulk_per_sweep_median_first"]
-    both["ratio_per_second"] = both["ess_bulk_per_second_median_new"] / both[
-        "ess_bulk_per_second_median_first"]
-    both = both.rename(columns=lambda c: c.replace("ess_bulk_per_", "").replace("_median", ""))
-    secs_old = old.get("seconds_per_sweep_median")
-    lines = [f"  beside the first pilot ({path}; mix {old.get('mix')}, "
-             f"{secs_old if secs_old is None else round(secs_old, 3)} s per sweep):",
-             _indent(both.to_string(float_format=lambda v: f"{v:.4g}"))]
-    return lines, {"path": str(path), "table": both.reset_index().to_dict(orient="records"),
-                   "seconds_per_sweep_first": secs_old}
+    if isinstance(roots, (str, Path)):
+        roots = [roots]
+    lines, records = [], []
+    cols = ["ess_bulk_per_sweep_median", "ess_tail_per_sweep_median",
+            "ess_bulk_per_second_median", "rhat_max", "rhat_share_below"]
+    for root in roots:
+        path = Path(root) / region / "pilot.json"
+        if not path.exists():
+            lines.append(f"  (compare: no {path})")
+            continue
+        old = json.loads(path.read_text())
+        prev = pd.DataFrame(old["mixing"])
+        for c in cols:
+            if c not in prev:
+                prev[c] = np.nan
+        both = (tab.set_index("cls")[cols].join(prev.set_index("cls")[cols], how="outer",
+                                                lsuffix="_new", rsuffix="_prev"))
+        both["ratio_per_sweep"] = both["ess_bulk_per_sweep_median_new"] / both[
+            "ess_bulk_per_sweep_median_prev"]
+        both["ratio_per_second"] = both["ess_bulk_per_second_median_new"] / both[
+            "ess_bulk_per_second_median_prev"]
+        both = both.rename(columns=lambda c: c.replace("ess_bulk_per_", "bulk_")
+                           .replace("ess_tail_per_", "tail_").replace("_median", "")
+                           .replace("rhat_share_below", "rhat_lt1.01"))
+        secs_old = old.get("seconds_per_sweep_median")
+        op = old.get("piles") or {}
+        mode_old = op.get("mode", f"{old.get('pile_first', 'r_hat')}/"
+                                  f"{old.get('pile_second', 'kernel')}" if op else "none")
+        null_old = (_null_share(op) if op else float("nan"))
+        lines += [f"  beside {path} (mix {old.get('mix')}, pile moves {old.get('pile_moves')} "
+                  f"{mode_old}, {secs_old if secs_old is None else round(secs_old, 3)} s per "
+                  f"sweep, {old.get('sweeps')} kept sweeps):",
+                  _indent(both.to_string(float_format=lambda v: f"{v:.4g}")),
+                  f"    share of null pile pairs: new {_null_share(piles):.3f}, prev "
+                  f"{null_old:.3f}"]
+        records.append({"path": str(path), "table": both.reset_index().to_dict(orient="records"),
+                        "seconds_per_sweep_prev": secs_old, "pile_mode_prev": mode_old,
+                        "null_share_prev": null_old})
+    return lines, records
+
+
+def _null_share(piles: dict | None) -> float:
+    """Share of pile pairs tried that were null (``j = i`` or an empty
+    table, ``n = 0``, off the support)."""
+    if not piles or not piles.get("tried"):
+        return float("nan")
+    return (piles["null_pair"] + piles["n_zero"] + piles["off_support"]) / piles["tried"]
+
+
+# --------------------------------------------------------------------------
+# Version 3: warm-started parameter draws and the mixing rule on a budget
+# --------------------------------------------------------------------------
+
+
+def warm_starts(map_counts: np.ndarray, unit: PilotUnit, rng: np.random.Generator
+                ) -> tuple[np.ndarray, dict]:
+    """Start counts ``(draws, Z, M)`` for the parameter draws' chains from the
+    MAP chains' last state (module notes): draw ``d`` from MAP chain
+    ``d mod chains``; per zone, units on records off the draw's support are
+    removed first (none where the supports agree); then a zone with too many
+    units loses the excess uniformly at random among its units (a
+    multivariate hypergeometric draw from its counts), and a zone with too
+    few gains the deficit drawn ``Multinomial(·, r̂_b)``, the draw's ``r̂_b``
+    restricted to its support (uniform on the support if ``r̂_b`` misses
+    it)."""
+    n_map, Z, M = map_counts.shape
+    out = np.empty((len(unit.draws), Z, M), dtype=np.int64)
+    info = {"source_chain": [], "added": [], "removed": [], "removed_off_support": []}
+    for d, dr in enumerate(unit.draws):
+        k = d % n_map
+        c = np.asarray(map_counts[k], dtype=np.int64).copy()
+        support = np.asarray(dr["p"]) > 0
+        add, rem, off = [], [], []
+        for b in range(Z):
+            cb = c[b]
+            off.append(int(cb[~support[b]].sum()))
+            cb[~support[b]] = 0
+            target, cur = int(dr["N"][b]), int(cb.sum())
+            if cur > target:
+                cb -= rng.multivariate_hypergeometric(cb, cur - target, method="marginals")
+            elif cur < target:
+                q = np.where(support[b], np.asarray(dr["r_hat"][b], float), 0.0)
+                if not q.sum() > 0:
+                    q = support[b].astype(float)
+                cb += rng.multinomial(target - cur, q / q.sum())
+            add.append(max(target - cur, 0))
+            rem.append(max(cur - target, 0))
+        if not np.array_equal(c.sum(1), np.asarray(dr["N"])) or c.min() < 0:
+            raise RuntimeError("warm start: the adjusted totals do not match the draw's")
+        out[d] = c
+        info["source_chain"].append(k)
+        info["added"].append(add)
+        info["removed"].append(rem)
+        info["removed_off_support"].append(off)
+    return out, info
+
+
+def reburn(lt: np.ndarray) -> dict:
+    """``lt``: ``(T, chains)`` log target of chains with different targets
+    (one per parameter draw). Per chain: the first sweep at which it crosses
+    the median of its *own* second half (the pooled median of
+    :func:`burn_in` would mix targets), and how far the start is from that
+    median in units of the second half's sd (``start_z``)."""
+    T, n = lt.shape
+    crossing, start_z = [], []
+    for k in range(n):
+        tail = lt[T // 2:, k]
+        med = float(np.median(tail))
+        side = np.sign(lt[:, k] - med)
+        changed = np.flatnonzero(side != side[0])
+        crossing.append(int(changed[0]) if changed.size else T)
+        sd = float(np.std(tail))
+        start_z.append(float((lt[0, k] - med) / sd) if sd > 0 else float("nan"))
+    return {"first_crossing": crossing, "start_z": start_z, "max": int(max(crossing)),
+            "median": float(np.median(crossing))}
+
+
+def rule_v3(tab: pd.DataFrame, *, seconds_per_sweep: float, slots: int, threads: int,
+            chains: int, Z: int, burn_cold: int, burn_warm: int,
+            draws_ess: dict | None = None) -> tuple[pd.DataFrame, dict]:
+    """The plan's §5 mixing rule, version 3 (module notes): projected
+    effective draws per regional unit under the budget, and the R-hat shares.
+
+    Cost model (an assumption, stated in the module notes): a slot-sweep (one
+    sweep of one zone of one chain) costs ``c = t · min(P, S)/S``
+    thread-seconds, ``t`` the measured seconds per sweep with ``S`` slots on
+    ``P`` threads, and ``S'`` slots on the node's 16 threads take
+    ``c · S'/min(16, S')`` seconds per sweep."""
+    c_slot = seconds_per_sweep * min(threads, slots) / slots
+    s_cold = chains * Z
+    t_cold = c_slot * s_cold / min(NODE_THREADS, s_cold)
+    s_draw = BUDGET_DRAWS * Z
+    t_draw = c_slot * s_draw / min(NODE_THREADS, s_draw)
+    left = BUDGET_SECONDS - burn_cold * t_cold
+    per_draw = left / t_draw
+    kept = per_draw - burn_warm
+    live = tab[(tab["cls"] != "all") & tab["ess_bulk_per_sweep_median"].notna()].copy()
+    k_eff = max(kept, 0.0)
+    live["proj_bulk"] = BUDGET_DRAWS * k_eff * live["ess_bulk_per_sweep_median"]
+    live["proj_tail"] = BUDGET_DRAWS * k_eff * live["ess_tail_per_sweep_median"]
+    if draws_ess:
+        live["proj_bulk_draws_ess"] = [BUDGET_DRAWS * k_eff * draws_ess.get(c, np.nan)
+                                       for c in live["cls"]]
+    live["rhat_ok"] = ((live["rhat_share_below"] >= RHAT_SHARE_MIN)
+                       & (live["rhat_max"] < RHAT_ALL_MAX))
+    live["ess_ok"] = (live["proj_bulk"] >= ESS_UNIT_MIN) & (live["proj_tail"] >= ESS_UNIT_MIN)
+    ok = bool(len(live) and kept > 0 and live["ess_ok"].all() and live["rhat_ok"].all())
+    cost = {"seconds_per_sweep_measured": seconds_per_sweep, "slots_measured": slots,
+            "threads_measured": threads, "thread_seconds_per_slot_sweep": c_slot,
+            "seconds_per_sweep_cold": t_cold, "slots_cold": s_cold,
+            "seconds_per_sweep_draws": t_draw, "slots_draws": s_draw,
+            "burn_cold": burn_cold, "seconds_burn_cold": burn_cold * t_cold,
+            "burn_warm": burn_warm, "sweeps_per_draw": per_draw, "kept_per_draw": kept,
+            "budget_seconds": BUDGET_SECONDS, "draws": BUDGET_DRAWS,
+            "node_threads": NODE_THREADS, "pass": ok}
+    cols = ["cls", "n", "ess_bulk_per_sweep_median", "ess_tail_per_sweep_median", "proj_bulk",
+            "proj_tail", *(["proj_bulk_draws_ess"] if draws_ess else []), "rhat_share_below",
+            "rhat_max", "ess_ok", "rhat_ok"]
+    return live[cols].reset_index(drop=True), cost
 
 
 # --------------------------------------------------------------------------
@@ -889,8 +1113,10 @@ def pilot_region(unit: PilotUnit, args, out: Path) -> dict:
     mix = ProposalMix4(*args.mix)
     piles_spec = parse_pile_moves(args.pile_moves)
     kspec = None
-    if mix.kernel > 0 or pile_counts(piles_spec, unit.N).max() > 0:
+    if mix.kernel > 0 or (pile_counts(piles_spec, unit.N).max() > 0
+                          and args.pile_second == "kernel"):
         kspec = unit.kernel_spec(args.kernel_trunc, args.kernel_weights)
+    pile_mode = {"pile_first": args.pile_first, "pile_second": args.pile_second}
     n = args.chains
     T = args.burn + args.sweeps
     seed_base = [args.seed if args.seed is not None else 0, PILOT_TAG,
@@ -904,8 +1130,9 @@ def pilot_region(unit: PilotUnit, args, out: Path) -> dict:
              f"{int(np.diff(unit.T0.indptr).max())}; kappa {unit.kappa:.1f}; functionals traced "
              f"{unit.G.shape[1]} per zone; proposal mix a/b/c/e "
              f"{[round(float(w), 3) for w in mix.weights()]}; pile moves per zone per sweep "
-             f"{pile_counts(piles_spec, unit.N).tolist()} (--pile-moves {args.pile_moves}); "
-             f"kernel basis {unit.kernel.get('basis')} (ell {unit.kernel.get('ell', float('nan')):.4g}, "
+             f"{pile_counts(piles_spec, unit.N).tolist()} (--pile-moves {args.pile_moves}; "
+             f"first record {args.pile_first}, second {args.pile_second}); parameter-draw "
+             f"chains {args.draw_start}-started; kernel basis {unit.kernel.get('basis')} (ell {unit.kernel.get('ell', float('nan')):.4g}, "
              f"{unit.kernel.get('source')})"]
 
     # -- MAP parameters, dispersed starts -----------------------------------
@@ -914,7 +1141,7 @@ def pilot_region(unit: PilotUnit, args, out: Path) -> dict:
     t0 = time.perf_counter()
     ch = run_chains(args.engine, inputs, unit.cov, mix, seed=int(rng.integers(2 ** 31)),
                     start_counts=starts, sweeps=T, G=unit.G, threads=args.threads,
-                    kernel=kspec, piles=pile_counts(piles_spec, inputs.N))
+                    kernel=kspec, piles=pile_counts(piles_spec, inputs.N), **pile_mode)
     wall = time.perf_counter() - t0
     fun, lt = ch["functionals"], ch["log_target"]
     kept = slice(args.burn, T)
@@ -925,7 +1152,7 @@ def pilot_region(unit: PilotUnit, args, out: Path) -> dict:
     tab = class_table(unit.cls, mx, draws_total, seconds_kept)
     lt_mix = mixing(lt[kept].T[:, :, None])
     bi = burn_in(lt)
-    compare_lines, compare = compare_table(args.compare_root, unit.name, tab)
+    compare_lines, compare = compare_table(args.compare_root, unit.name, tab, ch["piles"])
     agree_tab, agree = agreement(mx["mean"], mx["var"], mx["ess_bulk"], unit.stage2_mean,
                                  unit.stage2_var, unit.cls)
     live = tab[(tab["cls"] != "all") & tab["ess_bulk_per_sweep_median"].notna()]
@@ -970,7 +1197,8 @@ def pilot_region(unit: PilotUnit, args, out: Path) -> dict:
               + f"; suggested burn-in {bi['suggested_burn']} (used {args.burn})",
               "  mixing by class (ESS per sweep = ESS / (chains x kept sweeps)):",
               _indent(tab.to_string(index=False, float_format=lambda v: f"{v:.4g}")),
-              f"  DECISION (plan §5): median bulk ESS per sweep >= {ESS_PER_SWEEP_MIN} in every "
+              f"  DECISION (plan §5, version 2's rule; replaced by version 3's below from phase "
+              f"2c): median bulk ESS per sweep >= {ESS_PER_SWEEP_MIN} in every "
               f"class and max R-hat < {RHAT_MAX}: {'PASS' if mixing_pass else 'FAIL'}",
               *compare_lines,
               "", f"== agreement with stage 2 at the MAP parameters (stage 2 mean >= "
@@ -988,9 +1216,15 @@ def pilot_region(unit: PilotUnit, args, out: Path) -> dict:
         nd = len(unit.draws)
         Td = args.burn + (args.draw_sweeps or args.sweeps)
         t1 = time.perf_counter()
+        dstart, winfo = None, None
+        if args.draw_start == "warm":
+            # its own stream, so the cold runs' random choices are those of pilot 2
+            dstart, winfo = warm_starts(ch["final_counts"], unit,
+                                        np.random.default_rng([*seed_base, 3]))
         dch = run_chains(args.engine, dinp, unit.cov, mix, seed=int(rng.integers(2 ** 31)),
-                         start_counts=None, sweeps=Td, G=unit.G, threads=args.threads,
-                         kernel=kspec, piles=pile_counts(piles_spec, dinp.N))
+                         start_counts=dstart, sweeps=Td, G=unit.G, threads=args.threads,
+                         kernel=kspec, piles=pile_counts(piles_spec, dinp.N), **pile_mode)
+        rb = reburn(dch["log_target"])
         dk = slice(args.burn, Td)
         per = []
         rows = []
@@ -1018,12 +1252,23 @@ def pilot_region(unit: PilotUnit, args, out: Path) -> dict:
                          "seconds_per_sweep": float(np.median(dch["seconds"])),
                          "ess_bulk_per_sweep_median_by_draw": med.round(4).to_dict(orient="index"),
                          "totals_error_max": int(np.max(dch["totals_error"])),
-                         "drift": dch["drift"], "wall": time.perf_counter() - t1}
+                         "drift": dch["drift"], "wall": time.perf_counter() - t1,
+                         "start": args.draw_start, "warm": winfo, "reburn": rb}
+        start_text = ("Multinomial(N_b, r_hat_b)" if args.draw_start == "cold" else
+                      "warm: MAP chain d mod chains after its last sweep, totals adjusted")
         lines += ["", f"== {nd} parameter draws of the cut posterior, one chain each (start "
-                  f"Multinomial(N_b, r_hat_b); r_hat {unit.info.get('draw_rhat')}), {Td} sweeps "
+                  f"{start_text}; r_hat {unit.info.get('draw_rhat')}), {Td} sweeps "
                   f"({args.burn} burn-in); median {np.median(dch['seconds']):.3f} s per sweep for "
                   "all draws together",
                   f"  totals per draw: {[d['N'].tolist() for d in unit.draws]}",
+                  *([f"  warm starts: source MAP chain {winfo['source_chain']}; units added "
+                     f"(from r_hat_b) {winfo['added']}, removed (at random) {winfo['removed']}, "
+                     f"removed off the draw's support {winfo['removed_off_support']}"]
+                    if winfo else []),
+                  f"  re-burn ({args.draw_start} start): first crossing of each chain's own "
+                  f"second-half median {rb['first_crossing']} (max {rb['max']}, median "
+                  f"{rb['median']:g}); start's distance from it {[round(z, 1) for z in rb['start_z']]}"
+                  " second-half sd",
                   f"  acceptance: {acceptance_text(dch['acceptance'])}; totals check "
                   f"{draws_summary['totals_error_max']}; drift {dch['drift']:.1e}",
                   f"  {pile_text(dch['piles'])}",
@@ -1033,6 +1278,56 @@ def pilot_region(unit: PilotUnit, args, out: Path) -> dict:
                   _indent(med.to_string(float_format=lambda v: f"{v:.4f}")),
                   _indent(live.set_index("cls")["ess_bulk_per_sweep_median"].to_frame("MAP")
                           .T.to_string(float_format=lambda v: f"{v:.4f}"))]
+
+    # -- the mixing rule, version 3 (§5) ---------------------------------------
+    burn_cold = bi["suggested_burn"]
+    cold_note = "the MAP chains' suggested burn-in"
+    if burn_cold is None:
+        burn_cold, cold_note = args.burn, "no suggested burn-in: the burn-in used (fallback)"
+    if draws_summary is not None:
+        burn_warm = draws_summary["reburn"]["max"]
+        warm_note = (f"the largest re-burn over the {draws_summary['draws']} "
+                     f"{args.draw_start}-started draw chains")
+        dmed = per[(per["cls"] != "all")].groupby("cls")["ess_bulk_per_sweep_median"].median()
+        draws_ess = dmed.to_dict()
+    else:
+        burn_warm, warm_note, draws_ess = burn_cold, "no parameter draws: the cold burn-in", None
+    rule_tab, rule = rule_v3(tab, seconds_per_sweep=float(np.median(secs)), slots=n * unit.Z,
+                             threads=int(ch["threads"] or args.threads or 1), chains=n,
+                             Z=unit.Z, burn_cold=int(burn_cold), burn_warm=int(burn_warm),
+                             draws_ess=draws_ess)
+    rule.update({"burn_cold_source": cold_note, "burn_warm_source": warm_note,
+                 "draw_start": args.draw_start})
+    v3_pass = rule["pass"] and args.draw_start == "warm"
+    lines += ["", f"== mixing rule, version 3 (plan §5): {BUDGET_DRAWS} parameter draws per unit, "
+              f"{BUDGET_SECONDS:.0f} s on one {NODE_THREADS}-core node",
+              f"  cost model (an assumption): a slot-sweep (one zone of one chain) costs "
+              f"c = t min(P, S)/S = {rule['thread_seconds_per_slot_sweep']:.4g} thread-seconds "
+              f"(t = {rule['seconds_per_sweep_measured']:.4g} s per sweep measured with S = "
+              f"{rule['slots_measured']} slots on P = {rule['threads_measured']} threads); S' "
+              f"slots on {NODE_THREADS} threads take c S'/min({NODE_THREADS}, S') s per sweep",
+              f"  cold burn-in once: {rule['burn_cold']} sweeps ({cold_note}) of {n} chains "
+              f"({rule['slots_cold']} slots, {rule['seconds_per_sweep_cold']:.4g} s per sweep): "
+              f"{rule['seconds_burn_cold']:.0f} s",
+              f"  {BUDGET_DRAWS} draw chains ({rule['slots_draws']} slots, "
+              f"{rule['seconds_per_sweep_draws']:.4g} s per sweep; run in batches of at least "
+              f"{NODE_THREADS} slots the cost is the same under this model): "
+              f"{rule['sweeps_per_draw']:.0f} sweeps each, re-burn {rule['burn_warm']} "
+              f"({warm_note}), so {rule['kept_per_draw']:.0f} kept sweeps per draw",
+              f"  set-up not in the budget above: the unit's set-up took "
+              f"{unit.info.get('seconds_unit', float('nan')):.0f} s here "
+              f"({len(unit.draws)} parameter draws' r_hat)",
+              "  projected effective draws per unit (median functional of each class = "
+              f"{BUDGET_DRAWS} x kept sweeps x ESS per chain-sweep at the MAP chains; "
+              "proj_bulk_draws_ess: the same from the draw chains' own median ESS per sweep):",
+              _indent(rule_tab.to_string(index=False, float_format=lambda v: f"{v:.4g}")),
+              f"  DECISION (plan §5, version 3): projected bulk and tail >= {ESS_UNIT_MIN:g} for "
+              f"every class's median functional, R-hat < {RHAT_MAX} for >= {RHAT_SHARE_MIN:.0%} "
+              f"of each class's functionals and < {RHAT_ALL_MAX} for all: "
+              + ("PASS" if v3_pass else "FAIL")
+              + ("" if args.draw_start == "warm" else
+                 " (the draws were cold-started: the rule assumes warm starts; rerun with "
+                 "--draw-start warm)")]
 
     # -- torch comparison -----------------------------------------------------
     torch_summary = None
@@ -1059,6 +1354,9 @@ def pilot_region(unit: PilotUnit, args, out: Path) -> dict:
         "region": unit.name, "engine": args.engine, "info": unit.info, "chains": n,
         "sweeps": args.sweeps, "burn": args.burn, "mix": list(mix.weights()),
         "pile_moves": args.pile_moves, "piles_per_sweep": ch["piles_per_sweep"],
+        "pile_first": args.pile_first, "pile_second": args.pile_second,
+        "draw_start": args.draw_start, "rule_v3": rule,
+        "rule_v3_table": rule_tab.to_dict(orient="records"), "rule_v3_pass": v3_pass,
         "piles": ch["piles"], "kernel": ch["kernel"], "kernel_trunc": args.kernel_trunc,
         "kernel_weights": args.kernel_weights, "kernel_basis": unit.kernel.get("basis"),
         "compare": compare,
@@ -1074,8 +1372,9 @@ def pilot_region(unit: PilotUnit, args, out: Path) -> dict:
     write_text(out / "summary.txt", text)
     write_text(out / "pilot.json", json.dumps(summary, indent=1, default=_json_default))
     print(text, flush=True)
-    logger.info("pilot %s: mixing %s, agreement %s", unit.name,
-                "PASS" if mixing_pass else "FAIL", "PASS" if agree["pass"] else "FAIL")
+    logger.info("pilot %s: mixing (v2 rule) %s, mixing (v3 rule) %s, agreement %s", unit.name,
+                "PASS" if mixing_pass else "FAIL", "PASS" if v3_pass else "FAIL",
+                "PASS" if agree["pass"] else "FAIL")
     return summary
 
 
@@ -1120,8 +1419,18 @@ def parse_args(argv=None):
     parser.add_argument("--kernel-weights", default="p", choices=("p", "r_hat"))
     parser.add_argument("--pile-moves", default="1N",
                         help="pile moves per zone per sweep: an integer, or <f>N for f N_b")
-    parser.add_argument("--compare-root", type=Path, default=None,
-                        help="a first pilot's output root, to print its mixing table beside")
+    parser.add_argument("--compare-root", type=Path, action="append", default=None,
+                        help="an earlier pilot's output root, to print its mixing table beside "
+                             "(repeatable)")
+    parser.add_argument("--pile-first", default="r_hat", choices=("r_hat", "occupied"),
+                        help="pile pairs' first record: from r_hat (version 2, the default) or "
+                             "a uniformly picked unit's (version 3)")
+    parser.add_argument("--pile-second", default="kernel", choices=("kernel", "r_hat"),
+                        help="pile pairs' second record: the kernel route or r_hat (the "
+                             "ablation; with --pile-first occupied)")
+    parser.add_argument("--draw-start", default="cold", choices=("cold", "warm"),
+                        help="parameter-draw chains: Multinomial(N_b, r_hat_b) (cold, the "
+                             "default) or the MAP chains' last state with adjusted totals (warm)")
     parser.add_argument("--max-per-class", type=int, default=100)
     parser.add_argument("--param-draws", type=int, default=4)
     parser.add_argument("--draw-sweeps", type=int, default=None,
@@ -1146,6 +1455,8 @@ def parse_args(argv=None):
         parse_pile_moves(args.pile_moves)
     except ValueError as err:
         parser.error(f"--pile-moves: {err}")
+    if args.pile_first == "r_hat" and args.pile_second != "kernel":
+        parser.error("--pile-second r_hat needs --pile-first occupied")
     return args
 
 
@@ -1210,7 +1521,8 @@ def main(argv=None) -> None:
         "mix": args.mix, "max_per_class": args.max_per_class, "param_draws": args.param_draws,
         "draw_rhat": args.draw_rhat, "kernel_basis": args.kernel_basis,
         "kernel_trunc": args.kernel_trunc, "kernel_weights": args.kernel_weights,
-        "pile_moves": args.pile_moves})
+        "pile_moves": args.pile_moves, "pile_first": args.pile_first,
+        "pile_second": args.pile_second, "draw_start": args.draw_start})
     s4c._SHARED["choice"] = choice
     prepare_version2(s4c._SHARED, args)
     for rid in chosen:
