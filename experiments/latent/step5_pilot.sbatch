@@ -23,6 +23,14 @@
 #       --step3 $R/latent/step3 --step3b $R/latent/step3b --step4 $R/latent/step4 \
 #       --step4c $R/latent/step4c --out $R/latent/step5_pilot --threads 16
 #
+# Phase 2b (PLAN_latent_step5.md version 2): the same with the kernel
+# proposal and pile moves, beside the first pilot:
+#
+#   sbatch experiments/latent/step5_pilot.sbatch \
+#       ... (the data arguments above) ... --sweeps 5000 --burn 1000 \
+#       --mix 0.3,0.2,0.2,0.3 --kernel-basis kern30 --pile-moves 1N \
+#       --out $R/latent/step5_pilot2 --compare-root $R/latent/step5_pilot --threads 16
+#
 # PMEDM_VB_ENV MUST point to the numba environment (pmedm_vb_numba: numba,
 # arviz, torch); the default environment below has no numba, and the job
 # stops if numba cannot be imported. sbatch passes the submitting shell's

@@ -1,5 +1,5 @@
-"""Step 5, phase 2: the pilot of the realized-population sampler
-(``PLAN_latent_step5.md`` version 1, §4 item 2, §5 second bullet;
+"""Step 5, phase 2 (and 2b): the pilot of the realized-population sampler
+(``PLAN_latent_step5.md`` version 2, §4 items 2 and 2b, §5 second bullet;
 :mod:`pmedm_vb.latent.sampler_numba`; model ``MODEL_latent_v5_draft.md``
 §7, the cut form).
 
@@ -9,6 +9,10 @@
         --run $R/embed/stage1_v2/d16_g0.5_r0.01 --step1 $R/latent/step1_sigma \\
         --step3 $R/latent/step3 --step3b $R/latent/step3b --step4 $R/latent/step4 \\
         --step4c $R/latent/step4c --out $R/latent/step5_pilot --threads 16
+    # phase 2b, the rerun with the version 2 moves, beside the first pilot:
+    PYTHONPATH=src python experiments/latent/step5_pilot.py ... (as above) \\
+        --sweeps 5000 --burn 1000 --mix 0.3,0.2,0.2,0.3 --kernel-basis kern30 \\
+        --pile-moves 1N --out $R/latent/step5_pilot2 --compare-root $R/latent/step5_pilot
     # the dry run, no project data needed:
     PYTHONPATH=src python experiments/latent/step5_pilot.py --synthetic --out /tmp/pilot \\
         --sweeps 300 --burn 100 --threads 4
@@ -33,7 +37,43 @@ at the unrounded mean; the change is under one unit per zone). Atoms with
 
 **Functionals** traced: step 4e's (fitted cells, B1, B2, rare groups, joint,
 the zone total), at most ``--max-per-class`` (100; 0 for all) columns per
-class, evenly spaced in the class's order; every rare group.
+class, evenly spaced in the class's order; every rare group. Version 2 adds
+the class ``hhsize`` (all 8 columns traced): households (occupied housing
+units; group-quarters units are not households and are left out) with 1,
+2, …, 6 and 7 or more persons, and persons in households of 7 or more.
+Persons per unit = the unit's total over ``B01001``'s cells (sex by age,
+whose categories partition persons: the table total and the two sex
+subtotals are waived), i.e. the sum of the unit's row of the check data's
+``B01001`` counts; where the units carry PUMS ``NP``, the two are compared
+over the households and the number that differ is recorded in the unit's
+info (``hhsize_np_mismatch``).
+
+**Version 2 moves** (``PLAN_latent_step5.md`` §3a;
+:mod:`pmedm_vb.latent.sampler_numba`'s module notes): ``--mix`` takes four
+weights ``a,b,c,e`` (three give ``e = 0``, version 1's mixture; default
+``0.3,0.2,0.2,0.3``); the kernel of (e) and of the pile moves is the kernel
+basis ``--kernel-basis`` (``kern30``, the default, or ``kern100``): its
+stored centres and width ``ℓ`` (from step 1's ``inputs/bases``, else step
+3b's ``inputs/bases``, else rebuilt by step 1's recipe, which is
+deterministic) and the atoms' positions ``z`` (``load_atoms``, the stage 1
+run's), restricted to the sampler's atoms; ``--kernel-trunc ε`` truncates
+each centre's table to atoms with ``K_jk ≥ ε max_j K_jk`` (default 0:
+none); ``--kernel-weights`` ``p`` (default) or ``r_hat``. When the kernel
+basis is also the model's ``g`` (``--basis``), its standardized columns are
+rebuilt from these centres and compared with the ``g`` in use
+(``kernel_check_max_abs`` in the info). ``--pile-moves``: pile moves per
+zone per sweep, an integer or a multiple of ``N_b`` written ``<f>N``
+(default ``1N``, ``N_b`` pile moves per zone per sweep. Chosen on the
+synthetic dry run, not on S: with 0.1N, 0.5N, 1N and 2N the median bulk ESS
+per second of B1, joint and hhsize rose up to 1N and was flat from 1N to 2N,
+and per sweep it kept rising; at about the pilot's size, on made-up data, a
+pile move cost about 2.3 µs of CPU against 1.8–2.2 µs for a single-unit
+move, so 1N about doubles a sweep's cost). Reported beside the acceptance: the kernel
+tables' size and the pile statistics (pairs tried, null pairs, ``n = 0``,
+splits drawn and changed, mean ``|Δ|`` and ``n``, the ``n`` histogram).
+``--compare-root``: a first pilot's output root; where
+``<root>/<region>/pilot.json`` exists its mixing table (median bulk ESS
+per sweep and max ``R̂`` by class) is printed beside the new one.
 
 **At the MAP parameters:** ``--chains`` (4) chains from dispersed starts,
 chain ``k`` drawn ``Multinomial(N_b, q_k)`` with ``q`` cycling through
@@ -95,8 +135,13 @@ real ones' structure (a ``Σ`` block per zone, leave-zone-out supports, one
 category per table per atom, rare groups, κ small against ``N_b``), two
 "regions" of 4 and 6 zones; ``r̂`` from the same conditional PMEDM; stage 2's
 moments by the same Gaussian conditioning written densely
-(:func:`dense_conditional_moments`). For checking the driver without the
-project data; its numbers say nothing about simulation S.
+(:func:`dense_conditional_moments`). Version 2: positions ``z`` (8-D, a
+random linear map of the atom's fitted-table row plus noise, so that atoms
+near in ``z`` have similar profiles), kernel centres by the same weighted
+k-means as a kernel basis (``kern30``/``kern100`` sizes), and household
+sizes (1–9 persons) for the ``hhsize`` class, all from their own random
+streams (the rest of the unit is as before). For checking the driver
+without the project data; its numbers say nothing about simulation S.
 """
 
 from __future__ import annotations
@@ -113,12 +158,12 @@ import pandas as pd
 import scipy.sparse as sp
 
 from pmedm_vb.latent.sampler import (
-    PROPOSALS,
     BlockCovariance,
     ProposalMix,
     SamplerInputs,
     restrict_support,
 )
+from pmedm_vb.latent.sampler_numba import PILE_N_BINS, KernelSpec, ProposalMix4
 
 #: Default regions: Knoxville core (4 zones) and Nashville core (6, the most).
 DEFAULT_REGIONS = ("knoxville_core", "nashville_core")
@@ -131,6 +176,8 @@ AGREE_MEAN_SD = 0.1
 AGREE_VAR = (0.8, 1.25)
 AGREE_SHARE = 0.9
 AGREE_MIN_MEAN = 50.0
+#: Household sizes of the ``hhsize`` class (the last one is "7 or more").
+HHSIZE_MAX = 7
 
 
 # --------------------------------------------------------------------------
@@ -159,6 +206,12 @@ class PilotUnit:
     stage2_var: np.ndarray               # (Z, F)
     draws: list = field(default_factory=list)   # [{"N", "p", "r_hat"}]
     info: dict = field(default_factory=dict)
+    z: np.ndarray | None = None          # (M, d) atom positions (version 2's kernel)
+    kernel: dict = field(default_factory=dict)  # {"centres", "ell", "basis", "source"}
+
+    def kernel_spec(self, trunc: float = 0.0, weights: str = "p") -> KernelSpec:
+        return KernelSpec(self.z, self.kernel["centres"], self.kernel["ell"], trunc=trunc,
+                          weights=weights)
 
     @property
     def Z(self) -> int:
@@ -195,18 +248,97 @@ def round_totals(x: np.ndarray, N_A: float) -> np.ndarray:
 
 def select_columns(cls: np.ndarray, max_per_class: int) -> np.ndarray:
     """At most ``max_per_class`` columns per class (0: all), evenly spaced in
-    the class's order; every rare group and the total."""
+    the class's order; every rare group, the total and the household sizes."""
     keep = []
     for c in pd.unique(cls):
         idx = np.flatnonzero(cls == c)
-        if max_per_class > 0 and idx.size > max_per_class and c not in ("rare", "total"):
+        if max_per_class > 0 and idx.size > max_per_class and c not in ("rare", "total",
+                                                                          "hhsize"):
             idx = idx[np.unique(np.linspace(0, idx.size - 1, max_per_class).round().astype(int))]
         keep.append(idx)
     return np.sort(np.concatenate(keep))
 
 
+def household_size_columns(persons: np.ndarray, household: np.ndarray
+                           ) -> tuple[sp.csr_matrix, np.ndarray, np.ndarray]:
+    """The ``hhsize`` class (module notes): ``(M, 8)`` columns, households
+    with 1, …, 6, 7+ persons and persons in households of 7+; their classes
+    and names."""
+    persons = np.asarray(persons, float)
+    M = persons.size
+    size = np.minimum(np.rint(persons).astype(np.int64), HHSIZE_MAX)
+    ok = np.asarray(household, bool) & (size >= 1)
+    rows = np.flatnonzero(ok)
+    G = sp.csr_matrix((np.ones(rows.size), (rows, size[rows] - 1)), shape=(M, HHSIZE_MAX + 1))
+    big = np.flatnonzero(ok & (size == HHSIZE_MAX))
+    G = (G + sp.csr_matrix((persons[big], (big, np.full(big.size, HHSIZE_MAX))),
+                           shape=(M, HHSIZE_MAX + 1))).tocsr()
+    names = [f"hhsize:{k}" for k in range(1, HHSIZE_MAX)] + [f"hhsize:{HHSIZE_MAX}plus",
+                                                             f"hhsize:persons_in_{HHSIZE_MAX}plus"]
+    return G, np.array(["hhsize"] * (HHSIZE_MAX + 1)), np.array(names)
+
+
+def real_household_sizes(data) -> tuple[sp.csr_matrix, np.ndarray, np.ndarray, dict]:
+    """The ``hhsize`` columns of the check data (module notes) and a record:
+    persons from ``B01001``, households = not group quarters, ``NP``
+    compared where present."""
+    persons = np.asarray(data.counts["B01001"].sum(axis=1)).ravel()
+    household = ~data.units["is_group_quarters"].to_numpy(dtype=bool)
+    info = {"hhsize_persons_from": "B01001 row sums", "hhsize_households": int(household.sum()),
+            "hhsize_households_without_persons": int((household & (persons < 1)).sum()),
+            "hhsize_households_7plus": int((household & (persons >= HHSIZE_MAX)).sum())}
+    if "NP" in data.units.columns:
+        np_ = pd.to_numeric(data.units["NP"], errors="coerce").to_numpy(dtype=float)
+        info["hhsize_np_mismatch"] = int((household & (np_ != persons)).sum())
+    else:
+        info["hhsize_np_mismatch"] = "NP not among the units' columns"
+    G, cls, names = household_size_columns(persons, household)
+    return G, cls, names, info
+
+
+def kernel_centres(name: str, args, atoms, G_used: np.ndarray | None = None) -> dict:
+    """Centres and ``ℓ`` of kernel basis ``name`` (module notes): step 1's or
+    step 3b's saved files, else rebuilt by step 1's recipe. With ``G_used``
+    (the model's ``g``, when it is this basis) its standardized columns are
+    rebuilt from these centres and compared (a failed check is recorded, not
+    raised)."""
+    from pmedm_vb.latent.atoms import GQ_COLUMNS
+    from pmedm_vb.latent.basis import kernel_features
+    from pmedm_vb.latent.deviation_basis import build_kernel_basis
+
+    def check(G_here):
+        if G_used is None:
+            return None
+        if G_here.shape != G_used.shape:
+            return f"shape differs: {G_here.shape} vs {G_used.shape}"
+        return float(np.abs(G_here - G_used).max())
+
+    for d in (Path(args.step1) / "inputs" / "bases", Path(args.step3b) / "inputs" / "bases"):
+        if (d / f"{name}.npz").exists() and (d / f"{name}.json").exists():
+            saved = np.load(d / f"{name}.npz")
+            centres = saved["centres"]
+            ell = float(json.loads((d / f"{name}.json").read_text())["ell"])
+            out = {"centres": centres, "ell": ell, "basis": name, "source": str(d),
+                   "check_max_abs": None}
+            if G_used is not None:
+                # the standardized columns, as area.load_basis rebuilds kern100/kern200
+                # (it does not take kern30)
+                try:
+                    F = np.column_stack([atoms.gq, kernel_features(atoms.z, centres, ell)])
+                    names = [*GQ_COLUMNS, *(f"k{j + 1}" for j in range(len(centres)))]
+                    pos = {c: j for j, c in enumerate(names)}
+                    F = F[:, [pos[str(c)] for c in saved["columns"]]]
+                    out["check_max_abs"] = check((F - saved["mean"]) / saved["scale"])
+                except Exception as err:                     # a check, not a stop
+                    out["check_max_abs"] = f"check failed: {err!r}"
+            return out
+    basis = build_kernel_basis(name, atoms)
+    return {"centres": basis.params["centres"], "ell": float(basis.params["ell"]), "basis": name,
+            "source": "rebuilt (step 1's recipe)", "check_max_abs": check(basis.H)}
+
+
 def restrict_unit(name, T0, Y, N, p, r_hat, kappa, cov, G, cls, names, mean_g, var_g,
-                  draws, info) -> PilotUnit:
+                  draws, info, z=None, kernel=None) -> PilotUnit:
     """Drop atoms with ``p = 0`` in every zone of the MAP and every draw."""
     stack = np.concatenate([p[None]] + [d["p"][None] for d in draws])
     keep = restrict_support(stack, T0)["keep"]
@@ -219,7 +351,8 @@ def restrict_unit(name, T0, Y, N, p, r_hat, kappa, cov, G, cls, names, mean_g, v
         stage2_mean=mean_g, stage2_var=var_g,
         draws=[{"N": d["N"], "p": np.ascontiguousarray(d["p"][:, keep]),
                 "r_hat": np.ascontiguousarray(d["r_hat"][:, keep])} for d in draws],
-        info=info)
+        info=info, z=None if z is None else np.ascontiguousarray(np.asarray(z)[keep]),
+        kernel=kernel or {})
 
 
 def build_real_unit(region_id: str, args) -> PilotUnit:
@@ -308,9 +441,13 @@ def build_real_unit(region_id: str, args) -> PilotUnit:
             "realized_converged": bool(res.converged), "realized_gap": float(res.gap),
             "stage2_negative_variances": int(negative), "seconds_map": seconds_map,
             "seconds_unit": time.perf_counter() - t0, "draw_rhat": args.draw_rhat,
-            "functionals_traced": int(cols.size), "functionals_all": int(fun.F)}
+            "functionals_traced": int(cols.size), "functionals_all": int(fun.F),
+            **s["hhsize_info"],
+            "kernel_basis": s["kernel"]["basis"], "kernel_source": s["kernel"]["source"],
+            "kernel_ell": s["kernel"]["ell"],
+            "kernel_check_max_abs": s["kernel"]["check_max_abs"]}
     return restrict_unit(region_id, T0, Y, N_int, p.T, r_hat, kappa, cov, fsub.G, fsub.cls,
-                         fsub.names, mean_g, var_g, draws, info)
+                         fsub.names, mean_g, var_g, draws, info, z=s["z"], kernel=s["kernel"])
 
 
 # --------------------------------------------------------------------------
@@ -380,10 +517,17 @@ def build_synthetic_unit(name: str, Z: int, args, seed: int) -> PilotUnit:
     joint = sp.csr_matrix((np.ones(M), (np.arange(M), t1 * n_cat + t2)), shape=(M, n_cat ** 2))
     rare = sp.csr_matrix((rng.random((M, 15)) < 0.004).astype(float))
     total = sp.csr_matrix(np.ones((M, 1)))
-    Gfull = sp.hstack([T0, B1, B2, rare, joint, total]).tocsr()
+    # version 2: household sizes and positions, from their own streams
+    rng_h = np.random.default_rng([seed, Z, PILOT_TAG, 7])
+    hh_size = persons + rng_h.geometric(0.6, M) - 1              # 7+ for about 1.6%
+    household = rng_h.random(M) > 0.02
+    Ghh, cls_hh, names_hh = household_size_columns(hh_size, household)
+    Gfull = sp.hstack([T0, B1, B2, rare, joint, Ghh, total]).tocsr()
     cls = np.array(["fitted"] * C + ["B1"] * B1.shape[1] + ["B2"] * B2.shape[1]
-                   + ["rare"] * 15 + ["joint"] * joint.shape[1] + ["total"])
+                   + ["rare"] * 15 + ["joint"] * joint.shape[1] + list(cls_hh) + ["total"])
     names = np.array([f"{c}:{k}" for c, k in zip(cls, range(cls.size))])
+    names[cls == "hhsize"] = names_hh
+    kernel, z = synthetic_kernel(T0, args.kernel_basis, [seed, Z, PILOT_TAG, 8])
     cols = select_columns(cls, args.max_per_class)
 
     N = rng.integers(args.synthetic_N // 2, args.synthetic_N + 1, Z)
@@ -430,9 +574,29 @@ def build_synthetic_unit(name: str, Z: int, args, seed: int) -> PilotUnit:
             "kappa": kappa, "phi": phi, "cells_per_zone": C, "totals_int": N.tolist(),
             "realized_converged": bool(res.converged), "realized_gap": float(res.gap),
             "seconds_unit": time.perf_counter() - t0, "draw_rhat": args.draw_rhat,
-            "functionals_traced": int(cols.size), "functionals_all": int(cls.size)}
+            "functionals_traced": int(cols.size), "functionals_all": int(cls.size),
+            "kernel_basis": kernel["basis"], "kernel_source": kernel["source"],
+            "kernel_ell": kernel["ell"]}
     return restrict_unit(name, T0, Y, N, p, r_hat, kappa, cov, Gfull[:, cols], cls[cols],
-                         names[cols], mean_g, var_g, draws, info)
+                         names[cols], mean_g, var_g, draws, info, z=z, kernel=kernel)
+
+
+def synthetic_kernel(T0: sp.csr_matrix, basis: str, seed) -> tuple[dict, np.ndarray]:
+    """Positions ``z`` (8-D: a random linear map of the atom's row of ``T0``
+    plus noise, columns standardized) and kernel centres by a kernel basis's
+    recipe (unweighted k-means, ``ℓ`` the median distance to the nearest
+    centre) for the synthetic units (module notes)."""
+    from pmedm_vb.latent.basis import nearest_distance, weighted_kmeans
+    from pmedm_vb.latent.deviation_basis import DEVIATION_BASES
+
+    rng = np.random.default_rng(seed)
+    M, C = T0.shape
+    z = np.asarray(T0 @ rng.normal(0.0, 1.0, (C, 8))) + 0.5 * rng.normal(0.0, 1.0, (M, 8))
+    z = (z - z.mean(0)) / z.std(0)
+    centres, _ = weighted_kmeans(z, np.ones(M), DEVIATION_BASES[basis], seed=1)
+    ell = float(np.median(nearest_distance(z, centres)))
+    return {"centres": centres, "ell": ell, "basis": basis,
+            "source": "synthetic (k-means on made-up z)", "check_max_abs": None}, z
 
 
 # --------------------------------------------------------------------------
@@ -460,26 +624,61 @@ def start_names(n: int) -> list[str]:
     return [names[k % len(names)] for k in range(n)]
 
 
-def run_chains(engine: str, inputs: SamplerInputs, cov, mix: ProposalMix, *, seed: int,
+def parse_pile_moves(spec: str) -> tuple[str, float]:
+    """``--pile-moves``: ``"<k>"`` (k per zone per sweep) or ``"<f>N"``
+    (``round(f N_b)`` per zone per sweep)."""
+    spec = str(spec).strip()
+    if spec.upper().endswith("N"):
+        f = float(spec[:-1]) if spec[:-1] else 1.0
+        if f < 0:
+            raise ValueError("--pile-moves must be non-negative")
+        return "fraction", f
+    k = int(spec)
+    if k < 0:
+        raise ValueError("--pile-moves must be non-negative")
+    return "count", float(k)
+
+
+def pile_counts(spec: tuple[str, float], N: np.ndarray) -> np.ndarray:
+    """Pile moves per zone per sweep for totals ``N`` (any shape)."""
+    kind, v = spec
+    N = np.asarray(N)
+    if kind == "fraction":
+        return np.rint(v * N).astype(np.int64)
+    return np.full(N.shape, int(v), dtype=np.int64)
+
+
+def run_chains(engine: str, inputs: SamplerInputs, cov, mix: ProposalMix4, *, seed: int,
                start_counts: np.ndarray | None, sweeps: int, G: sp.csr_matrix,
-               threads: int | None) -> dict:
-    """Every sweep recorded: functionals, log target, totals check, seconds."""
+               threads: int | None, kernel: KernelSpec | None = None,
+               piles: np.ndarray | None = None) -> dict:
+    """Every sweep recorded: functionals, log target, totals check, seconds.
+    ``kernel``, ``piles`` (pile moves per zone per sweep, ``(n, Z)``): the
+    version 2 moves (numba only)."""
+    has_piles = piles is not None and np.max(piles, initial=0) > 0
     if engine == "numba":
         from pmedm_vb.latent.sampler_numba import NumbaSampler
 
         t0 = time.perf_counter()
         sm = NumbaSampler(inputs, cov, mix, seed=seed, start_counts=start_counts,
-                          threads=threads)
+                          threads=threads, kernel=kernel,
+                          pile_moves=piles if has_piles else 0)
         setup = time.perf_counter() - t0
         res = sm.run(sweeps, thin=1, G=G, trace=True)
         return {"functionals": res.functionals.astype(np.float32), "log_target": res.log_target,
                 "totals_error": res.totals_error, "seconds": res.seconds_per_sweep,
                 "acceptance": res.acceptance, "drift": res.drift,
                 "moves_per_sweep": res.steps_per_sweep, "threads": res.threads,
-                "seconds_setup": setup, "seconds_trace": res.seconds_functionals}
+                "seconds_setup": setup, "seconds_trace": res.seconds_functionals,
+                "piles": res.piles, "piles_per_sweep": res.piles_per_sweep,
+                "kernel": sm.kernel_info()}
     from pmedm_vb.latent.sampler import RealizedSampler
     from pmedm_vb.latent.sampler_numba import log_target_numpy
 
+    if mix.kernel > 0 or has_piles:
+        raise ValueError("the torch engine has no kernel proposal or pile moves: use "
+                         "--mix with three weights and --pile-moves 0")
+    mix = ProposalMix(mix.occupancy, mix.realized, mix.prior)
     t0 = time.perf_counter()
     sm = RealizedSampler(inputs, cov, mix, seed=seed, start_counts=start_counts)
     setup = time.perf_counter() - t0
@@ -501,7 +700,8 @@ def run_chains(engine: str, inputs: SamplerInputs, cov, mix: ProposalMix, *, see
             "acceptance": sm.acceptance(), "drift": drift,
             # torch: a block step moves every zone once, a low-rank step one zone
             "moves_per_sweep": sm.steps_per_sweep * (Z if cov.kind == "block" else 1),
-            "threads": None, "seconds_setup": setup, "seconds_trace": t_trace}
+            "threads": None, "seconds_setup": setup, "seconds_trace": t_trace,
+            "piles": None, "piles_per_sweep": 0, "kernel": None}
 
 
 # --------------------------------------------------------------------------
@@ -619,7 +819,62 @@ def agreement(mean_s, var_s, ess, mean_g, var_g, cls) -> tuple[pd.DataFrame, dic
 
 def acceptance_text(acc: dict) -> str:
     return ", ".join(f"{k} {acc[k]['rate']:.3f} (non-null {acc[k]['rate_non_null']:.3f})"
-                     for k in PROPOSALS if acc[k]["proposed"])
+                     for k in acc if acc[k]["proposed"])
+
+
+def pile_text(piles: dict | None) -> str:
+    """One line of pile statistics (module notes)."""
+    if not piles:
+        return "pile moves: none"
+    hist = piles["n_histogram"]
+    tot = max(sum(hist.values()), 1)
+    return (f"pile moves: {piles['tried']} tried, {piles['null_pair']} null pairs (j = i or an "
+            f"empty table), {piles['n_zero']} with n = 0, {piles['off_support']} off the "
+            f"support, {piles['drawn']} splits drawn, {piles['changed']} changed "
+            f"({piles['share_changed']:.3f}); mean |Delta| {piles['mean_abs_delta']:.3f}, mean n "
+            f"{piles['mean_n']:.3f}; n histogram (share of non-null pairs) "
+            + ", ".join(f"{b}: {hist[b] / tot:.3f}" for b in PILE_N_BINS))
+
+
+def kernel_text(info: dict | None) -> str:
+    if not info:
+        return "kernel tables: none"
+    return (f"kernel tables: {info['centres']} centres, {info['tables']} weight rows "
+            f"(w = {info['weights']}), truncation {info['trunc']:g}: median "
+            f"{info['kept_per_centre_median']:.0f} atoms per centre (min "
+            f"{info['kept_per_centre_min']}, {info['kept_share']:.3f} of all), "
+            f"{info['empty_tables']} empty tables, {info['megabytes']:.1f} MB")
+
+
+def compare_table(root: Path | None, region: str, tab: pd.DataFrame) -> tuple[list, dict | None]:
+    """Lines comparing the mixing table with a first pilot's (module notes):
+    per class the median bulk ESS per sweep and per second and the max R-hat,
+    new and first, and the new/first ratios (per second: all chains' kept
+    sweeps' wall time, so it includes the new moves' cost)."""
+    if root is None:
+        return [], None
+    path = Path(root) / region / "pilot.json"
+    if not path.exists():
+        return [f"  (compare: no {path})"], None
+    old = json.loads(path.read_text())
+    prev = pd.DataFrame(old["mixing"])
+    cols = ["ess_bulk_per_sweep_median", "ess_bulk_per_second_median", "rhat_max"]
+    for c in cols:
+        if c not in prev:
+            prev[c] = np.nan
+    both = (tab.set_index("cls")[cols].join(prev.set_index("cls")[cols], how="outer",
+                                            lsuffix="_new", rsuffix="_first"))
+    both["ratio_per_sweep"] = both["ess_bulk_per_sweep_median_new"] / both[
+        "ess_bulk_per_sweep_median_first"]
+    both["ratio_per_second"] = both["ess_bulk_per_second_median_new"] / both[
+        "ess_bulk_per_second_median_first"]
+    both = both.rename(columns=lambda c: c.replace("ess_bulk_per_", "").replace("_median", ""))
+    secs_old = old.get("seconds_per_sweep_median")
+    lines = [f"  beside the first pilot ({path}; mix {old.get('mix')}, "
+             f"{secs_old if secs_old is None else round(secs_old, 3)} s per sweep):",
+             _indent(both.to_string(float_format=lambda v: f"{v:.4g}"))]
+    return lines, {"path": str(path), "table": both.reset_index().to_dict(orient="records"),
+                   "seconds_per_sweep_first": secs_old}
 
 
 # --------------------------------------------------------------------------
@@ -631,7 +886,11 @@ def pilot_region(unit: PilotUnit, args, out: Path) -> dict:
     from pmedm_vb.progress import logger, save_npz, write_text
 
     out.mkdir(parents=True, exist_ok=True)
-    mix = ProposalMix(*args.mix)
+    mix = ProposalMix4(*args.mix)
+    piles_spec = parse_pile_moves(args.pile_moves)
+    kspec = None
+    if mix.kernel > 0 or pile_counts(piles_spec, unit.N).max() > 0:
+        kspec = unit.kernel_spec(args.kernel_trunc, args.kernel_weights)
     n = args.chains
     T = args.burn + args.sweeps
     seed_base = [args.seed if args.seed is not None else 0, PILOT_TAG,
@@ -643,15 +902,19 @@ def pilot_region(unit: PilotUnit, args, out: Path) -> dict:
              f"zone totals N_b = {unit.N.tolist()} (sum {int(unit.N.sum())}); atoms on the "
              f"support {unit.T0.shape[0]}, cells per zone {unit.T0.shape[1]}, largest row nnz "
              f"{int(np.diff(unit.T0.indptr).max())}; kappa {unit.kappa:.1f}; functionals traced "
-             f"{unit.G.shape[1]} per zone; proposal mix "
-             f"{[round(float(w), 3) for w in mix.weights()]}"]
+             f"{unit.G.shape[1]} per zone; proposal mix a/b/c/e "
+             f"{[round(float(w), 3) for w in mix.weights()]}; pile moves per zone per sweep "
+             f"{pile_counts(piles_spec, unit.N).tolist()} (--pile-moves {args.pile_moves}); "
+             f"kernel basis {unit.kernel.get('basis')} (ell {unit.kernel.get('ell', float('nan')):.4g}, "
+             f"{unit.kernel.get('source')})"]
 
     # -- MAP parameters, dispersed starts -----------------------------------
     inputs = unit.inputs(n)
     starts = dispersed_starts(unit, n, rng)
     t0 = time.perf_counter()
     ch = run_chains(args.engine, inputs, unit.cov, mix, seed=int(rng.integers(2 ** 31)),
-                    start_counts=starts, sweeps=T, G=unit.G, threads=args.threads)
+                    start_counts=starts, sweeps=T, G=unit.G, threads=args.threads,
+                    kernel=kspec, piles=pile_counts(piles_spec, inputs.N))
     wall = time.perf_counter() - t0
     fun, lt = ch["functionals"], ch["log_target"]
     kept = slice(args.burn, T)
@@ -662,6 +925,7 @@ def pilot_region(unit: PilotUnit, args, out: Path) -> dict:
     tab = class_table(unit.cls, mx, draws_total, seconds_kept)
     lt_mix = mixing(lt[kept].T[:, :, None])
     bi = burn_in(lt)
+    compare_lines, compare = compare_table(args.compare_root, unit.name, tab)
     agree_tab, agree = agreement(mx["mean"], mx["var"], mx["ess_bulk"], unit.stage2_mean,
                                  unit.stage2_var, unit.cls)
     live = tab[(tab["cls"] != "all") & tab["ess_bulk_per_sweep_median"].notna()]
@@ -690,8 +954,12 @@ def pilot_region(unit: PilotUnit, args, out: Path) -> dict:
               f"  seconds per sweep: median {np.median(secs):.3f}, mean {secs.mean():.3f} "
               f"(moves + refresh); traces {ch['seconds_trace']:.1f} s in all; set-up "
               f"{ch['seconds_setup']:.1f} s; wall {wall:.0f} s",
-              f"  moves per second (all chains): {n * ch['moves_per_sweep'] / np.median(secs):.3g}",
+              f"  single-unit moves per second (all chains): "
+              f"{n * ch['moves_per_sweep'] / np.median(secs):.3g}; pile moves per chain per sweep "
+              f"{ch['piles_per_sweep']}",
               f"  acceptance: {acceptance_text(ch['acceptance'])}",
+              f"  {pile_text(ch['piles'])}",
+              f"  {kernel_text(ch['kernel'])}",
               f"  zone totals check: max |sum C_b - N_b| over sweeps = "
               f"{int(np.max(ch['totals_error']))} (0 = holds); drift {ch['drift']:.1e}",
               f"  log target: R-hat {lt_mix['rhat'][0]:.4f}, bulk ESS {lt_mix['ess_bulk'][0]:.0f} "
@@ -704,6 +972,7 @@ def pilot_region(unit: PilotUnit, args, out: Path) -> dict:
               _indent(tab.to_string(index=False, float_format=lambda v: f"{v:.4g}")),
               f"  DECISION (plan §5): median bulk ESS per sweep >= {ESS_PER_SWEEP_MIN} in every "
               f"class and max R-hat < {RHAT_MAX}: {'PASS' if mixing_pass else 'FAIL'}",
+              *compare_lines,
               "", f"== agreement with stage 2 at the MAP parameters (stage 2 mean >= "
               f"{AGREE_MIN_MEAN:g}; |dm| <= {AGREE_MEAN_SD} sd, variance ratio in {AGREE_VAR}; "
               f"MC se from bulk ESS):",
@@ -720,7 +989,8 @@ def pilot_region(unit: PilotUnit, args, out: Path) -> dict:
         Td = args.burn + (args.draw_sweeps or args.sweeps)
         t1 = time.perf_counter()
         dch = run_chains(args.engine, dinp, unit.cov, mix, seed=int(rng.integers(2 ** 31)),
-                         start_counts=None, sweeps=Td, G=unit.G, threads=args.threads)
+                         start_counts=None, sweeps=Td, G=unit.G, threads=args.threads,
+                         kernel=kspec, piles=pile_counts(piles_spec, dinp.N))
         dk = slice(args.burn, Td)
         per = []
         rows = []
@@ -744,6 +1014,7 @@ def pilot_region(unit: PilotUnit, args, out: Path) -> dict:
         med = per[per["cls"] != "all"].pivot(index="draw", columns="cls",
                                              values="ess_bulk_per_sweep_median")
         draws_summary = {"draws": nd, "sweeps": Td, "acceptance": dch["acceptance"],
+                         "piles": dch["piles"], "kernel": dch["kernel"],
                          "seconds_per_sweep": float(np.median(dch["seconds"])),
                          "ess_bulk_per_sweep_median_by_draw": med.round(4).to_dict(orient="index"),
                          "totals_error_max": int(np.max(dch["totals_error"])),
@@ -755,6 +1026,8 @@ def pilot_region(unit: PilotUnit, args, out: Path) -> dict:
                   f"  totals per draw: {[d['N'].tolist() for d in unit.draws]}",
                   f"  acceptance: {acceptance_text(dch['acceptance'])}; totals check "
                   f"{draws_summary['totals_error_max']}; drift {dch['drift']:.1e}",
+                  f"  {pile_text(dch['piles'])}",
+                  f"  {kernel_text(dch['kernel'])}",
                   "  median bulk ESS per sweep by class (rows: draws; MAP chains for reference "
                   "below):",
                   _indent(med.to_string(float_format=lambda v: f"{v:.4f}")),
@@ -767,7 +1040,9 @@ def pilot_region(unit: PilotUnit, args, out: Path) -> dict:
         from pmedm_vb.latent.sampler import RealizedSampler
 
         k = args.torch_chains
-        sm = RealizedSampler(unit.inputs(k), unit.cov, mix, seed=1)
+        # torch has (a)-(c) only: their weights, renormalized
+        sm = RealizedSampler(unit.inputs(k), unit.cov,
+                             ProposalMix(mix.occupancy, mix.realized, mix.prior), seed=1)
         sm.time_steps(10)
         per_step = sm.time_steps(args.torch_steps)
         tsweep = per_step * sm.steps_per_sweep
@@ -778,11 +1053,15 @@ def pilot_region(unit: PilotUnit, args, out: Path) -> dict:
         lines += ["", f"== torch, {k} chains: {1e3 * per_step:.2f} ms per step (every zone of "
                   f"every chain moves once), {tsweep:.1f} s per torch sweep ({sm.steps_per_sweep} "
                   f"steps); {k * unit.Z / per_step:.3g} moves/s vs numba's {nmps:.3g} with {n} "
-                  "chains"]
+                  "chains (torch: proposals (a)-(c) only, no pile moves)"]
 
     summary = {
         "region": unit.name, "engine": args.engine, "info": unit.info, "chains": n,
         "sweeps": args.sweeps, "burn": args.burn, "mix": list(mix.weights()),
+        "pile_moves": args.pile_moves, "piles_per_sweep": ch["piles_per_sweep"],
+        "piles": ch["piles"], "kernel": ch["kernel"], "kernel_trunc": args.kernel_trunc,
+        "kernel_weights": args.kernel_weights, "kernel_basis": unit.kernel.get("basis"),
+        "compare": compare,
         "moves_per_sweep": ch["moves_per_sweep"], "threads": ch["threads"],
         "seconds_per_sweep_median": float(np.median(secs)), "wall": wall,
         "acceptance": ch["acceptance"], "drift": ch["drift"],
@@ -832,7 +1111,17 @@ def parse_args(argv=None):
     parser.add_argument("--chains", type=int, default=4)
     parser.add_argument("--engine", default="numba", choices=("numba", "torch"))
     parser.add_argument("--mix", type=lambda x: [float(v) for v in x.split(",")],
-                        default=[0.4, 0.3, 0.3], help="proposal weights a,b,c")
+                        default=[0.3, 0.2, 0.2, 0.3],
+                        help="proposal weights a,b,c,e (three: e = 0, version 1's mixture)")
+    parser.add_argument("--kernel-basis", default="kern30", choices=("kern30", "kern100"),
+                        help="kernel of proposal (e) and of the pile moves")
+    parser.add_argument("--kernel-trunc", type=float, default=0.0,
+                        help="relative truncation of each centre's table (0: none)")
+    parser.add_argument("--kernel-weights", default="p", choices=("p", "r_hat"))
+    parser.add_argument("--pile-moves", default="1N",
+                        help="pile moves per zone per sweep: an integer, or <f>N for f N_b")
+    parser.add_argument("--compare-root", type=Path, default=None,
+                        help="a first pilot's output root, to print its mixing table beside")
     parser.add_argument("--max-per-class", type=int, default=100)
     parser.add_argument("--param-draws", type=int, default=4)
     parser.add_argument("--draw-sweeps", type=int, default=None,
@@ -849,9 +1138,37 @@ def parse_args(argv=None):
             if action.required and action.dest != "out":
                 action.required = False
     args = parser.parse_args(argv)
-    if len(args.mix) != 3:
-        parser.error("--mix takes three weights")
+    if len(args.mix) == 3:
+        args.mix = [*args.mix, 0.0]
+    if len(args.mix) != 4:
+        parser.error("--mix takes four weights a,b,c,e (or three, with e = 0)")
+    try:
+        parse_pile_moves(args.pile_moves)
+    except ValueError as err:
+        parser.error(f"--pile-moves: {err}")
     return args
+
+
+def prepare_version2(s: dict, args) -> None:
+    """Version 2's shared inputs (module notes): the ``hhsize`` columns
+    appended to the functionals, the atoms' positions and the kernel."""
+    from pmedm_vb.latent.atoms import load_atoms
+    from pmedm_vb.latent.posterior import Functionals
+    from pmedm_vb.progress import logger
+
+    Ghh, cls_hh, names_hh, info = real_household_sizes(s["data"])
+    fun = s["fun"]
+    s["fun"] = Functionals(G=sp.hstack([fun.G, Ghh]).tocsc(), cls=np.append(fun.cls, cls_hh),
+                           names=np.append(fun.names, names_hh))
+    s["hhsize_info"] = info
+    atoms = load_atoms(s["data"], args.run)
+    s["z"] = np.ascontiguousarray(atoms.z)
+    s["kernel"] = kernel_centres(args.kernel_basis, args, atoms,
+                                 G_used=s["G"] if args.kernel_basis == args.basis else None)
+    del atoms
+    logger.info("version 2: hhsize %s; kernel %s (%d centres, ell %.4g, %s; check %s)",
+                info, args.kernel_basis, len(s["kernel"]["centres"]), s["kernel"]["ell"],
+                s["kernel"]["source"], s["kernel"]["check_max_abs"])
 
 
 def main(argv=None) -> None:
@@ -891,8 +1208,11 @@ def main(argv=None) -> None:
         "step": "5 pilot", "pilot_tag": PILOT_TAG, "replicate": args.replicate,
         "sweeps": args.sweeps, "burn": args.burn, "chains": args.chains, "engine": args.engine,
         "mix": args.mix, "max_per_class": args.max_per_class, "param_draws": args.param_draws,
-        "draw_rhat": args.draw_rhat})
+        "draw_rhat": args.draw_rhat, "kernel_basis": args.kernel_basis,
+        "kernel_trunc": args.kernel_trunc, "kernel_weights": args.kernel_weights,
+        "pile_moves": args.pile_moves})
     s4c._SHARED["choice"] = choice
+    prepare_version2(s4c._SHARED, args)
     for rid in chosen:
         unit = build_real_unit(rid, args)
         pilot_region(unit, args, args.out / rid)

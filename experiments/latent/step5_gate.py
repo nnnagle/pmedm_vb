@@ -1,6 +1,6 @@
-"""Step 5, phase 1: the exactness gate of the realized-population sampler
-(``PLAN_latent_step5.md`` version 1, §4 item 1 and §5 first bullet;
-:mod:`pmedm_vb.latent.sampler`, and its numba version
+"""Step 5, phase 1 (and 1b): the exactness gate of the realized-population
+sampler (``PLAN_latent_step5.md`` version 2, §4 items 1 and 1b, §5 first
+bullet; :mod:`pmedm_vb.latent.sampler`, and its numba version
 :mod:`pmedm_vb.latent.sampler_numba`).
 
     PYTHONPATH=src python experiments/latent/step5_gate.py [--quick] [--device cpu]
@@ -36,6 +36,26 @@ Prints a report; writes nothing. Three parts:
    against the full posterior shows the reducibility. A broken variant (the
    proposal correction ``Q_i(C')/Q_j(C)`` dropped, mixture) shows the check
    fails when it should.
+
+   **Phase 1b** (``--engine numba`` only; the torch sampler lacks these
+   moves and skips them): the version 2 moves on the same toy, with a small
+   synthetic kernel for it (:func:`enumeration_kernel`: 2-D positions of
+   the 4 atoms, 3 centres, ``ℓ = 0.7``; the third centre's nearest atom is
+   atom 3, off zone 2's support, so with truncation zone 2 has an empty
+   table there and the kernel proposal's null branch is exercised). Rows:
+   the kernel proposal (e) alone (irreducible on the toy: every ``K_ik > 0``
+   and ``w = p > 0`` on each zone's support, so ``Q_e(j | i) > 0`` for every
+   pair of support atoms); the mixture with (e) (0.3/0.2/0.2/0.3), with
+   ``κ`` finite, with truncated tables (``ε = 0.3``) and with ``κ = ∞``; pile
+   moves alone (no single-unit moves; 3 per zone per sweep; irreducible:
+   ``r̂ > 0`` on every support atom and ``Q_e > 0``, so every pair of support
+   atoms can exchange any number of units); pile moves (2 per zone per
+   sweep) with the mixture with (e), ``κ`` finite and ``κ = ∞``. Broken
+   variants: (e) alone with its reverse probability ``Q_e(i | j)`` replaced
+   by ``Q_e(j | i)``; pile moves alone without the likelihood term. The
+   state is recorded once per sweep at every sweep, whatever the moves did
+   (a pile move with ``n = 0`` included). The last columns give the share of
+   pile splits that changed the counts and the mean ``|Δ|``.
 2. **Agreement with stage 2.** A synthetic problem where the Gaussian is
    accurate (run also with ``N`` and ``κ`` scaled by 1/4, where it is less
    so: a gap that is the Gaussian's should shrink about 2× from that run to
@@ -84,15 +104,19 @@ from pmedm_vb.latent.sampler import (
 )
 
 
-def make_sampler(args, inputs: SamplerInputs, cov, mix: ProposalMix, *, seed: int,
-                 start_counts: np.ndarray | None = None):
-    """The ``--engine``'s sampler (same constructor and ``run`` for both)."""
+def make_sampler(args, inputs: SamplerInputs, cov, mix, *, seed: int,
+                 start_counts: np.ndarray | None = None, **extra):
+    """The ``--engine``'s sampler (same constructor and ``run`` for both).
+    ``extra``: the numba sampler's version 2 settings (``kernel``,
+    ``pile_moves``, ``single_moves``, ``pile_drop_likelihood``)."""
     if args.engine == "torch":
+        if extra:
+            raise ValueError("the torch sampler has no kernel proposal or pile moves")
         return RealizedSampler(inputs, cov, mix, device=args.device, seed=seed,
                                start_counts=start_counts)
     from pmedm_vb.latent.sampler_numba import NumbaSampler  # needs numba
     return NumbaSampler(inputs, cov, mix, seed=seed, start_counts=start_counts,
-                        threads=args.threads)
+                        threads=args.threads, **extra)
 
 # --------------------------------------------------------------------------
 # Part 1: enumeration
@@ -218,6 +242,39 @@ def enumeration_problem(kappa: float) -> tuple[SamplerInputs, np.ndarray, np.nda
     return inputs, block, lowrank, {"true": true}
 
 
+def enumeration_kernel(trunc: float = 0.0):
+    """The toy's kernel for the version 2 moves (module notes)."""
+    from pmedm_vb.latent.sampler_numba import KernelSpec
+
+    z = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.2, 1.2]])
+    centres = np.array([[0.0, 0.0], [0.5, 1.2], [1.5, 1.5]])
+    return KernelSpec(z, centres, 0.7, trunc=trunc)
+
+
+def phase1b_configs() -> list:
+    """Phase 1b rows (module notes): ``(name, mix, kappa, target, extra)``."""
+    from pmedm_vb.latent.sampler_numba import ProposalMix4
+
+    ker, ker_t = enumeration_kernel(), enumeration_kernel(0.3)
+    mix_e = ProposalMix4(0.3, 0.2, 0.2, 0.3)
+    return [
+        ("(e) kernel alone", ProposalMix4(0, 0, 0, 1), "finite", "full", {"kernel": ker}),
+        ("mixture + (e) 0.3/0.2/0.2/0.3", mix_e, "finite", "full", {"kernel": ker}),
+        ("mixture + (e), truncated eps 0.3", mix_e, "finite", "full", {"kernel": ker_t}),
+        ("mixture + (e), kappa = inf", mix_e, "inf", "full", {"kernel": ker}),
+        ("pile moves alone (3/zone/sweep)", mix_e, "finite", "full",
+         {"kernel": ker, "pile_moves": 3, "single_moves": False}),
+        ("pile (2/zone) + mixture with (e)", mix_e, "finite", "full",
+         {"kernel": ker, "pile_moves": 2}),
+        ("pile (2/zone) + mixture (e), kappa=inf", mix_e, "inf", "full",
+         {"kernel": ker, "pile_moves": 2}),
+        ("BROKEN: (e) alone, reverse Q_e(i|j)->Q_e(j|i)",
+         ProposalMix4(0, 0, 0, 1, kernel_reverse_wrong=True), "finite", "full", {"kernel": ker}),
+        ("BROKEN: pile alone, likelihood dropped", mix_e, "finite", "full",
+         {"kernel": ker, "pile_moves": 3, "single_moves": False, "pile_drop_likelihood": True}),
+    ]
+
+
 def run_enumeration(args) -> None:
     n_chains, long, burn = args.enum_chains, args.enum_sweeps, args.enum_burn
     short = long // 10
@@ -235,19 +292,27 @@ def run_enumeration(args) -> None:
                ("mixture, kappa = inf", ProposalMix(0.4, 0.3, 0.3), "inf", "full"),
                ("BROKEN: mixture, correction dropped",
                 ProposalMix(0.4, 0.3, 0.3, drop_correction=True), "finite", "full")]
+    configs = [(*c, {}) for c in configs]
+    if args.engine == "numba" and "b" in args.enum_sets:
+        if "a" not in args.enum_sets:
+            configs = []
+        configs += phase1b_configs()
+    elif args.engine == "torch":
+        print("  (torch engine: phase 1b's kernel proposal and pile moves are numba-only, skipped)")
     problems = {}
     for kap in ("finite", "inf"):
         inp, block, lowrank, extra = enumeration_problem(6.0 if kap == "finite" else np.inf)
         problems[kap] = (inp, block, lowrank, extra)
-    header = (f"  {'backend':8s} {'proposal':42s} {'states':>6s} | {'TV short':>8s} "
+    header = (f"  {'backend':8s} {'proposal':46s} {'states':>6s} | {'TV short':>8s} "
               f"{'noise':>7s} {'ratio':>5s} | {'TV long':>8s} {'noise':>7s} {'ratio':>5s} | "
-              f"{'shrink':>6s} | accept a/b/c")
+              f"{'shrink':>6s} | accept a/b/c" + ("/e; piles changed, mean|D|"
+                                                  if args.engine == "numba" else ""))
     print(header)
     print("  " + "-" * (len(header) - 2))
     start_fixed = np.array([[2, 1, 0, 0], [2, 1, 1, 0], [0, 2, 1, 0]])
     for backend in ("block", "lowrank"):
         enums = {}
-        for name, mix, kap, target in configs:
+        for name, mix, kap, target, extra in configs:
             inp1, block, lowrank, _ = problems[kap]
             cov = block if backend == "block" else lowrank
             if kap not in enums:
@@ -257,10 +322,12 @@ def run_enumeration(args) -> None:
             inputs = SamplerInputs(inp1.T0, inp1.Y, np.repeat(inp1.N, n, 0), inp1.p[0],
                                    inp1.r_hat[0], inp1.kappa)
             start = None
-            if mix.weights()[1] == 0 and mix.weights()[2] == 0:
+            w = mix.weights()
+            if w[0] == 1.0 and not extra.get("pile_moves"):        # occupancy alone
                 start = np.broadcast_to(start_fixed, (n, Z, M)).copy()
             sampler = make_sampler(args, inputs, cov, mix,
-                                   seed=zlib.crc32(f"{backend}:{name}".encode()), start_counts=start)
+                                   seed=zlib.crc32(f"{backend}:{name}".encode()), start_counts=start,
+                                   **extra)
             res = sampler.run(long, burn=burn, keep_counts="dense")
             counts = np.stack(res.counts)                               # (long, n, Z, M)
             codes = en.encode(counts)                                    # (long, n)
@@ -275,12 +342,15 @@ def run_enumeration(args) -> None:
                 out.append((tv(f, pi), noise))
             acc = res.acceptance
             rates = "/".join("-" if np.isnan(acc[k]["rate"]) else f"{acc[k]['rate']:.2f}"
-                             for k in ("occupancy", "realized", "prior"))
+                             for k in acc)
+            piles = getattr(res, "piles", None)
+            if piles is not None:
+                rates += (f"; {piles['share_changed']:.2f}, {piles['mean_abs_delta']:.2f}")
             n_states = int((pi > 0).sum())
-            print(f"  {backend:8s} {name:42s} {n_states:6d} | {out[0][0]:8.4f} {out[0][1]:7.4f} "
+            print(f"  {backend:8s} {name:46s} {n_states:6d} | {out[0][0]:8.4f} {out[0][1]:7.4f} "
                   f"{out[0][0] / out[0][1]:5.2f} | {out[1][0]:8.4f} {out[1][1]:7.4f} "
                   f"{out[1][0] / out[1][1]:5.2f} | {out[0][0] / out[1][0]:6.2f} | {rates}"
-                  f"   (drift {res.drift:.1e})")
+                  f"   (drift {res.drift:.1e})", flush=True)
     print()
 
 
@@ -565,7 +635,45 @@ def run_timing_numba(args) -> None:
     print("  (us/move: CPU time of one move, threads / (moves/s); us/step: wall time for every "
           "slot (block) or chain (low rank) to move once, comparable to torch's ms/step; "
           "moves/s: over all of them.)")
+    run_timing_v2(args, grid[-1])
     print()
+
+
+def run_timing_v2(args, threads: int) -> None:
+    """Phase 1b timing: the version 2 moves at part 3's size (block backend,
+    16 chains, 160 slots): CPU microseconds per single-unit move with the
+    kernel proposal in the mixture (0.3/0.2/0.2/0.3) against version 1's
+    mixture, and per pile move (labels' rebuild included), for 30 and 100
+    centres on made-up 16-D positions (no truncation)."""
+    from pmedm_vb.latent.basis import nearest_distance, weighted_kmeans
+    from pmedm_vb.latent.sampler_numba import KernelSpec, NumbaSampler, ProposalMix4
+
+    moves = args.timing_moves
+    inputs, cov, _K = timing_problem(16, 1000, "block")
+    M = inputs.shape[2]
+    z = np.random.default_rng(4).normal(0.0, 1.0, (M, 16))
+    slots = 16 * 10
+    print(f"  version 2 moves, block backend, 16 chains ({slots} slots), {threads} threads, "
+          f"{moves} moves per slot:")
+    base = NumbaSampler(inputs, cov, ProposalMix(0.4, 0.3, 0.3), seed=1, threads=threads)
+    base.time_moves(20)
+    t_base = base.time_moves(moves)
+    print(f"    version 1 mixture 0.4/0.3/0.3: {1e6 * threads * t_base / (slots * moves):.3f} "
+          "us per move (CPU)")
+    for k in (30, 100):
+        centres, _ = weighted_kmeans(z, np.ones(M), k, seed=1, max_iter=20)
+        spec = KernelSpec(z, centres, float(np.median(nearest_distance(z, centres))))
+        sm = NumbaSampler(inputs, cov, ProposalMix4(0.3, 0.2, 0.2, 0.3), seed=1,
+                          threads=threads, kernel=spec, pile_moves=1)
+        sm.time_moves(20)
+        t_mix = sm.time_moves(moves)
+        sm.time_piles(20)
+        t_pile = sm.time_piles(moves)
+        st = sm.pile_stats()
+        print(f"    {k:3d} centres: mixture with (e) {1e6 * threads * t_mix / (slots * moves):.3f} "
+              f"us per move ({t_mix / t_base:.2f} x version 1); pile move "
+              f"{1e6 * threads * t_pile / (slots * moves):.3f} us (mean n {st['mean_n']:.2f}); "
+              f"kernel tables {sm.kernel_info()['megabytes']:.0f} MB")
 
 
 def main() -> None:
@@ -578,6 +686,9 @@ def main() -> None:
                         default=[1, 2, 4, 8, 16], help="numba engine, part 3: thread counts")
     parser.add_argument("--quick", action="store_true", help="shorter runs (a smoke test)")
     parser.add_argument("--parts", default="123")
+    parser.add_argument("--enum-sets", default="ab",
+                        help="part 1 rows: a = phase 1 (version 1 moves), b = phase 1b (numba "
+                             "only: kernel proposal and pile moves); default both")
     args = parser.parse_args()
     q = args.quick
     args.enum_chains = 256
