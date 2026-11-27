@@ -285,6 +285,7 @@ class PilotUnit:
     info: dict = field(default_factory=dict)
     z: np.ndarray | None = None          # (M, d) atom positions (version 2's kernel)
     kernel: dict = field(default_factory=dict)  # {"centres", "ell", "basis", "source"}
+    keep: np.ndarray | None = None       # (M,) the support's atoms, indices into all atoms
 
     def kernel_spec(self, trunc: float = 0.0, weights: str = "p") -> KernelSpec:
         return KernelSpec(self.z, self.kernel["centres"], self.kernel["ell"], trunc=trunc,
@@ -429,11 +430,18 @@ def restrict_unit(name, T0, Y, N, p, r_hat, kappa, cov, G, cls, names, mean_g, v
         draws=[{"N": d["N"], "p": np.ascontiguousarray(d["p"][:, keep]),
                 "r_hat": np.ascontiguousarray(d["r_hat"][:, keep])} for d in draws],
         info=info, z=None if z is None else np.ascontiguousarray(np.asarray(z)[keep]),
-        kernel=kernel or {})
+        kernel=kernel or {}, keep=keep)
 
 
-def build_real_unit(region_id: str, args) -> PilotUnit:
-    """Simulation S's unit, as ``step4e_cut.fit_unit`` builds it (module notes)."""
+def build_real_unit(region_id: str, args, *, tag: int = PILOT_TAG, replicate: int | None = None,
+                    parts: dict | None = None) -> PilotUnit:
+    """Simulation S's unit, as ``step4e_cut.fit_unit`` builds it (module notes).
+    ``tag``: the parameter draws' seed tag (the pilot's by default);
+    ``replicate``: default ``args.replicate``; ``parts``: if a dictionary, it
+    is filled with the unit's intermediate objects (the replicate, engine,
+    fits, the realized MAP's result on all atoms, the totals module and the
+    set-up's timings) for a caller that writes step 4e's files (step 5's
+    regional run); the unit returned is the same either way."""
     import step4c_joint as s4c
     import step4e_cut as s4e
     from scipy.linalg import cholesky, solve_triangular
@@ -454,7 +462,8 @@ def build_real_unit(region_id: str, args) -> PilotUnit:
 
     s = s4c._SHARED
     pick = s["choice"][f"S/{region_id}"]
-    c, m, k = pick["c"], pick["tau_multiple"], args.replicate
+    c, m = pick["c"], pick["tau_multiple"]
+    k = args.replicate if replicate is None else replicate
     t0 = time.perf_counter()
     rep = s4c.Replicate("S", region_id, k)
     kappa = c * rep.n_A
@@ -469,8 +478,8 @@ def build_real_unit(region_id: str, args) -> PilotUnit:
     engine = free_share_engine(rep.area, s["H"], rep.ref["theta"], s["G"],
                                zone_log_bases(rep.ref["logb"], rep.ref["zone"], rep.Z, s4c.MODE),
                                s["pairs"], rep.N_A, kappa)
-    fit, _starts = fit_cut_U(engine, rep.theta0, tau, psi, gtol=args.map_gtol,
-                             max_iter=args.map_max_iter)
+    fit, starts = fit_cut_U(engine, rep.theta0, tau, psi, gtol=args.map_gtol,
+                            max_iter=args.map_max_iter)
     seconds_map = time.perf_counter() - t0
     phi = dirmult_phi(rep.N_A, kappa)
     T0 = s["X"]["A"]
@@ -483,19 +492,25 @@ def build_real_unit(region_id: str, args) -> PilotUnit:
         return res.r, res
 
     p = engine.probabilities(rep.theta0, fit.U)                           # (M, Z)
+    t_r = time.perf_counter()
     r_hat, res = realized(p, N_int)
+    seconds_realized = time.perf_counter() - t_r
     # stage 2 at the MAP parameters, the traced columns only
+    t_s2 = time.perf_counter()
     fun = s["fun"]
     cols = select_columns(fun.cls, args.max_per_class)
     fsub = Functionals(G=fun.G[:, cols].tocsc(), cls=fun.cls[cols], names=fun.names[cols])
     psi_int = shares_to_psi(N_int / N_int.sum())
     ev = engine.evaluate(rep.theta0, fit.U, psi_int, gradient=False)
     mean_g, var_g, negative = free_share_conditional_moments(engine, ev, fsub, T0)
+    seconds_stage2 = time.perf_counter() - t_s2
 
     # parameter draws of the cut posterior (as cut_posterior_samples)
     rng = np.random.default_rng([args.seed, s4c.SIM_INDEX["S"], rep.index, k, 2,
-                                 int(round(m * 1000)), int(round(kappa)), PILOT_TAG])
+                                 int(round(m * 1000)), int(round(kappa)), tag])
     draws = []
+    seconds_rhat = 0.0
+    t_d = time.perf_counter()
     if args.param_draws > 0:
         ev0 = engine.evaluate(rep.theta0, fit.U, fit.psi, gradient=False)
         Rf = cholesky(cut_information(engine, ev0, fit.tau), lower=False)
@@ -505,8 +520,11 @@ def build_real_unit(region_id: str, args) -> PilotUnit:
         for d in range(args.param_draws):
             Nd = round_totals(totals[d] + (rep.N_A - totals[d].sum()) / rep.Z, rep.N_A)
             pd_ = engine.probabilities(rep.theta0, Us[d].reshape(engine.Z, engine.K))
+            t_r = time.perf_counter()
             rd = realized(pd_, Nd)[0] if args.draw_rhat == "refit" else r_hat
+            seconds_rhat += time.perf_counter() - t_r
             draws.append({"N": Nd, "p": pd_.T, "r_hat": rd})
+    seconds_draws = time.perf_counter() - t_d
     cov = BlockCovariance.from_factors(rep.sigma, rep.Z)
     info = {"simulation": "S", "region": region_id, "replicate": k, "c": c, "tau_multiple": m,
             "tau": tau, "kappa": kappa, "phi": phi, "N_A": rep.N_A, "n_A": rep.n_A,
@@ -523,6 +541,12 @@ def build_real_unit(region_id: str, args) -> PilotUnit:
             "kernel_basis": s["kernel"]["basis"], "kernel_source": s["kernel"]["source"],
             "kernel_ell": s["kernel"]["ell"],
             "kernel_check_max_abs": s["kernel"]["check_max_abs"]}
+    if parts is not None:
+        parts.update(rep=rep, engine=engine, fit=fit, starts=starts, res=res, p=p, N_int=N_int,
+                     totals_mean=mean, totals_cov=tcov, x=x, Sx=Sx, shares=shares, cols=cols,
+                     seconds={"map": seconds_map, "realized": seconds_realized,
+                              "stage2": seconds_stage2, "draws": seconds_draws,
+                              "draws_rhat": seconds_rhat})
     return restrict_unit(region_id, T0, Y, N_int, p.T, r_hat, kappa, cov, fsub.G, fsub.cls,
                          fsub.names, mean_g, var_g, draws, info, z=s["z"], kernel=s["kernel"])
 
@@ -567,8 +591,14 @@ def dense_conditional_moments(T0, Y, N, p, kappa, Sigma, G) -> tuple[np.ndarray,
     return mean, var
 
 
-def build_synthetic_unit(name: str, Z: int, args, seed: int) -> PilotUnit:
-    """A made-up unit with the real one's structure (module notes)."""
+def build_synthetic_unit(name: str, Z: int, args, seed: int, *, kappa_c: float = 0.25,
+                         parts: dict | None = None) -> PilotUnit:
+    """A made-up unit with the real one's structure (module notes).
+    ``kappa_c``: ``κ = kappa_c n_A`` (the pilot's 0.25 by default);
+    ``parts``: if a dictionary, it is filled with every functional (not only
+    the traced ones: ``G_all``, ``cls_all``, ``names_all``), the made-up
+    truth, ``Σ`` and the traced columns; the unit returned is the same
+    either way."""
     from pmedm_vb.latent.free_shares import solve_conditional_fixed_shares
     from pmedm_vb.latent.overdispersed import dirmult_phi
 
@@ -610,7 +640,7 @@ def build_synthetic_unit(name: str, Z: int, args, seed: int) -> PilotUnit:
     N = rng.integers(args.synthetic_N // 2, args.synthetic_N + 1, Z)
     N_A = int(N.sum())
     n_A = N_A // 8
-    kappa = 0.25 * n_A
+    kappa = kappa_c * n_A
     logq = rng.normal(0.0, 1.0, M)
     p = np.exp(logq[None, :] + rng.normal(0.0, 0.7, (Z, M)))
     p[home[None, :] == np.arange(Z)[:, None]] = 0.0       # leave-zone-out supports
@@ -654,6 +684,9 @@ def build_synthetic_unit(name: str, Z: int, args, seed: int) -> PilotUnit:
             "functionals_traced": int(cols.size), "functionals_all": int(cls.size),
             "kernel_basis": kernel["basis"], "kernel_source": kernel["source"],
             "kernel_ell": kernel["ell"]}
+    if parts is not None:
+        parts.update(G_all=Gfull, cls_all=cls, names_all=names, truth=truth, Sigma=Sigma,
+                     cols=cols, res=res)
     return restrict_unit(name, T0, Y, N, p, r_hat, kappa, cov, Gfull[:, cols], cls[cols],
                          names[cols], mean_g, var_g, draws, info, z=z, kernel=kernel)
 
