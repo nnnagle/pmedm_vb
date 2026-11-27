@@ -10,6 +10,7 @@
 > | 1 | 2026-11-24 | approved; every item of §7 as drafted (items 1 and 2 with the reasons now given) |
 > | 2 | 2026-11-25 | after the pilot (§8): proposal (d) is dropped; two moves are added, the user's kernel proposal (e) and exact two-atom pile moves (§3a); a phase 1b gate for them, and the pilot is rerun (§4). Thresholds unchanged |
 > | 3 | 2026-11-25 | after the second pilot (§8): pile pairs chosen from occupied records, as a Metropolis–Hastings move (§3b), with an ablation of the kernel's part in choosing the second record; warm-started parameter-draw chains; the mixing rule restated in terms of a compute budget of 30 minutes per regional unit (§5); a phase 1c gate and a third pilot (§4) |
+| 3 (record) | 2026-11-27 | the third pilot recorded (§8c) with the settings it chose for phase 3, which the plan left to it; no change to the plan |
 >
 > "Derived here" marks derivations made for this project, not taken from
 > the literature.
@@ -345,3 +346,46 @@ move per unit per sweep.
   0.05–0.09 sd (households by size 0.16–0.17), tails to 1–1.9 sd; the 90%
   rule fails on the tails. The sampler being exact, this is the Gaussian's
   error; its consequence for calibration is phase 3's question.
+
+## 8c. The third pilot (version 3's moves)
+
+As §8b, with pile pairs from occupied records (§3b) and parameter-draw
+chains warm-started; two arms, the second record by the kernel route and by
+$\hat r_b$. Projections under §5's version 3 rule: one cold burn-in of 300
+sweeps for the 4 MAP chains, then 50 draw chains sharing the rest of the 30
+minutes, each with the largest re-burn seen.
+
+* **Every pile pair holds units** (null pairs 0.01–0.02%, against 66–71%);
+  mean pile 86–185 units, a quarter of drawn splits changed.
+* **Burn-in and re-burn:** log target $\hat R$ at most 1.002 from sweep 0,
+  burn-in 300 kept; warm-started chains re-burn in 2–15 sweeps (starts 1–7
+  sd below their chain's median).
+* **Mixing** at the MAP parameters (median bulk ESS per sweep; max
+  $\hat R$; share of functionals with $\hat R < 1.01$):
+
+  | class | knoxville_core, kernel | knoxville_core, $\hat r_b$ | nashville_core, kernel | nashville_core, $\hat r_b$ |
+  |---|---|---|---|---|
+  | fitted | 0.97; 1.002; 1 | 0.98; 1.001; 1 | 0.92; 1.005; 1 | 0.96; 1.001; 1 |
+  | rare | 0.92; 1.002; 1 | 0.96; 1.001; 1 | 0.85; 1.024; 0.978 | 0.92; 1.007; 1 |
+  | B1 | 0.65; 1.004; 1 | 0.83; 1.004; 1 | 0.30; 1.019; 0.990 | 0.47; 1.005; 1 |
+  | B2 | 0.70; 1.002; 1 | 0.84; 1.001; 1 | 0.29; 1.030; 0.997 | 0.44; 1.006; 1 |
+  | joint | 0.64; 1.011; 0.998 | 0.82; 1.002; 1 | 0.27; 1.073; 0.988 | 0.44; 1.007; 1 |
+  | households by size | 0.94; 1.000; 1 | 0.98; 1.000; 1 | 0.88; 1.001; 1 | 0.95; 1.000; 1 |
+
+  Seconds per sweep (4 chains, 16 threads): 0.39 and 0.35 (knoxville_core),
+  0.80 and 0.73 (nashville_core), kernel and $\hat r_b$.
+* **Version 3's rule:** the $\hat r_b$ arm passes in both regions, projected
+  effective draws per unit 15,700–18,700 (knoxville_core) and 3,600–8,000
+  (nashville_core) for the classes' median functionals; the kernel arm
+  passes in knoxville_core and fails in nashville_core (joint $\hat R$ up to
+  1.073). The kernel route does not help the choice of the second record.
+
+**Settings for phase 3** (chosen by this pilot, as §4 leaves them to it):
+pile moves, one per unit per sweep, first record from the occupied ones and
+second from $\hat r_b$; single-unit mix (a)/(b)/(c)/(e) at 0.3/0.2/0.2/0.3
+with kernel `kern30`, as tested; numba on CPU, one 16-core node per unit;
+4 MAP chains, burn-in 300; draw chains warm-started from them, re-burn 30
+sweeps (twice the largest seen), then 4 draws of $C$ thinned 25 sweeps
+apart. All 13 regions and 10 replicates of S (§4's phase 3, "if the pilot
+allows").
+
